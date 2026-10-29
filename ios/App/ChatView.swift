@@ -163,13 +163,17 @@ struct ChatView: View {
         Circle().fill(Color.danger).frame(width: 10, height: 10)
         Text(Duration.seconds(r.elapsed).formatted(.time(pattern: .minuteSecond))).font(.subheadline.weight(.medium)).monospacedDigit()
           .accessibilityLabel("Recording, \(Duration.seconds(r.elapsed).formatted(.time(pattern: .minuteSecond)))")
-        // Newest bars on the right, so speech scrolls in like a tape.
-        HStack(spacing: 2) {
-          ForEach(Array(r.levels.suffix(80).enumerated()), id: \.offset) { _, v in
-            Capsule().fill(Color.ink.opacity(0.7)).frame(width: 3, height: 28 * (0.12 + 0.88 * min(1, (v * 4).squareRoot())))
+        // Newest bars on the right, so speech scrolls in like a tape. A Canvas takes only the width
+        // it's given; a row of bar views asked for all 80 bars' width and pushed the screen wider.
+        let levels = r.levels
+        Canvas { ctx, size in
+          for (i, v) in levels.suffix(Int(size.width / 5)).reversed().enumerated() {
+            let h = size.height * (0.12 + 0.88 * min(1, (v * 4).squareRoot()))
+            let bar = CGRect(x: size.width - CGFloat(i + 1) * 5 + 2, y: (size.height - h) / 2, width: 3, height: h)
+            ctx.fill(Path(roundedRect: bar, cornerRadius: 1.5), with: .color(Color.ink.opacity(0.7)))
           }
         }
-        .frame(maxWidth: .infinity, alignment: .trailing).frame(height: 28).clipped()
+        .frame(maxWidth: .infinity).frame(height: 28)
         .accessibilityHidden(true)
       }
       .padding(.horizontal, 14).frame(minHeight: 44)
