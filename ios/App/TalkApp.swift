@@ -45,9 +45,10 @@ struct TalkApp: App {
     }
     calls.attach(t)
     delegate.talk = t
-    t.start()
-    UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { ok, _ in
-      if ok { Task { @MainActor in UIApplication.shared.registerForRemoteNotifications() } }
+    t.start(active: phase == .active)
+    Task { @MainActor in
+      let ok = (try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge])) ?? false
+      if ok { UIApplication.shared.registerForRemoteNotifications() }
     }
   }
 }

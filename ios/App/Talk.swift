@@ -1,6 +1,7 @@
 import CryptoKit
 import Foundation
 import Observation
+import UserNotifications
 
 struct Decrypted: Identifiable, Hashable {
   let message: Message
@@ -18,10 +19,12 @@ final class Talk {
   private(set) var hasOlder: [String: Bool] = [:]
   var activeId: String?
   var onSignedOut: () -> Void = {}
+  private(set) var isActive = false
 
   @ObservationIgnored let socket: Socket
   @ObservationIgnored private var keys: [String: Data] = [:]
   @ObservationIgnored private var loaded = Set<String>()
+  @ObservationIgnored private var receivedMessageIDs = Set<Int>()
   @ObservationIgnored private var files: [String: Data] = [:]
   private static let page = 50
 
@@ -39,7 +42,8 @@ final class Talk {
     // Reconnects (phones drop sockets constantly) refetch what we may have missed.
     socket.on("connect") { [weak self] _ in
       guard let self else { return }
-      socket.emit("active", true)
+      socket.emit("active", isActive)
+      retryDeviceRegistration()
       Task {
         try? await self.load()
         for id in self.loaded { try? await self.fetchPage(id) }
@@ -48,12 +52,14 @@ final class Talk {
     socket.onSignedOut = { [weak self] in self?.onSignedOut() }
   }
 
-  func start() {
+  func start(active: Bool) {
+    isActive = active
     socket.connect()
     Task { try? await load() }
   }
 
   func setActive(_ visible: Bool) {
+    isActive = visible
     if visible { socket.connect() }
     socket.emit("active", visible)
   }
@@ -66,7 +72,7 @@ final class Talk {
       var m: Me = try await api.call("GET", "/api/me")
       m.conversations = m.conversations.map { c in
         var c = c
-        if c.id == activeId { c.unread = 0 }
+        if isActive && c.id == activeId { c.unread = 0 }
         return c
       }
       me = m
@@ -132,21 +138,31 @@ final class Talk {
   }
 
   private func receive(_ msg: Message) async {
+    let firstDelivery = receivedMessageIDs.insert(msg.id).inserted
     _ = try? await rawKey(msg.convId)
-    merge(msg.convId, [decrypt(msg)])
+    let decrypted = decrypt(msg)
+    merge(msg.convId, [decrypted])
     let mine = msg.senderId == account.userId
-    let seen = activeId == msg.convId
+    let seen = isActive && activeId == msg.convId
     guard var m = me else { return }
     m.conversations = m.conversations.map { c in
       guard c.id == msg.convId else { return c }
       var c = c
       c.lastMessageAt = msg.createdAt
       c.lastMessage = msg
-      if !mine && !seen { c.unread += 1 }
+      if firstDelivery && !mine && !seen { c.unread += 1 }
       return c
     }.sorted { ($0.lastMessageAt ?? 0) > ($1.lastMessageAt ?? 0) }
     me = m
     if seen { markRead(msg.convId) }
+    if firstDelivery, let content = MessageNotifications.content(
+      message: msg, body: decrypted.content, sender: Names.of(msg.senderId) ?? "Talk",
+      userId: account.userId, isActive: isActive, activeId: activeId
+    ) {
+      let request = UNNotificationRequest(identifier: "message.\(msg.id)", content: content, trigger: nil)
+      do { try await UNUserNotificationCenter.current().add(request) }
+      catch { print("[notifications] Could not show message alert: \(error.localizedDescription)") }
+    }
   }
 
   func markRead(_ convId: String) {
@@ -247,13 +263,28 @@ final class Talk {
 
   func registerDevice(token: Data, kind: String) {
     let hex = token.map { String(format: "%02x", $0) }.joined()
+    UserDefaults.standard.set(hex, forKey: "token.\(kind)")
+    uploadDeviceToken(hex, kind: kind)
+  }
+
+  private func retryDeviceRegistration() {
+    for kind in ["alert", "voip"] {
+      if let token = UserDefaults.standard.string(forKey: "token.\(kind)") {
+        uploadDeviceToken(token, kind: kind)
+      }
+    }
+  }
+
+  private func uploadDeviceToken(_ hex: String, kind: String) {
     #if DEBUG
     let env = "sandbox"
     #else
     let env = "production"
     #endif
-    UserDefaults.standard.set(hex, forKey: "token.\(kind)")
-    Task { let _: OK? = try? await api.call("POST", "/api/devices", ["token": hex, "kind": kind, "env": env]) }
+    Task {
+      do { let _: OK = try await api.call("POST", "/api/devices", ["token": hex, "kind": kind, "env": env]) }
+      catch { print("[notifications] Device registration failed; will retry on reconnect: \(error.localizedDescription)") }
+    }
   }
 
   func signOut() async {

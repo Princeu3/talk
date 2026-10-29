@@ -1,18 +1,18 @@
 # Generate the Xcode project with `xcodegen` in this folder; Talk.xcodeproj is not checked in.
 name: Talk
 options:
-  bundleIdPrefix: dev.princeuniverse
+  bundleIdPrefix: com.abhishekshekhar
   deploymentTarget:
     iOS: "26.0"
   createIntermediateGroups: true
 settings:
   base:
-    DEVELOPMENT_TEAM: RMVX38Q6NU
+    DEVELOPMENT_TEAM: 34XFNGD2MY
     CODE_SIGN_STYLE: Automatic
     SWIFT_VERSION: "6.0"
     SWIFT_APPROACHABLE_CONCURRENCY: YES
     MARKETING_VERSION: "1.0"
-    CURRENT_PROJECT_VERSION: "1"
+    CURRENT_PROJECT_VERSION: "3"
     TARGETED_DEVICE_FAMILY: "1"
 packages:
   WebRTC:
@@ -28,21 +28,24 @@ targets:
       - package: WebRTC
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: dev.princeuniverse.talk
+        TARGETED_DEVICE_FAMILY: "1"
+        PRODUCT_BUNDLE_IDENTIFIER: com.abhishekshekhar.talk
         SWIFT_DEFAULT_ACTOR_ISOLATION: MainActor
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
     info:
       path: App/Info.plist
       properties:
         CFBundleDisplayName: Talk
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         UILaunchScreen: {}
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         UIBackgroundModes: [voip, audio]
         NSMicrophoneUsageDescription: Talk uses the microphone for calls and voice messages.
         NSCameraUsageDescription: Talk uses the camera for video calls and photos you send.
         NSUserActivityTypes: [INStartCallIntent, INSendMessageIntent]
-        # The bundled WebRTC carries its own standard crypto (DTLS-SRTP), outside the OS.
-        ITSAppUsesNonExemptEncryption: true
+        # Apple encryption questionnaire: standard crypto, no France distribution.
+        # No export documentation required for this release configuration.
+        ITSAppUsesNonExemptEncryption: false
         NSLocalNetworkUsageDescription: Talk connects calls directly over your local network when the other person is nearby.
         # http only to local dev servers; real servers are https
         NSAppTransportSecurity:
@@ -51,7 +54,7 @@ targets:
       path: App/Talk.entitlements
       properties:
         aps-environment: development
-        keychain-access-groups: [$(AppIdentifierPrefix)dev.princeuniverse.talk.shared]
+        keychain-access-groups: [$(AppIdentifierPrefix)com.abhishekshekhar.talk.shared]
         com.apple.developer.usernotifications.communication: true
   NotificationService:
     type: app-extension
@@ -59,27 +62,33 @@ targets:
     sources: [NSE, Shared]
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: dev.princeuniverse.talk.notifications
+        TARGETED_DEVICE_FAMILY: "1"
+        PRODUCT_BUNDLE_IDENTIFIER: com.abhishekshekhar.talk.notifications
     info:
       path: NSE/Info.plist
       properties:
         CFBundleDisplayName: Talk Notifications
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         NSExtension:
           NSExtensionPointIdentifier: com.apple.usernotifications.service
           NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).NotificationService
     entitlements:
       path: NSE/NotificationService.entitlements
       properties:
-        keychain-access-groups: [$(AppIdentifierPrefix)dev.princeuniverse.talk.shared]
+        keychain-access-groups: [$(AppIdentifierPrefix)com.abhishekshekhar.talk.shared]
   TalkTests:
     type: bundle.unit-test
     platform: iOS
     sources:
       - Tests
       - Shared
+      - App/Theme.swift
+      - App/MessageNotifications.swift
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: dev.princeuniverse.talk.tests
+        TARGETED_DEVICE_FAMILY: "1"
+        PRODUCT_BUNDLE_IDENTIFIER: com.abhishekshekhar.talk.tests
+        SWIFT_DEFAULT_ACTOR_ISOLATION: MainActor
         GENERATE_INFOPLIST_FILE: YES
 schemes:
   Talk:
