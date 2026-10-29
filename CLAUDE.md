@@ -7,7 +7,7 @@ Node 24+ runs `server/*.ts` directly (type stripping): imports need `.ts` extens
 - `npm run check`: typecheck
 - `npm test`: end-to-end tests (spawns the server)
 - `railway up`: deploy (project `talk`, volume at `/data`)
-- `railway up relay --path-as-root -p 093e4eba-958d-4c1e-8d34-915c4288894a -e production -s relay`: deploy the push relay (project `talk-push`); plain `railway up .` from `relay/` fails with "prefix not found"
+- `railway up relay --path-as-root -p cfe9ad88-4f60-417e-808b-bfe41b9d4da4 -e production -s relay`: deploy the push relay (project `talk-push` in the personal workspace "Prince Upadhyay's Projects", never the work one); plain `railway up .` from `relay/` fails with "prefix not found"
 - `cd ios && xcodegen`: regenerate `Talk.xcodeproj` from `project.yml` (the project file is not committed)
 - `xcodebuild test -project ios/Talk.xcodeproj -scheme Talk -destination 'platform=iOS Simulator,name=iPhone 18 Pro'`: iPhone crypto interop tests
 
