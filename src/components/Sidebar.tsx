@@ -62,7 +62,7 @@ export default function Sidebar({ talk, onNew, onSettings }: { talk: Talk; onNew
             const name = convName(me, conv)
             const last = talk.messages[conv.id]?.at(-1)
             const active = conv.id === talk.activeId
-            const text = preview(last?.content)
+            const text = preview(last?.content, last?.senderId === me.user.id)
             const who = !last ? '' : last.senderId === me.user.id ? 'You: ' : conv.kind === 'group' ? `${userName(me, last.senderId)}: ` : ''
             return (
               <li key={conv.id}>

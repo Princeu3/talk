@@ -32,8 +32,28 @@ export interface MessageBody {
   from: string // must equal Message.senderId, or the client flags it
   text?: string
   files?: FileRef[]
-  call?: { room: string }
+  call?: CallLog
 }
+
+export type CallKind = 'audio' | 'video'
+
+// Posted by the caller when a call ends. `room` marks an old meetup call,
+// which can no longer be joined.
+export interface CallLog {
+  kind?: CallKind
+  ms?: number // talk time; 0 means nobody answered
+  room?: string
+}
+
+// Live call signaling. Nothing here is stored: once a call ends, it's gone.
+export interface CallRing {
+  id: string
+  convId: string
+  from: string
+  kind: CallKind
+}
+
+export type CallEnd = 'hangup' | 'declined' | 'cancelled' | 'missed' | 'elsewhere' | 'lost'
 
 export interface FileRef {
   id: string
@@ -54,11 +74,10 @@ export interface Me {
   users: User[]
   conversations: Conversation[]
   vapidPublicKey: string
-  callUrl: string
 }
 
 export interface SendPayload {
   convId: string
   body: string
-  notify?: 'call'
+  quiet?: boolean // no push (call logs: the ring already notified)
 }

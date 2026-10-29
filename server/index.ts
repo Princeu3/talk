@@ -7,11 +7,11 @@ import { fileURLToPath } from 'node:url'
 import { Server } from 'socket.io'
 import { db, BLOB_DIR, setting, isMember, memberIds } from './db.ts'
 import { authMatches, hashAuth, setSession, clearSession, userFromCookie, requireUser, throttled, recordFail } from './auth.ts'
-import { vapidPublicKey, saveSubscription, notify } from './push.ts'
+import { vapidPublicKey, saveSubscription, notifyIfAway } from './push.ts'
+import { callHandlers } from './calls.ts'
 import type { Conversation, Me, Message, SendPayload, User } from '../shared/types.ts'
 
 const PORT = Number(process.env.PORT ?? 3000)
-const CALL_URL = process.env.CALL_URL ?? 'https://meetup-production-55f1.up.railway.app'
 const MAX_FILE = 50 * 1024 * 1024
 const SETUP_CODE = setting('SETUP_CODE', () => randomBytes(12).toString('base64url'))
 
@@ -106,7 +106,7 @@ app.get('/api/me', (req, res) => {
     members: memberIds(c.id),
     lastMessage: (last.get(c.id) as unknown as Message | undefined) ?? null,
   }))
-  res.json({ user, users, conversations, vapidPublicKey, callUrl: CALL_URL } satisfies Me)
+  res.json({ user, users, conversations, vapidPublicKey } satisfies Me)
 })
 
 app.post('/api/invites', (req, res) => {
@@ -122,6 +122,29 @@ app.post('/api/push', (req, res) => {
     return void res.status(400).json({ error: 'bad subscription' })
   saveSubscription(req.userId, sub)
   res.json({ ok: true })
+})
+
+// Cloudflare TURN relays calls that can't connect directly (cellular, strict
+// NATs). One 24h credential is shared and refreshed every 12h, so each one
+// handed out still has 12h left.
+type IceServer = { urls: string | string[]; username?: string; credential?: string }
+let ice: { servers: IceServer[]; until: number } | undefined
+app.get('/api/ice', async (_req, res) => {
+  const { CF_TURN_KEY_ID: key, CF_TURN_API_TOKEN: token } = process.env
+  if (!key || !token) return void res.json([{ urls: 'stun:stun.cloudflare.com:3478' }])
+  if (!ice || ice.until < Date.now()) {
+    const r = await fetch(`https://rtc.live.cloudflare.com/v1/turn/keys/${key}/credentials/generate-ice-servers`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ ttl: 86400 }),
+    })
+    if (!r.ok) throw new Error(`TURN credentials: HTTP ${r.status}`)
+    const { iceServers } = (await r.json()) as { iceServers: IceServer[] }
+    // Browsers block port 53, so those URLs only ever time out.
+    const servers = iceServers.map((s) => ({ ...s, urls: [s.urls].flat().filter((u) => !/:53\b/.test(u)) }))
+    ice = { servers, until: Date.now() + 12 * 3600 * 1000 }
+  }
+  res.set('Cache-Control', 'no-store').json(ice.servers)
 })
 
 // --- conversations ---
@@ -234,6 +257,8 @@ io.use((socket, next) => {
   next()
 })
 
+const calls = callHandlers(io)
+
 io.on('connection', (socket) => {
   const me = socket.data.userId as string
   socket.join(`user:${me}`)
@@ -241,7 +266,7 @@ io.on('connection', (socket) => {
   // Client reports page visibility; a user with no visible tab gets a push.
   socket.on('active', (v: unknown) => void (socket.data.active = !!v))
 
-  socket.on('send', async (p: SendPayload, ack: (r: { message?: Message; error?: string }) => void) => {
+  socket.on('send', (p: SendPayload, ack: (r: { message?: Message; error?: string }) => void) => {
     if (typeof ack !== 'function') return
     if (typeof p?.convId !== 'string' || !isSealed(p.body, 64 * 1024) || !isMember(p.convId, me))
       return ack({ error: 'bad request' })
@@ -254,14 +279,12 @@ io.on('connection', (socket) => {
     io.to(members.map((u) => `user:${u}`)).emit('message', message)
     ack({ message })
 
+    if (p.quiet) return
     const sender = (db.prepare('select name from users where id = ?').get(me) as { name: string }).name
-    for (const u of members) {
-      if (u === me) continue
-      const sockets = await io.in(`user:${u}`).fetchSockets()
-      if (sockets.some((s) => s.data.active)) continue
-      notify(u, { title: sender, body: p.notify === 'call' ? 'Incoming call' : 'New message', convId: p.convId })
-    }
+    for (const u of members) if (u !== me) notifyIfAway(io, u, { title: sender, body: 'New message', convId: p.convId })
   })
+
+  calls(socket)
 })
 
 // --- SPA ---

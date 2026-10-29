@@ -9,20 +9,8 @@ export interface Decrypted extends Message {
   forged: boolean // inner sender differs from the one the server claims
 }
 
-export interface Incoming {
-  convId: string
-  room: string
-  from: string
-}
-
 const PAGE = 50
 export const MAX_FILE = 50 * 1024 * 1024
-
-const randomRoom = () => {
-  const a = 'abcdefghijkmnpqrstuvwxyz23456789'
-  const r = crypto.getRandomValues(new Uint8Array(16))
-  return Array.from(r, (b) => a[b % a.length]).join('').replace(/(.{4})(?!$)/g, '$1-')
-}
 
 const bump = (list: Conversation[], msg: Message, unread: boolean) =>
   list
@@ -34,7 +22,6 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
   const [messages, setMessages] = useState<Record<string, Decrypted[]>>({})
   const [hasOlder, setHasOlder] = useState<Record<string, boolean>>({})
   const [activeId, setActiveId] = useState<string | null>(null)
-  const [incoming, setIncoming] = useState<Incoming | null>(null)
 
   const meRef = useRef(me)
   const activeRef = useRef(activeId)
@@ -113,8 +100,6 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
       const mine = msg.senderId === meRef.current?.user.id
       const seen = activeRef.current === msg.convId && !document.hidden
       setMe((m) => m && { ...m, conversations: bump(m.conversations, msg, !mine && !seen) })
-      if (!mine && d.content?.call && Date.now() - msg.createdAt < 60_000)
-        setIncoming({ convId: msg.convId, room: d.content.call.room, from: msg.senderId })
     }
     const onSync = () => void load().catch(() => {})
     // Reconnects (phones drop sockets constantly) refetch what we may have missed.
@@ -176,10 +161,10 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
     if (first) return fetchPage(convId, first.id)
   }
 
-  const send = async (convId: string, content: Omit<MessageBody, 'from'>, notify?: 'call') => {
+  const send = async (convId: string, content: Omit<MessageBody, 'from'>, quiet?: boolean) => {
     const { key } = await keyFor(convId)
     const body = await c.sealMessage(key, convId, { ...content, from: meRef.current!.user.id })
-    const r = await socket.timeout(15_000).emitWithAck('send', { convId, body, notify })
+    const r = await socket.timeout(15_000).emitWithAck('send', { convId, body, quiet })
     if (r.error) throw new Error(r.error)
   }
 
@@ -241,16 +226,9 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
     await load()
   }
 
-  const startCall = async (convId: string) => {
-    const room = randomRoom()
-    await send(convId, { call: { room } }, 'call')
-    return room
-  }
-
   return {
-    me, messages, hasOlder, activeId, incoming, totalUnread,
-    open, loadOlder, send, sendWithFiles, fileUrl, createConversation, addMember, startCall,
-    dismissIncoming: () => setIncoming(null),
+    me, messages, hasOlder, activeId, totalUnread,
+    open, loadOlder, send, sendWithFiles, fileUrl, createConversation, addMember,
   }
 }
 

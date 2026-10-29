@@ -13,7 +13,7 @@ Node 24+ runs `server/*.ts` directly (type stripping): imports need `.ts` extens
 - Set long-lived cache headers through `sendFile` options, never before the call, or a cached error sticks for a year.
 - Write Tailwind classes as full literal strings; built names like `rounded-t${side}-md` never get generated.
 - Railway sets `PORT=8080`; point domains at 8080.
-- Calls are P2P through meetup; its TURN relay is Cloudflare (`CF_TURN_KEY_ID`/`CF_TURN_API_TOKEN` on the meetup service), since Railway can't host TURN (no UDP).
+- Calls are 1:1 WebRTC, signaled over our socket (`server/calls.ts`, `src/lib/useCall.ts`) and never stored. `/api/ice` hands out Cloudflare TURN credentials from `CF_TURN_KEY_ID`/`CF_TURN_API_TOKEN`, since Railway can't host TURN (no UDP). To test the cellular path, force `iceTransportPolicy: 'relay'` in the browser.
 - Test browser profiles may keep year-cached 500s for old attachments; a 500 with no server log line is that cache, not a bug.
 
 ## Design

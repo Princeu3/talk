@@ -2,7 +2,7 @@
 
 Private messages, files and calls for a few people. Runs at https://talk.princeuniverse.dev.
 
-Messages and files are encrypted on your device before they leave it. The server stores only ciphertext plus who talked to whom and when. Calls open in the meetup app as a direct (peer-to-peer) video call.
+Messages and files are encrypted on your device before they leave it. The server stores only ciphertext plus who talked to whom and when. Voice and video calls go directly between the two devices, encrypted by WebRTC.
 
 ## Join (for friends)
 
@@ -16,7 +16,9 @@ Messages and files are encrypted on your device before they leave it. The server
 
 ## Calls
 
-Tap the video icon in a chat. The other person gets a ringing banner (and a notification if Talk is closed). Calls are direct between devices. If a call can't connect, tap **Open in browser** in the call screen.
+Tap the phone or video icon in a chat (1:1 chats only). The other person's screen rings, or they get a notification if Talk is closed. To chat during a call, tap the arrow at the top left; tap the bar at the top to go back to the call.
+
+Calls go straight between the two devices. When a network blocks that (cellular, hotel or office wifi), they go through Cloudflare's relay, which only passes encrypted media along. Switching between wifi and cellular mid-call reconnects on its own.
 
 ## Run locally
 
@@ -42,7 +44,7 @@ Railway project `talk`, one service with a volume at `/data`. Deploy with `railw
 | --- | --- |
 | `DATA_DIR` | Where the database and encrypted files live (`/data` on Railway) |
 | `NODE_ENV` | `production` turns on secure cookies |
-| `CALL_URL` | Meetup base URL (defaults to the meetup Railway app) |
+| `CF_TURN_KEY_ID`, `CF_TURN_API_TOKEN` | Cloudflare TURN key for calls; without them calls use STUN only and fail on many cellular networks |
 | `SETUP_CODE`, `SESSION_SECRET`, `VAPID_KEYS` | Optional; generated and stored in the database when unset |
 
 The first-account link (`/?invite=<setup code>`) is printed in the deploy logs while no account exists.

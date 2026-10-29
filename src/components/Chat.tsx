@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ClipboardEvent, type FormEvent, type KeyboardEvent } from 'react'
 import type { Talk, Decrypted } from '../lib/useTalk.ts'
-import type { FileRef, Voice } from '../../shared/types.ts'
-import { convName, dayLabel, fileSize, userName } from '../lib/format.ts'
+import type { CallKind, FileRef, Voice } from '../../shared/types.ts'
+import { callSummary, convName, dayLabel, fileSize, userName } from '../lib/format.ts'
 import { canRecord, startRecording, type Recording } from '../lib/voice.ts'
 import { Avatar } from './Sidebar.tsx'
-import { Back, Clip, Close, FileIcon, Lock, Mic, Send, UserPlus, Video } from './icons.tsx'
+import { Back, Clip, Close, FileIcon, Lock, Mic, Phone, Send, UserPlus, Video } from './icons.tsx'
 import { iconButton } from './Sidebar.tsx'
 import { VoicePlayer, VoiceRecorder } from './Voice.tsx'
 
@@ -117,13 +117,13 @@ function corners(mine: boolean, first: boolean, last: boolean) {
   return `rounded-[20px] ${top} ${bottom}`
 }
 
-function Bubble({ m, mine, first, last, talk, onJoin, onZoom }: {
+function Bubble({ m, mine, first, last, talk, onCall, onZoom }: {
   m: Decrypted
   mine: boolean
   first: boolean
   last: boolean
   talk: Talk
-  onJoin: (room: string) => void
+  onCall?: (kind: CallKind) => void // unset in groups and during a call
   onZoom: (u: string) => void
 }) {
   const c = m.content
@@ -135,16 +135,26 @@ function Bubble({ m, mine, first, last, talk, onJoin, onZoom }: {
         <Lock size={14} /> Couldn't decrypt this message
       </div>
     )
-  if (c.call)
+  if (c.call) {
+    const kind = c.call.kind ?? 'video'
+    const { title, detail, missed } = callSummary(c.call, mine)
     return (
-      <div className={`${shape} ${tone} flex items-center gap-3 py-2.5 pl-4 pr-2.5`}>
-        <Video />
-        <span className="flex-1">{mine ? 'You started a call' : `${userName(talk.me!, m.senderId)} started a call`}</span>
-        <button onClick={() => onJoin(c.call!.room)} className="pressable min-h-9 rounded-full bg-fill px-4 text-sm font-semibold text-on-fill">
-          Join
-        </button>
+      <div className={`${shape} ${tone} flex items-center gap-3 py-2 pl-2.5 pr-2`}>
+        <span className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full ${missed ? 'bg-danger/15 text-danger' : 'bg-ink/8'}`}>
+          {kind === 'audio' ? <Phone size={18} /> : <Video size={20} />}
+        </span>
+        <div className="min-w-0 flex-1 pr-1">
+          <div className={`font-semibold leading-tight ${missed ? 'text-danger' : ''}`}>{title}</div>
+          {detail && <div className="text-sm text-ink/80">{detail}</div>}
+        </div>
+        {onCall && (
+          <button onClick={() => onCall(kind)} className="pressable min-h-9 shrink-0 rounded-full bg-fill px-3.5 text-sm font-semibold text-on-fill">
+            {mine ? 'Call again' : 'Call back'}
+          </button>
+        )}
       </div>
     )
+  }
   const mediaOnly = !c.text && c.files?.every((f) => /^(image|video)\//.test(f.type))
   return (
     <div className={`${shape} ${mediaOnly ? 'overflow-hidden' : `${tone} px-4 py-2.5`} flex flex-col gap-2 whitespace-pre-wrap break-words`}>
@@ -155,12 +165,11 @@ function Bubble({ m, mine, first, last, talk, onJoin, onZoom }: {
   )
 }
 
-export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople }: {
+export default function Chat({ talk, convId, onBack, onCall, onAddPeople }: {
   talk: Talk
   convId: string
   onBack: () => void
-  onCall: () => void
-  onJoin: (room: string) => void
+  onCall?: (kind: CallKind) => void // unset while a call is on
   onAddPeople: () => void
 }) {
   const me = talk.me!
@@ -317,9 +326,16 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
             <UserPlus size={22} />
           </button>
         )}
-        <button onClick={onCall} aria-label="Start a call" className={iconButton}>
-          <Video size={24} />
-        </button>
+        {conv.kind === 'dm' && (
+          <>
+            <button onClick={() => onCall?.('audio')} disabled={!onCall} aria-label="Voice call" className={iconButton}>
+              <Phone size={22} />
+            </button>
+            <button onClick={() => onCall?.('video')} disabled={!onCall} aria-label="Video call" className={iconButton}>
+              <Video size={24} />
+            </button>
+          </>
+        )}
       </header>
 
       <div
@@ -368,7 +384,7 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
             <div key={m.id} className={`flex flex-col ${first ? 'mt-3' : 'mt-0.5'}`}>
               {newDay && <div className="mb-2 mt-3 self-center text-xs font-medium text-mut">{dayLabel(m.createdAt)}</div>}
               {first && !mine && conv.kind === 'group' && <div className="mb-1 ml-3 text-xs font-medium text-mut">{userName(me, m.senderId)}</div>}
-              <Bubble m={m} mine={mine} first={first} last={last} talk={talk} onJoin={onJoin} onZoom={setZoom} />
+              <Bubble m={m} mine={mine} first={first} last={last} talk={talk} onCall={conv.kind === 'dm' ? onCall : undefined} onZoom={setZoom} />
               {last && (
                 <time className={`mt-1 px-2 text-xs tabular-nums text-mut ${mine ? 'self-end' : 'self-start'}`}>
                   {new Date(m.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}

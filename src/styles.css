@@ -61,7 +61,7 @@ textarea::placeholder {
 
 /* iPhone notch / home bar */
 .pt-safe {
-  padding-top: max(0.75rem, env(safe-area-inset-top));
+  padding-top: max(0.75rem, var(--safe-top, env(safe-area-inset-top)));
 }
 .pb-safe {
   padding-bottom: max(0.75rem, env(safe-area-inset-bottom));

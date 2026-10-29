@@ -161,6 +161,30 @@ test('three people: accounts, DM, group, realtime, attachments, access', async (
   const gHist = (await (await api(carol, 'GET', `/api/conversations/${group.id}/messages`)).r.json()) as Message[]
   assert.equal((await c.openMessage<MessageBody>(carolKey, group.id, gHist[0].body)).text, 'hey all')
 
+  // calls: ring every device, the answering one wins, signals reach only it
+  const ice = await (await api(alice, 'GET', '/api/ice')).r.json()
+  assert.ok(Array.isArray(ice) && ice.length)
+  assert.equal((await sc.emitWithAck('call:start', { convId: dm.id, kind: 'audio' })).error, 'bad request', 'outsider')
+  assert.equal((await sa.emitWithAck('call:start', { convId: group.id, kind: 'audio' })).error, 'bad request', 'groups have no calls')
+  const sb2 = await socket(bob)
+  const rings = [sb, sb2].map((s) => new Promise<{ id: string; from: string }>((r) => s.once('call:ring', r)))
+  const { id: callId } = await sa.emitWithAck('call:start', { convId: dm.id, kind: 'video' })
+  for (const r of await Promise.all(rings)) assert.deepEqual([r.id, r.from], [callId, alice.id])
+  const elsewhere = new Promise<{ reason: string }>((r) => sb2.once('call:end', r))
+  const accepted = new Promise((r) => sa.once('call:accepted', r))
+  assert.equal((await sb.emitWithAck('call:accept', { id: callId })).id, callId)
+  await accepted
+  assert.equal((await elsewhere).reason, 'elsewhere')
+  assert.ok((await sb2.emitWithAck('call:accept', { id: callId })).error, 'answered once')
+  const relayed = new Promise<{ data: unknown }>((r) => sb.once('call:signal', r))
+  sa.emit('call:signal', { id: callId, data: { candidate: 'x' } })
+  assert.deepEqual((await relayed).data, { candidate: 'x' })
+  const ca = await createConv(carol, 'dm', [carol, alice])
+  assert.match((await sc.emitWithAck('call:start', { convId: ca.id, kind: 'audio' })).error, /Alice is on another call/)
+  const ended = new Promise<{ reason: string }>((r) => sa.once('call:end', r))
+  sb.emit('call:hangup', { id: callId })
+  assert.equal((await ended).reason, 'hangup')
+  assert.ok((await sc.emitWithAck('call:start', { convId: ca.id, kind: 'audio' })).id, 'free again after hangup')
 })
 
 test('safety code is stable and short', async () => {

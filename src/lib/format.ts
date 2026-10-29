@@ -1,4 +1,4 @@
-import type { Conversation, Me, MessageBody } from '../../shared/types.ts'
+import type { CallLog, Conversation, Me, MessageBody } from '../../shared/types.ts'
 
 export const userName = (me: Me, id: string) => me.users.find((u) => u.id === id)?.name ?? 'Someone'
 
@@ -19,9 +19,26 @@ export function shortTime(ts: number) {
 export const dayLabel = (ts: number) =>
   new Date(ts).toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric' })
 
-export function preview(body: MessageBody | null | undefined) {
+export function talkTime(ms: number) {
+  const m = Math.round(ms / 60_000)
+  if (ms < 60_000) return `${Math.max(1, Math.round(ms / 1000))} sec`
+  return m < 60 ? `${m} min` : `${Math.floor(m / 60)} hr ${m % 60} min`
+}
+
+// A missed call reads differently to the caller ("No answer") and the callee.
+export function callSummary(c: CallLog, mine: boolean) {
+  if (c.room) return { title: 'Call', detail: 'Ended', missed: false }
+  const noun = c.kind === 'audio' ? 'Voice call' : 'Video call'
+  if (c.ms) return { title: noun, detail: talkTime(c.ms), missed: false }
+  return mine ? { title: noun, detail: 'No answer', missed: false } : { title: `Missed ${noun.toLowerCase()}`, missed: true }
+}
+
+export function preview(body: MessageBody | null | undefined, mine = false) {
   if (!body) return ''
-  if (body.call) return 'Started a call'
+  if (body.call) {
+    const { title, detail } = callSummary(body.call, mine)
+    return detail ? `${title} · ${detail}` : title
+  }
   if (body.text) return body.text
   const files = body.files ?? []
   if (!files.length) return ''
