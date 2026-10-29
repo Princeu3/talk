@@ -4,7 +4,7 @@
 <dict>
 	<key>keychain-access-groups</key>
 	<array>
-		<string>$(AppIdentifierPrefix)dev.princeuniverse.talk.shared</string>
+		<string>$(AppIdentifierPrefix)com.abhishekshekhar.talk.shared</string>
 	</array>
 </dict>
 </plist>
