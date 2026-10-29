@@ -78,7 +78,7 @@ export default function Auth({ invite, onDone }: { invite: string | null; onDone
         )}
 
         {error && <p className="mt-4 text-sm font-medium text-danger" role="alert">{error}</p>}
-        <button disabled={busy} className="pressable mt-6 min-h-12 rounded-full bg-fill px-6 font-semibold text-white disabled:opacity-50">
+        <button disabled={busy} className="pressable mt-6 min-h-12 rounded-full bg-fill px-6 font-semibold text-on-fill disabled:opacity-50">
           {busy ? 'Unlocking\u2026' : register ? 'Create account' : 'Sign in'}
         </button>
         {invite && (

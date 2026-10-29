@@ -91,7 +91,7 @@ function Attachment({ talk, convId, file, onZoom }: { talk: Talk; convId: string
         setWant(true)
         setTries((t) => t + 1)
       }}
-      className="flex min-h-11 items-center gap-3 rounded-2xl bg-black/5 px-3 py-2.5 dark:bg-white/10"
+      className="flex min-h-11 items-center gap-3 rounded-2xl bg-ink/8 px-3 py-2.5"
     >
       <FileIcon />
       <span className="min-w-0">
@@ -121,7 +121,7 @@ function Bubble({ m, mine, first, last, talk, onJoin, onZoom }: {
 }) {
   const c = m.content
   const shape = `max-w-[80%] sm:max-w-[65%] ${corners(mine, first, last)} ${mine ? 'self-end' : 'self-start'}`
-  const tone = mine ? 'bg-fill text-white' : 'bg-bubble'
+  const tone = mine ? 'bg-mine' : 'bg-bubble'
   if (!c)
     return (
       <div className={`${shape} ${tone} flex items-center gap-2 px-4 py-2.5 opacity-80`}>
@@ -133,7 +133,7 @@ function Bubble({ m, mine, first, last, talk, onJoin, onZoom }: {
       <div className={`${shape} ${tone} flex items-center gap-3 py-2.5 pl-4 pr-2.5`}>
         <Video />
         <span className="flex-1">{mine ? 'You started a call' : `${userName(talk.me!, m.senderId)} started a call`}</span>
-        <button onClick={() => onJoin(c.call!.room)} className={`pressable min-h-9 rounded-full px-4 text-sm font-semibold ${mine ? 'bg-white text-fill' : 'bg-fill text-white'}`}>
+        <button onClick={() => onJoin(c.call!.room)} className="pressable min-h-9 rounded-full bg-fill px-4 text-sm font-semibold text-on-fill">
           Join
         </button>
       </div>
@@ -341,7 +341,7 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
             aria-label="Message"
             className="max-h-40 min-h-11 flex-1 resize-none rounded-[22px] bg-bg px-4 py-2.5 [field-sizing:content] focus-visible:outline-offset-0"
           />
-          <button disabled={busy || (!text.trim() && !files.length)} aria-label="Send" className="pressable ml-1 flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-fill text-white transition-opacity disabled:opacity-35">
+          <button disabled={busy || (!text.trim() && !files.length)} aria-label="Send" className="pressable ml-1 flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-fill text-on-fill transition-opacity disabled:opacity-35">
             <Send size={18} />
           </button>
         </div>

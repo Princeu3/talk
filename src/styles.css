@@ -1,33 +1,33 @@
 @import 'tailwindcss';
 
-/* Same palette as the meetup app, so calls and chat feel like one product. */
-@theme {
-  --color-bg: #f4f4f6;
-  --color-surface: #ffffff;
-  --color-raised: #ebebef;
-  --color-ink: #1c1c1e;
-  --color-mut: rgba(28, 28, 30, 0.66);
-  --color-faint: rgba(28, 28, 30, 0.4);
-  --color-line: rgba(28, 28, 30, 0.09);
-  --color-accent: #2f6fe4; /* links, icons, focus */
-  --color-fill: #2f6fe4; /* filled buttons and my bubbles: white text passes 4.5:1 in both themes */
-  --color-bubble: #ffffff; /* their bubbles */
-  --color-danger: #d93036;
+/* Sage and olive. 60% soft white (or olive black), 30% sage in your own
+   bubbles, 10% deep olive (sage in dark) for actions, badges and focus.
+   One value per token: light-dark() follows color-scheme, which
+   data-theme on <html> pins; no attribute means follow the system. */
+:root {
+  color-scheme: light dark;
+}
+:root[data-theme='light'] {
+  color-scheme: light;
+}
+:root[data-theme='dark'] {
+  color-scheme: dark;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --color-bg: #09090b;
-    --color-surface: #161618;
-    --color-raised: #222226;
-    --color-ink: #f5f5f7;
-    --color-mut: rgba(245, 245, 247, 0.66);
-    --color-faint: rgba(245, 245, 247, 0.38);
-    --color-line: rgba(245, 245, 247, 0.09);
-    --color-accent: #6b9fff;
-    --color-bubble: #26262a;
-    --color-danger: #ff6369;
-  }
+@theme {
+  --color-bg: light-dark(#e8e9df, #12170f);
+  --color-surface: light-dark(#f3f4ee, #1a2116); /* sidebar, header, composer, sheets */
+  --color-raised: light-dark(#dadecd, #263020); /* hover, inputs, secondary buttons */
+  --color-ink: light-dark(#1e2819, #e8e9df);
+  --color-mut: light-dark(rgb(30 40 25 / 0.68), rgb(232 233 223 / 0.68));
+  --color-faint: light-dark(rgb(30 40 25 / 0.45), rgb(232 233 223 / 0.45));
+  --color-line: light-dark(rgb(30 40 25 / 0.1), rgb(232 233 223 / 0.1));
+  --color-accent: light-dark(#2e3d28, #a9b887); /* links, icons, focus */
+  --color-fill: light-dark(#2e3d28, #a9b887); /* filled buttons, badges */
+  --color-on-fill: light-dark(#f3f4ee, #12170f);
+  --color-mine: light-dark(#a9b887, #3e5034); /* my bubbles; ink text passes 7:1 */
+  --color-bubble: light-dark(#fafaf6, #222b1d); /* their bubbles */
+  --color-danger: light-dark(#a3352d, #f0998e);
 }
 
 html,

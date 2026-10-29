@@ -13,4 +13,12 @@ Node 24+ runs `server/*.ts` directly (type stripping): imports need `.ts` extens
 - Set long-lived cache headers through `sendFile` options, never before the call, or a cached error sticks for a year.
 - Write Tailwind classes as full literal strings; built names like `rounded-t${side}-md` never get generated.
 - Railway sets `PORT=8080`; point domains at 8080.
-- Calls are P2P through meetup, which only hands out STUN; Railway can't host TURN (no UDP).
+- Calls are P2P through meetup; its TURN relay is Cloudflare (`CF_TURN_KEY_ID`/`CF_TURN_API_TOKEN` on the meetup service), since Railway can't host TURN (no UDP).
+- Test browser profiles may keep year-cached 500s for old attachments; a 500 with no server log line is that cache, not a bug.
+
+## Design
+- Palette: soft white `#e8e9df`, sage `#a9b887`, deep olive `#2e3d28`, split 60/30/10: backgrounds / your own bubbles and selected states / actions, badges, focus. Use the tokens in `src/styles.css`, never raw hex or `text-white` in components (the black call and photo overlays are the exception).
+- Each token holds both themes as `light-dark()`. Theme choice (system/light/dark) is per device: `localStorage` `theme` plus `data-theme` on `<html>`, set before paint in `index.html` and by `src/lib/theme.ts`. Don't use Tailwind `dark:`; it only follows the system.
+- Put text on `bg-fill` as `text-on-fill`: fill is olive in light and sage in dark, so white text fails in dark.
+- Avatars are generated SVG art seeded by name (`Avatar` in `Sidebar.tsx`), drawn from the palette shades; keep backgrounds to the middle shades so circles show on both page colors.
+- Check new UI patterns against Mobbin (iOS and web) before building them.

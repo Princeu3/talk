@@ -62,13 +62,13 @@ export function IncomingCall({ from, onJoin, onDismiss }: { from: string; onJoin
     <div className="pt-safe fixed inset-x-0 top-0 z-50 flex justify-center px-3" role="alert">
       {/* floats over the chat, so it keeps its depth cue */}
       <div /* taste-skill-ignore */ className="rise flex w-full max-w-md items-center gap-3 rounded-3xl bg-surface p-3 shadow-2xl shadow-black/30">
-        <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-fill text-white"><Video /></span>
+        <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-fill text-on-fill"><Video /></span>
         <div className="min-w-0 flex-1">
           <div className="truncate font-semibold">{from}</div>
           <div className="text-sm text-mut">is calling…</div>
         </div>
         <button onClick={onDismiss} className="pressable min-h-11 rounded-full bg-raised px-4 text-sm font-semibold">Later</button>
-        <button onClick={onJoin} className="pressable min-h-11 rounded-full bg-fill px-5 text-sm font-semibold text-white">Join</button>
+        <button onClick={onJoin} className="pressable min-h-11 rounded-full bg-fill px-5 text-sm font-semibold text-on-fill">Join</button>
       </div>
     </div>
   )

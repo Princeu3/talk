@@ -4,7 +4,8 @@ import { api } from '../lib/api.ts'
 import { safetyCode } from '../lib/crypto.ts'
 import { enablePush, needsInstall, pushSupported } from '../lib/push.ts'
 import { Avatar } from './Sidebar.tsx'
-import { Close } from './icons.tsx'
+import { loadTheme, setTheme, type Theme } from '../lib/theme.ts'
+import { Close, Monitor, Moon, Sun } from './icons.tsx'
 
 export function Sheet({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
   useEffect(() => {
@@ -32,7 +33,7 @@ export function Sheet({ title, onClose, children }: { title: string; onClose: ()
   )
 }
 
-const primary = 'pressable min-h-12 w-full rounded-full bg-fill px-5 font-semibold text-white disabled:opacity-40'
+const primary = 'pressable min-h-12 w-full rounded-full bg-fill px-5 font-semibold text-on-fill disabled:opacity-40'
 
 function PeoplePicker({ ids, picked, onToggle, talk }: { ids: string[]; picked: Set<string>; onToggle: (id: string) => void; talk: Talk }) {
   if (!ids.length) return <p className="py-6 text-mut">Nobody else to add yet. Create an invite link in Settings.</p>
@@ -117,6 +118,44 @@ export function AddPeople({ talk, convId, onClose }: { talk: Talk; convId: strin
   )
 }
 
+const themes = [
+  ['system', 'System', Monitor],
+  ['light', 'Light', Sun],
+  ['dark', 'Dark', Moon],
+] as const
+
+// Segmented control built on radios, so arrow keys and screen readers work for free.
+function ThemePicker() {
+  const [theme, set] = useState<Theme>(loadTheme)
+  return (
+    <fieldset>
+      <legend className="sr-only">Theme</legend>
+      <div className="flex gap-1 rounded-full bg-raised p-1">
+        {themes.map(([value, label, Icon]) => (
+          <label
+            key={value}
+            className="pressable flex min-h-11 flex-1 cursor-pointer items-center justify-center gap-1.5 rounded-full text-sm font-medium text-mut has-checked:bg-mine has-checked:font-semibold has-checked:text-ink has-focus-visible:outline-2 has-focus-visible:outline-accent"
+          >
+            <input
+              type="radio"
+              name="theme"
+              value={value}
+              checked={theme === value}
+              onChange={() => {
+                set(value)
+                setTheme(value)
+              }}
+              className="sr-only"
+            />
+            <Icon size={16} />
+            {label}
+          </label>
+        ))}
+      </div>
+    </fieldset>
+  )
+}
+
 function SafetyCode({ pubkey }: { pubkey: string }) {
   const [code, setCode] = useState('')
   useEffect(() => void safetyCode(pubkey).then(setCode), [pubkey])
@@ -169,6 +208,12 @@ export function Settings({ talk, onClose, onSignOut }: { talk: Talk; onClose: ()
             Turn on notifications
           </button>
         )}
+      </section>
+
+      <section className="mb-7">
+        <h3 className="mb-2 font-semibold">Appearance</h3>
+        <ThemePicker />
+        <p className="mt-2 text-sm text-mut">System follows your device's light or dark setting.</p>
       </section>
 
       <section className="mb-7">

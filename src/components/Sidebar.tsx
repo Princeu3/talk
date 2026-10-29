@@ -1,18 +1,29 @@
 import type { Talk } from '../lib/useTalk.ts'
-import { convName, initials, preview, shortTime, userName } from '../lib/format.ts'
+import { convName, preview, shortTime, userName } from '../lib/format.ts'
 import { Compose, Lock, User } from './icons.tsx'
 
+// Olive to soft white, so every avatar sits inside the app palette in both themes.
+const SHADES = ['#2e3d28', '#4f6340', '#7e9466', '#a9b887', '#cdd6b8', '#e8e9df']
+
+// Generative Bauhaus-style art seeded by the name: looks random, but the same
+// person gets the same picture on every device, with nothing sent to a service.
 export function Avatar({ name, size = 44 }: { name: string; size?: number }) {
-  // Stable hue per name so each person keeps a color.
-  const hue = [...name].reduce((h, ch) => (h * 31 + ch.charCodeAt(0)) % 360, 7)
+  let h = [...name.toLowerCase()].reduce((a, ch) => Math.imul(a ^ ch.charCodeAt(0), 16777619) >>> 0, 2166136261)
+  const next = (n: number) => {
+    h = Math.imul(h ^ (h >>> 15), 2246822507) >>> 0
+    return h % n
+  }
+  const pool = [...SHADES]
+  // Background from the middle shades only, so the circle never melts into either page color.
+  const bg = pool.splice(1 + next(4), 1)[0]
+  const [block, dot, bar] = [0, 1, 2].map(() => pool.splice(next(pool.length), 1)[0])
   return (
-    <div
-      className="flex shrink-0 items-center justify-center rounded-full font-semibold text-white"
-      style={{ width: size, height: size, fontSize: size * 0.38, background: `oklch(0.55 0.12 ${hue})` }}
-      aria-hidden
-    >
-      {initials(name)}
-    </div>
+    <svg width={size} height={size} viewBox="0 0 80 80" className="shrink-0 rounded-full" aria-hidden>
+      <rect width="80" height="80" fill={bg} />
+      <rect x={10 + next(20)} y={-10 + next(30)} width={40 + next(30)} height={40 + next(30)} rx={next(2) ? 40 : 4} fill={block} transform={`rotate(${next(360)} 40 40)`} />
+      <circle cx={20 + next(40)} cy={20 + next(40)} r={10 + next(12)} fill={dot} />
+      <line x1="-10" y1={30 + next(20)} x2="90" y2={30 + next(20)} stroke={bar} strokeWidth={3 + next(4)} transform={`rotate(${next(180)} 40 40)`} />
+    </svg>
   )
 }
 
@@ -41,7 +52,7 @@ export default function Sidebar({ talk, onNew, onSettings }: { talk: Talk; onNew
                 ? 'Start a chat with someone here.'
                 : 'Nobody else is here yet. Create an invite link in Settings and send it to a friend.'}
             </p>
-            <button onClick={me.users.length > 1 ? onNew : onSettings} className="pressable rounded-full bg-fill px-5 py-2.5 font-semibold text-white">
+            <button onClick={me.users.length > 1 ? onNew : onSettings} className="pressable rounded-full bg-fill px-5 py-2.5 font-semibold text-on-fill">
               {me.users.length > 1 ? 'New chat' : 'Invite someone'}
             </button>
           </div>
@@ -83,7 +94,7 @@ export default function Sidebar({ talk, onNew, onSettings }: { talk: Talk; onNew
                         )}
                       </span>
                       {conv.unread > 0 && (
-                        <span className="flex h-5 min-w-5 shrink-0 items-center justify-center rounded-full bg-fill px-1.5 text-xs font-semibold tabular-nums text-white">
+                        <span className="flex h-5 min-w-5 shrink-0 items-center justify-center rounded-full bg-fill px-1.5 text-xs font-semibold tabular-nums text-on-fill">
                           <span className="sr-only">Unread: </span>
                           {conv.unread}
                         </span>
