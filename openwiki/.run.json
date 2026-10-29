@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "runId": "462cf09c-0079-4f5f-a894-2dad4acb31e7",
+  "mode": "update",
+  "phase": "planning",
+  "startedAt": "2026-10-29T03:05:12.448Z",
+  "language": "en",
+  "languageChanged": false,
+  "requiredRewritePages": [],
+  "initialPages": [],
+  "sourceFingerprint": "sha256:8ce7901d8c6eda7d473e4997a1a66caaac82b31026b06204522b90b99cbc41ce",
+  "planningContext": "Generate repository documentation",
+  "actor": {
+    "producerActor": "openwiki/0.7.2",
+    "metadataModel": "claude-sonnet-5"
+  },
+  "previousLastUpdate": null,
+  "beforeContentSnapshot": "ffa63583dfa6706b87d284b86b0d693a161e4840aad2c5cf6b5d27c3b9621f7d",
+  "preparedWiki": {
+    "generatedProvenance": []
+  }
+}

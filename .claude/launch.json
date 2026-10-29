@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "talk",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["server/index.ts"],
+      "env": { "SETUP_CODE": "local-setup", "DATA_DIR": "data" },
+      "port": 3000
+    }
+  ]
+}
