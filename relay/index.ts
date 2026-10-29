@@ -121,12 +121,26 @@ const SUPPORT = page('Talk support', `
 <p>Allow notifications for Talk, and check that Focus or Do Not Disturb isn't silencing it.</p>
 <h2>Report a problem</h2>
 <p>Open an issue at <a href="https://github.com/Princeu3/talk/issues">github.com/Princeu3/talk/issues</a>. To report a person, open the chat, tap their name and choose Report.</p>
+<p><a href="/privacy">Privacy policy</a> · <a href="/terms">Terms of use</a></p>`)
+
+const TERMS = page('Talk terms of use', `
+<p>Updated October 29, 2026. By creating a Talk account you agree to these terms.</p>
+<h2>Zero tolerance for objectionable content and abuse</h2>
+<p>Don't send anything illegal, sexual content involving minors, threats, harassment, hate, or content you have no right to share. Don't use Talk to spam, impersonate, stalk or abuse anyone. Accounts that do are removed.</p>
+<h2>Block and report</h2>
+<p>In any chat, open the menu to block someone or report them. Reporting also blocks them, so they can no longer message or call you.</p>
+<h2>What a report contains</h2>
+<p>Messages are end-to-end encrypted, so no server, ours included, can read them. A report names the person and the chat and carries your note. You can choose to add their last few messages, which your phone decrypts and sends with the report. Nothing else from the chat is shared.</p>
+<h2>Who acts on reports</h2>
+<p>Each account lives on a Talk server, and reports go to the person who runs that server. They remove the offending content and the account that sent it within 24 hours. The app's developer runs talk.princeuniverse.dev and the demo server used for App Review, and acts on reports there the same way. If a server's owner does not act, or for anything else, open an issue at <a href="https://github.com/Princeu3/talk/issues">github.com/Princeu3/talk/issues</a>.</p>
+<h2>Your account</h2>
+<p>You can delete your account at any time in Settings. Talk is provided as is, without warranty.</p>
 <p><a href="/privacy">Privacy policy</a></p>`)
 
 createServer(async (req, res) => {
   const send = (status: number, body: object) => res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(body))
   if (req.method === 'GET') {
-    const html = { '/privacy': PRIVACY, '/support': SUPPORT, '/': SUPPORT }[req.url ?? '']
+    const html = { '/privacy': PRIVACY, '/terms': TERMS, '/support': SUPPORT, '/': SUPPORT }[req.url ?? '']
     if (req.url === '/healthz') return void res.end('ok')
     return void (html ? res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(html) : send(404, { error: 'not found' }))
   }

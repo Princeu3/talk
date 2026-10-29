@@ -37,7 +37,7 @@ struct Avatar: View {
 
   var body: some View {
     Canvas { ctx, sz in
-      var h = name.lowercased().utf16.reduce(UInt32(2166136261)) { ($0 ^ UInt32($1)) &* 16777619 }
+      var h = avatarSeed(name)
       func next(_ n: UInt32) -> CGFloat {
         h = (h ^ (h >> 15)) &* 2246822507
         return CGFloat(h % n)

@@ -99,4 +99,5 @@ test('relay signs and shapes pushes, refuses anything else', async () => {
   assert.ok(codes.includes(429))
 
   assert.match(await (await fetch(`${RELAY}/privacy`)).text(), /end-to-end|encrypted/)
+  assert.match(await (await fetch(`${RELAY}/terms`)).text(), /zero tolerance.*24 hours/is)
 })

@@ -51,3 +51,27 @@ struct Vectors: Decodable {
   let wrapped = try Crypto.wrapConvKey(raw, mine: alice.privateKey, theirPub: v.bob.publicKey, convId: v.convId, theirId: v.bob.id!)
   #expect(try Crypto.unwrapConvKey(wrapped, mine: bob.privateKey, wrapperPub: v.alice.publicKey, convId: v.convId, myId: v.bob.id!) == raw)
 }
+
+@Test func voicePeaksMatchTheWeb() {
+  // Expected values from src/lib/voice.ts `bucket`.
+  #expect(Voice.bucket([0.02, 0.3, 0.05, 0.12, 0, 0.2, 0.07], 5) == [0.33, 1, 0.67, 0.1, 0.83])
+  #expect(Voice.bucket([0.1, 0.4], 3) == [0.55, 0.55, 1])
+  #expect(Voice.bucket([]) == Array(repeating: 0.1, count: 40))
+}
+
+@Test func reportNoteFitsTheServerLimit() {
+  #expect(Report.note("spam", quoting: []) == "spam")
+  #expect(Report.note("", quoting: ["a", "b"]) == "Their recent messages:\na\nb")
+  #expect(Report.note("x", quoting: ["old", "new"], limit: 30) == "x\n\nTheir recent messages:\nnew")
+  let long = Report.note(String(repeating: "😀", count: 1500), quoting: [String(repeating: "y", count: 900)])
+  #expect(long.utf16.count == 2000 && !long.contains("y"))
+  #expect(Report.note("", quoting: [String(repeating: "z", count: 900)]).count == 23 + 301)
+}
+
+@Test func avatarSeedMatchesTheWeb() {
+  // Expected values from the hash in Avatar, src/components/Sidebar.tsx.
+  #expect(avatarSeed("Alice") == 2267157479)
+  #expect(avatarSeed("Zoë") == 377293815)
+  #expect(avatarSeed("Prince 🙂") == 578124735)
+  #expect(avatarSeed("👩‍💻") == 2263806054)
+}

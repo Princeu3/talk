@@ -29,6 +29,7 @@ struct ChatsView: View {
         ForEach(talk.me?.conversations ?? []) { c in
           NavigationLink(value: c.id) { Row(conv: c) }
             .listRowBackground(Color.bg)
+            .listRowSeparator(c.id == talk.me?.conversations.first?.id ? .hidden : .automatic, edges: .top)
         }
       }
       .listStyle(.plain)
@@ -129,6 +130,7 @@ struct NewChatView: View {
       }
       .navigationTitle("New chat")
       .navigationBarTitleDisplayMode(.inline)
+      .task { try? await talk.load() } // the server sends no sync when someone joins
       .toolbar {
         ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
         ToolbarItem(placement: .confirmationAction) {

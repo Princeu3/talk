@@ -3,3 +3,6 @@ dist
 data
 .env
 *.local
+
+# Demo credentials for App Review
+*.local.md

@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  server:
+    name: Server, web and relay
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: npm run build
+      - run: npm test
+
+  ios:
+    name: iPhone app
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v6
+      - run: brew install xcodegen
+      - run: cd ios && xcodegen
+      - name: Build and test
+        run: |
+          # The runner's simulators differ from ours, so take the first available iPhone.
+          device=$(xcrun simctl list devices available | grep -m1 -oE 'iPhone [^(]+' | sed 's/ *$//')
+          xcodebuild test -project ios/Talk.xcodeproj -scheme Talk \
+            -destination "platform=iOS Simulator,name=$device" \
+            CODE_SIGNING_ALLOWED=NO

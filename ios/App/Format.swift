@@ -15,7 +15,7 @@ enum Format {
 
   static func talkTime(_ ms: Double) -> String {
     if ms < 60_000 { return "\(max(1, Int((ms / 1000).rounded()))) sec" }
-    let m = Int((ms / 60_000).rounded())
+    let m = Int((min(ms, 1e12) / 60_000).rounded()) // ms comes from the sender; Int() traps on huge values
     return m < 60 ? "\(m) min" : "\(m / 60) hr \(m % 60) min"
   }
 

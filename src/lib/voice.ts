@@ -2,8 +2,9 @@ import type { Voice } from '../../shared/types.ts'
 
 export const BARS = 40
 export const MAX_SECONDS = 600
-// Safari records mp4 (AAC); Chrome and Firefox fall back to webm/opus.
-const TYPES = ['audio/mp4', 'audio/webm;codecs=opus', 'audio/webm']
+// AAC in mp4 first: it plays everywhere, iPhone included. Chrome's plain
+// audio/mp4 is Opus inside, which iOS can't play; Firefox falls back to webm/opus.
+const TYPES = ['audio/mp4;codecs=mp4a.40.2', 'audio/mp4', 'audio/webm;codecs=opus', 'audio/webm']
 
 export const canRecord = () => typeof MediaRecorder !== 'undefined' && !!navigator.mediaDevices?.getUserMedia
 

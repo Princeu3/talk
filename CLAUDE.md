@@ -6,12 +6,14 @@ Node 24+ runs `server/*.ts` directly (type stripping): imports need `.ts` extens
 - `npm run dev`: server on :3000 plus Vite on :5173 (needs `SETUP_CODE` for a first account)
 - `npm run check`: typecheck
 - `npm test`: end-to-end tests (spawns the server)
-- `railway up`: deploy (project `talk`, volume at `/data`)
-- `railway up relay --path-as-root -p cfe9ad88-4f60-417e-808b-bfe41b9d4da4 -e production -s relay`: deploy the push relay (project `talk-push` in the personal workspace "Prince Upadhyay's Projects", never the work one); plain `railway up .` from `relay/` fails with "prefix not found"
+- `railway up`: deploy the live server by hand (project `talk`, volume at `/data`)
+- Pushes to `master` deploy the push relay (`talk-push`) and the demo server (`talk-demo`, App Review uses it) through Railway's GitHub integration; GitHub Actions runs CI (`.github/workflows/ci.yml`)
+- `railway up relay --path-as-root -p cfe9ad88-4f60-417e-808b-bfe41b9d4da4 -e production -s relay`: deploy the push relay (project `talk-push` in the personal Railway workspace, never the work one); plain `railway up .` from `relay/` fails with "prefix not found"
 - `cd ios && xcodegen`: regenerate `Talk.xcodeproj` from `project.yml` (the project file is not committed)
 - `xcodebuild test -project ios/Talk.xcodeproj -scheme Talk -destination 'platform=iOS Simulator,name=iPhone 18 Pro'`: iPhone crypto interop tests
 
 ## Gotchas
+- The repo is public: never commit credentials. Demo passphrases go in `*.local.md` files (gitignored). Commit as the GitHub noreply address, never a work email.
 - Keep every server change backward compatible: the live web app and the iPhone app talk to the same API.
 - APNs pushes carry ids only; the relay (`relay/index.ts`) builds payloads itself, so never pass text through it.
 - Resolve paths from env with `path.resolve`; `res.sendFile` rejects relative paths.
@@ -20,7 +22,7 @@ Node 24+ runs `server/*.ts` directly (type stripping): imports need `.ts` extens
 - Railway sets `PORT=8080`; point domains at 8080.
 - Calls are 1:1 WebRTC, signaled over our socket (`server/calls.ts`, `src/lib/useCall.ts`) and never stored. `/api/ice` hands out Cloudflare TURN credentials from `CF_TURN_KEY_ID`/`CF_TURN_API_TOKEN`, since Railway can't host TURN (no UDP). To test the cellular path, force `iceTransportPolicy: 'relay'` in the browser.
 - The iPhone app's crypto must match `src/lib/crypto.ts` byte for byte; `ios/Tests/vectors.json` comes from `ios/Tests/make-vectors.ts`, so regenerate it after any web crypto change.
-- The Simulator ends every CallKit call (no system call UI there), so calls only test on a device. Messages, sign-in and settings test fine against a local server (`http://localhost:<port>/?invite=...`, allowed by `NSAllowsLocalNetworking`).
+- The Simulator ends every CallKit call (no system call UI there), so calls only test on a device. Messages, sign-in and settings test fine against a local server (`http://localhost:<port>/?invite=...`, allowed by `NSAllowsLocalNetworking`). For App Store screenshots, launch a Debug build with `-demoCall <name>` to show a live call screen with that person.
 - Test browser profiles may keep year-cached 500s for old attachments; a 500 with no server log line is that cache, not a bug.
 
 ## Design

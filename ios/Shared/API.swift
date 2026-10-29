@@ -51,6 +51,7 @@ nonisolated struct APIError: LocalizedError {
 }
 
 nonisolated struct OK: Decodable {}
+nonisolated struct Created: Decodable { let id: String }
 
 // REST client. Cookies are handled by hand (not HTTPCookieStorage) so the
 // notification extension can send the same session.
@@ -91,7 +92,7 @@ nonisolated struct API: Sendable {
   // Register or log in; returns the user id and the session cookie.
   func signIn(_ path: String, _ body: [String: Any]) async throws -> (id: String, cookie: String) {
     let (data, res) = try await self.data("POST", path, body: try JSONSerialization.data(withJSONObject: body))
-    let id = try JSONDecoder().decode([String: String].self, from: data)["id"]!
+    let id = try JSONDecoder().decode(Created.self, from: data).id
     let header = res.value(forHTTPHeaderField: "Set-Cookie") ?? ""
     guard let cookie = header.split(separator: ";").first.map(String.init), cookie.hasPrefix("talk_session=") else {
       throw APIError(status: 0, message: "The server didn't start a session.")

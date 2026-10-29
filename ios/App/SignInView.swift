@@ -8,6 +8,7 @@ struct SignInView: View {
   @State private var name = ""
   @State private var pass = ""
   @State private var confirm = ""
+  @State private var agreed = false
   @State private var busy = false
   @State private var error = ""
   @FocusState private var focus: Int?
@@ -55,6 +56,11 @@ struct SignInView: View {
             SecureField("", text: $confirm).textContentType(.newPassword).focused($focus, equals: 3).submitLabel(.go).onSubmit(submit)
           }
         }
+        Toggle(isOn: $agreed) {
+          Text("I agree to the [terms of use](https://push.princeuniverse.dev/terms): no objectionable content or abuse.")
+            .font(.subheadline)
+        }
+        .padding(.bottom, 8)
 
         if !error.isEmpty {
           Text(error).font(.subheadline.weight(.medium)).foregroundStyle(Color.danger).padding(.top, 4)
@@ -64,7 +70,7 @@ struct SignInView: View {
             .font(.headline).frame(maxWidth: .infinity, minHeight: 50)
         }
         .buttonStyle(.borderedProminent).buttonBorderShape(.capsule).tint(Color.fill).foregroundStyle(Color.onFill)
-        .disabled(busy || target == nil || name.isEmpty || pass.isEmpty)
+        .disabled(busy || target == nil || name.isEmpty || pass.isEmpty || !agreed)
         .padding(.top, 20)
       }
       .padding(24)
@@ -92,6 +98,7 @@ struct SignInView: View {
       if pass.count < 12 { return error = "Use at least 12 characters. A few random words works well." }
       if pass != confirm { return error = "The passphrases do not match." }
     }
+    if !agreed { return error = register ? "Agree to the terms of use to create an account." : "Agree to the terms of use to sign in." }
     busy = true
     error = ""
     let passphrase = pass

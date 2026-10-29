@@ -21,7 +21,7 @@
 	<key>CFBundleVersion</key>
 	<string>1</string>
 	<key>ITSAppUsesNonExemptEncryption</key>
-	<false/>
+	<true/>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>
@@ -29,6 +29,8 @@
 	</dict>
 	<key>NSCameraUsageDescription</key>
 	<string>Talk uses the camera for video calls and photos you send.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Talk connects calls directly over your local network when the other person is nearby.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Talk uses the microphone for calls and voice messages.</string>
 	<key>NSUserActivityTypes</key>
@@ -40,7 +42,6 @@
 	<array>
 		<string>voip</string>
 		<string>audio</string>
-		<string>remote-notification</string>
 	</array>
 	<key>UILaunchScreen</key>
 	<dict/>

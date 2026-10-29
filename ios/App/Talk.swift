@@ -175,7 +175,7 @@ final class Talk {
     guard data.count <= Self.maxFile else { throw APIError(status: 0, message: "\(name) is over 50 MB") }
     let sealed = try Crypto.sealFile(try await key(convId), convId: convId, data)
     let (res, _) = try await api.data("POST", "/api/conversations/\(convId)/attachments", body: sealed, type: "application/octet-stream")
-    let id = try JSONDecoder().decode([String: String].self, from: res)["id"]!
+    let id = try JSONDecoder().decode(Created.self, from: res).id
     files[id] = data
     return FileRef(id: id, name: name, type: type, size: data.count, voice: voice)
   }
@@ -222,7 +222,8 @@ final class Talk {
 
   func invite() async throws -> URL {
     let (data, _) = try await api.data("POST", "/api/invites")
-    let code = (try JSONSerialization.jsonObject(with: data) as! [String: Any])["code"] as! String
+    struct Invite: Decodable { let code: String }
+    let code = try JSONDecoder().decode(Invite.self, from: data).code
     var c = URLComponents(url: account.server, resolvingAgainstBaseURL: false)!
     c.path = "/"
     c.queryItems = [.init(name: "invite", value: code)]

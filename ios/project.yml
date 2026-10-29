@@ -37,11 +37,13 @@ targets:
         CFBundleDisplayName: Talk
         UILaunchScreen: {}
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
-        UIBackgroundModes: [voip, audio, remote-notification]
+        UIBackgroundModes: [voip, audio]
         NSMicrophoneUsageDescription: Talk uses the microphone for calls and voice messages.
         NSCameraUsageDescription: Talk uses the camera for video calls and photos you send.
         NSUserActivityTypes: [INStartCallIntent, INSendMessageIntent]
-        ITSAppUsesNonExemptEncryption: false
+        # The bundled WebRTC carries its own standard crypto (DTLS-SRTP), outside the OS.
+        ITSAppUsesNonExemptEncryption: true
+        NSLocalNetworkUsageDescription: Talk connects calls directly over your local network when the other person is nearby.
         # http only to local dev servers; real servers are https
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true

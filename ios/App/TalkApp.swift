@@ -66,6 +66,15 @@ private struct Main: View {
         if let c = calls.current { CallScreen(call: c).environment(talk).environment(calls) }
       }
       .onChange(of: talk.totalUnread) { _, n in UNUserNotificationCenter.current().setBadgeCount(n) }
+      #if DEBUG
+      // `-demoCall <name>` launch argument: show a call with that person, for App Store screenshots.
+      .task(id: talk.me == nil) {
+        guard let name = UserDefaults.standard.string(forKey: "demoCall"), let me = talk.me,
+              let u = me.users.first(where: { $0.name == name }),
+              let c = me.conversations.first(where: { $0.kind == "dm" && $0.members.contains(u.id) }) else { return }
+        calls.demo(convId: c.id, peer: u.id)
+      }
+      #endif
   }
 }
 
