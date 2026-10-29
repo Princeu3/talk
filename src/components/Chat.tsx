@@ -1,10 +1,12 @@
-import { useEffect, useLayoutEffect, useRef, useState, type ClipboardEvent, type FormEvent, type KeyboardEvent } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ClipboardEvent, type FormEvent, type KeyboardEvent } from 'react'
 import type { Talk, Decrypted } from '../lib/useTalk.ts'
-import type { FileRef } from '../../shared/types.ts'
+import type { FileRef, Voice } from '../../shared/types.ts'
 import { convName, dayLabel, fileSize, userName } from '../lib/format.ts'
+import { canRecord, startRecording, type Recording } from '../lib/voice.ts'
 import { Avatar } from './Sidebar.tsx'
-import { Back, Clip, Close, FileIcon, Lock, Send, UserPlus, Video } from './icons.tsx'
+import { Back, Clip, Close, FileIcon, Lock, Mic, Send, UserPlus, Video } from './icons.tsx'
 import { iconButton } from './Sidebar.tsx'
+import { VoicePlayer, VoiceRecorder } from './Voice.tsx'
 
 const AUTO_LOAD = 25 * 1024 * 1024
 const URL_RE = /(https?:\/\/[^\s<]+[^\s<.,:;"')\]!?])/g
@@ -66,6 +68,13 @@ function Attachment({ talk, convId, file, onZoom }: { talk: Talk; convId: string
     if (want) talk.fileUrl(convId, file).then(setUrl, () => setFailed(true))
   }, [want, convId, file, talk, tries])
 
+  const retry = () => {
+    setFailed(false)
+    setWant(true)
+    setTries((t) => t + 1)
+  }
+  if (file.voice) return <VoicePlayer url={url} voice={file.voice} failed={failed} onRetry={retry} />
+
   const kind = file.type.split('/')[0]
   const media = kind === 'image' || kind === 'video'
   if (url && kind === 'image')
@@ -87,9 +96,7 @@ function Attachment({ talk, convId, file, onZoom }: { talk: Talk; convId: string
       onClick={(e) => {
         if (url) return
         e.preventDefault()
-        setFailed(false)
-        setWant(true)
-        setTries((t) => t + 1)
+        retry()
       }}
       className="flex min-h-11 items-center gap-3 rounded-2xl bg-ink/8 px-3 py-2.5"
     >
@@ -164,6 +171,11 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [zoom, setZoom] = useState<string>()
+  const [rec, setRec] = useState<Recording | null>(null)
+  const [unsent, setUnsent] = useState<{ file: File; voice: Voice } | null>(null) // kept so a failed send isn't lost
+  const recRef = useRef<Recording | null>(null)
+  recRef.current = rec
+  const starting = useRef(false)
   const scroller = useRef<HTMLDivElement>(null)
   const fileInput = useRef<HTMLInputElement>(null)
   const stick = useRef(true) // pinned to the bottom?
@@ -190,7 +202,43 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
     setText('')
     setFiles([])
     setError('')
+    setUnsent(null)
+    setRec(null)
+    return () => recRef.current?.cancel()
   }, [convId])
+
+  const sendVoice = useCallback(
+    async (file: File, voice: Voice) => {
+      setBusy(true)
+      setError('')
+      setUnsent(null)
+      stick.current = true
+      try {
+        await talk.sendWithFiles(convId, '', [file], voice)
+      } catch (err) {
+        setUnsent({ file, voice })
+        setError((err as Error).message || 'Could not send the voice message.')
+      } finally {
+        setBusy(false)
+      }
+    },
+    [talk, convId],
+  )
+
+  const stopAndSend = useCallback(async () => {
+    const r = recRef.current
+    if (!r) return
+    recRef.current = null // a second tap (or the time limit) must not stop it twice
+    setRec(null)
+    const { blob, voice } = await r.stop()
+    if (voice.duration < 0.7) return // a mis-tap, not a message
+    await sendVoice(new File([blob], `Voice message.${blob.type.includes('webm') ? 'webm' : 'm4a'}`, { type: blob.type }), voice)
+  }, [sendVoice])
+
+  const cancelRec = useCallback(() => {
+    recRef.current?.cancel()
+    setRec(null)
+  }, [])
 
   if (!conv) return null
   const name = convName(me, conv)
@@ -223,6 +271,24 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
       submit()
     }
   }
+  const record = async () => {
+    if (starting.current) return
+    starting.current = true
+    setError('')
+    try {
+      setRec(await startRecording())
+    } catch (e) {
+      setError(
+        (e as Error).name === 'NotAllowedError'
+          ? 'Microphone access is blocked. Allow it for this site in your browser settings.'
+          : 'Couldn’t start the microphone.',
+      )
+    } finally {
+      starting.current = false
+    }
+  }
+  const empty = !text.trim() && !files.length
+
   const onPaste = (e: ClipboardEvent) => {
     const pasted = [...e.clipboardData.files]
     if (pasted.length) {
@@ -315,9 +381,21 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
 
       <form onSubmit={submit} className="pb-safe bg-surface px-2 pt-2">
         {error && (
-          <p className="px-3 pb-2 text-sm text-danger" role="alert">
-            {error}
-          </p>
+          <div className="flex items-center gap-1 pb-2 pl-3">
+            <p className="flex-1 text-sm text-danger" role="alert">
+              {error}
+            </p>
+            {unsent && (
+              <>
+                <button type="button" onClick={() => sendVoice(unsent.file, unsent.voice)} className="min-h-11 rounded-full px-3 text-sm font-semibold text-accent hover:bg-raised">
+                  Retry
+                </button>
+                <button type="button" onClick={() => { setUnsent(null); setError('') }} className="min-h-11 rounded-full px-3 text-sm text-mut hover:bg-raised">
+                  Discard
+                </button>
+              </>
+            )}
+          </div>
         )}
         {files.length > 0 && (
           <ul className="flex gap-2 overflow-x-auto px-1 pb-2" aria-label="Files to send">
@@ -326,25 +404,36 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
             ))}
           </ul>
         )}
-        <div className="flex items-end gap-1">
-          <button type="button" onClick={() => fileInput.current?.click()} aria-label="Attach photos or files" className={`${iconButton} text-mut`}>
-            <Clip size={22} />
-          </button>
-          <input ref={fileInput} type="file" multiple hidden onChange={(e) => { setFiles((f) => [...f, ...(e.target.files ?? [])]); e.target.value = '' }} />
-          <textarea
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            onKeyDown={onKey}
-            onPaste={onPaste}
-            rows={1}
-            placeholder="Message"
-            aria-label="Message"
-            className="max-h-40 min-h-11 flex-1 resize-none rounded-[22px] bg-bg px-4 py-2.5 [field-sizing:content] focus-visible:outline-offset-0"
-          />
-          <button disabled={busy || (!text.trim() && !files.length)} aria-label="Send" className="pressable ml-1 flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-fill text-on-fill transition-opacity disabled:opacity-35">
-            <Send size={18} />
-          </button>
-        </div>
+        {rec ? (
+          <VoiceRecorder rec={rec} onCancel={cancelRec} onSend={stopAndSend} />
+        ) : (
+          <div className="flex items-end gap-1">
+            <button type="button" onClick={() => fileInput.current?.click()} aria-label="Attach photos or files" className={`${iconButton} text-mut`}>
+              <Clip size={22} />
+            </button>
+            <input ref={fileInput} type="file" multiple hidden onChange={(e) => { setFiles((f) => [...f, ...(e.target.files ?? [])]); e.target.value = '' }} />
+            <textarea
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              onKeyDown={onKey}
+              onPaste={onPaste}
+              rows={1}
+              placeholder="Message"
+              aria-label="Message"
+              className="max-h-40 min-h-11 flex-1 resize-none rounded-[22px] bg-bg px-4 py-2.5 [field-sizing:content] focus-visible:outline-offset-0"
+            />
+            {/* Empty composer: the send spot becomes the mic, as in iMessage and WhatsApp. */}
+            {empty && canRecord() ? (
+              <button type="button" onClick={record} disabled={busy} aria-label="Record voice message" className="pressable ml-1 flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-fill text-on-fill transition-opacity disabled:opacity-35">
+                <Mic size={20} />
+              </button>
+            ) : (
+              <button disabled={busy || empty} aria-label="Send" className="pressable ml-1 flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-fill text-on-fill transition-opacity disabled:opacity-35">
+                <Send size={18} />
+              </button>
+            )}
+          </div>
+        )}
         {busy && (
           <p className="flex items-center gap-1.5 px-3 pt-1.5 text-xs text-mut" aria-live="polite">
             <Lock size={12} /> Encrypting and sending…

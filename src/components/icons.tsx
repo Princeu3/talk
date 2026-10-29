@@ -25,3 +25,7 @@ export const External = svg(<><path d="M15 3h6v6" /><path d="M10 14 21 3" /><pat
 export const Sun = svg(<><circle cx="12" cy="12" r="4" /><path d="M12 2v2" /><path d="M12 20v2" /><path d="m4.93 4.93 1.41 1.41" /><path d="m17.66 17.66 1.41 1.41" /><path d="M2 12h2" /><path d="M20 12h2" /><path d="m6.34 17.66-1.41 1.41" /><path d="m19.07 4.93-1.41 1.41" /></>)
 export const Moon = svg(<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" />)
 export const Monitor = svg(<><rect width="20" height="14" x="2" y="3" rx="2" /><path d="M8 21h8" /><path d="M12 17v4" /></>)
+export const Mic = svg(<><path d="M12 19v3" /><path d="M19 10v2a7 7 0 0 1-14 0v-2" /><rect x="9" y="2" width="6" height="13" rx="3" /></>)
+export const Trash = svg(<><path d="M10 11v6" /><path d="M14 11v6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" /><path d="M3 6h18" /><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></>)
+export const Play = svg(<path d="M6 4.8a1.5 1.5 0 0 1 2.26-1.3l11 6.7a1.5 1.5 0 0 1 0 2.6l-11 6.7A1.5 1.5 0 0 1 6 18.2z" fill="currentColor" />)
+export const Pause = svg(<><rect x="6" y="4" width="4" height="16" rx="1" fill="currentColor" /><rect x="14" y="4" width="4" height="16" rx="1" fill="currentColor" /></>)

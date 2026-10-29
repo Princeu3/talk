@@ -40,6 +40,13 @@ export interface FileRef {
   name: string
   type: string
   size: number
+  voice?: Voice // set on recorded voice messages
+}
+
+// Drawn before the audio is fetched, so the waveform shows instantly.
+export interface Voice {
+  duration: number // seconds
+  peaks: number[] // bar heights, 0.1..1
 }
 
 export interface Me {

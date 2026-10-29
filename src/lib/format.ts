@@ -25,6 +25,7 @@ export function preview(body: MessageBody | null | undefined) {
   if (body.text) return body.text
   const files = body.files ?? []
   if (!files.length) return ''
+  if (files[0].voice) return 'Voice message'
   const kind = files.every((f) => f.type.startsWith('image/')) ? 'Photo' : files.every((f) => f.type.startsWith('video/')) ? 'Video' : null
   if (kind) return files.length === 1 ? kind : `${files.length} ${kind.toLowerCase()}s`
   return files.length === 1 ? files[0].name : `${files.length} files`

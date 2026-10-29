@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, ApiError, socket } from './api.ts'
 import * as c from './crypto.ts'
-import type { Conversation, FileRef, Me, Message, MessageBody } from '../../shared/types.ts'
+import type { Conversation, FileRef, Me, Message, MessageBody, Voice } from '../../shared/types.ts'
 
 export interface Decrypted extends Message {
   content: MessageBody | null // null: could not decrypt
@@ -183,14 +183,14 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
     if (r.error) throw new Error(r.error)
   }
 
-  const sendWithFiles = async (convId: string, text: string, files: File[]) => {
+  const sendWithFiles = async (convId: string, text: string, files: File[], voice?: Voice) => {
     const { key } = await keyFor(convId)
     const refs: FileRef[] = []
     for (const f of files) {
       if (f.size > MAX_FILE) throw new Error(`${f.name} is over 50 MB`)
       const sealed = await c.sealFile(key, convId, new Uint8Array(await f.arrayBuffer()))
       const { id } = await api<{ id: string }>('POST', `/api/conversations/${convId}/attachments`, sealed)
-      refs.push({ id, name: f.name, type: f.type || 'application/octet-stream', size: f.size })
+      refs.push({ id, name: f.name, type: f.type || 'application/octet-stream', size: f.size, ...(voice && { voice }) })
     }
     await send(convId, { text: text || undefined, files: refs.length ? refs : undefined })
   }
