@@ -11,7 +11,7 @@ Messages and files are encrypted on your device before they leave it. The server
    - Your passphrase is your key. Nobody can reset it. Forget it and your old messages are gone.
    - Use the same name and passphrase on every device.
 3. On iPhone, add Talk to your Home Screen: tap Share, then **Add to Home Screen**, then open Talk from the new icon. iPhone only sends notifications to apps added this way.
-4. In Talk, tap the person icon (top left) to open Settings, then tap **Turn on notifications**.
+4. In Talk, tap the gear icon (top left) to open Settings, then tap **Turn on notifications**.
 5. Check safety codes: on a call or in person, open Settings and compare the code next to each name. If they match on both phones, nobody swapped a key.
 
 ## Calls

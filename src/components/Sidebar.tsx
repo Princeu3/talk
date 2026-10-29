@@ -1,6 +1,6 @@
 import type { Talk } from '../lib/useTalk.ts'
 import { convName, preview, shortTime, userName } from '../lib/format.ts'
-import { Compose, Lock, User } from './icons.tsx'
+import { Compose, Lock, Settings } from './icons.tsx'
 
 // Olive to soft white, so every avatar sits inside the app palette in both themes.
 const SHADES = ['#2e3d28', '#4f6340', '#7e9466', '#a9b887', '#cdd6b8', '#e8e9df']
@@ -36,7 +36,7 @@ export default function Sidebar({ talk, onNew, onSettings }: { talk: Talk; onNew
       <header className="pt-safe px-2">
         <div className="flex items-center justify-between">
           <button onClick={onSettings} aria-label="Settings and invites" className={iconButton}>
-            <User size={24} />
+            <Settings size={22} />
           </button>
           <button onClick={onNew} aria-label="New chat" className={iconButton}>
             <Compose size={22} />
