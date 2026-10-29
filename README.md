@@ -36,6 +36,16 @@ npm run check   # typecheck
 npm test        # end-to-end tests
 ```
 
+### iPhone app
+
+Needs Xcode 26 and [XcodeGen](https://github.com/yonaskolb/XcodeGen).
+
+```bash
+cd ios && xcodegen && open Talk.xcodeproj
+```
+
+Run it on a device for calls; the Simulator handles everything else. To use a local server, paste `http://localhost:3000/?invite=<code>` into the first field.
+
 ## Deploy
 
 Railway project `talk`, one service with a volume at `/data`. Deploy with `railway up`.

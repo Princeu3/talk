@@ -31,7 +31,7 @@ iPhone app (SwiftUI)  ─┐                      ┌─ web app (React PWA, unc
 
 ## Phase 2: iPhone app (`ios/`, XcodeGen)
 
-1. Project: app + Notification Service Extension, App Group, push, VoIP background mode, mic/camera/photos purpose strings.
+1. Project: app + Notification Service Extension sharing the account through a keychain access group (no App Group), push, VoIP background mode, mic/camera/photos purpose strings.
 2. Core: crypto (with interop tests), API client (cookie session), Socket.IO client, store.
 3. Screens (Mobbin-checked, sage/olive palette): join with an invite link (server + code in one), sign in (server address + name + passphrase), chat list, chat (text, photos, files, voice messages, call log lines), settings (safety codes, invites, block list, delete account).
 4. Calls: PushKit, CallKit provider (incoming, outgoing, mute, end, audio session), WebRTC engine matching `src/lib/useCall.ts`, in-call video UI, call history in Recents.

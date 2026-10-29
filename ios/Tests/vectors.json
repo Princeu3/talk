@@ -1,0 +1,31 @@
+{
+  "iterations": 1000,
+  "alice": {
+    "name": "Alice",
+    "passphrase": "ﬁve correct horses",
+    "publicKey": "Nqw8xbN1oqYnk8l5FmD3bb7b5GMiZz_xs0AJSY2PWnI",
+    "auth": "87de8684e53b71704bc889859bc7823f82a15f1ff041b4cc2c68488542d09ba4",
+    "safetyCode": "63 11 84 46 41 02"
+  },
+  "bob": {
+    "name": "Bob",
+    "passphrase": "battery staple ✓",
+    "id": "0a1b2c3d-4e5f-4061-8273-94a5b6c7d8e9",
+    "publicKey": "JyUxVjQwLfCAF_yjDgW5p8CHrPOO7T4bXYuUGIkWUxY",
+    "auth": "ba06bb4910ad488b42e0e8ac8910076418edaf98f4915dcccc553fab3217b6d4"
+  },
+  "convId": "6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b",
+  "convKey": "SaTi2uHsKRRP2gcXrNDtk1Wdm5iRC0jAy1PTCeFW9S8",
+  "wrapped": "GZS2SC10l_eGO-hI9TVB_PvVXLMAXktjIdab-veHUAkfVKZdKF0UWC5_CGRw92h2vjplJEUvZovGPv2E",
+  "message": {
+    "body": {
+      "from": "alice-id",
+      "text": "héllo from the web 👋"
+    },
+    "sealed": "8QPtOzhnxYpoSX1hEIpi1fkQdZV-ufALU7HlSzhdYRJWrAetODkPOSecoFYZJTYQ4UCXJVVchY_bjBBfPJ5ClV6boutMjySQTrJqMlc0VOa3"
+  },
+  "file": {
+    "plain": "cGhvdG8gYnl0ZXM",
+    "sealed": "ZQULG5K7RCXSxRsOxc2n0U4FAySZaNP5xqsWS8Ot-8a4spllBYOY"
+  }
+}

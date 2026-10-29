@@ -1,0 +1,88 @@
+# Generate the Xcode project with `xcodegen` in this folder; Talk.xcodeproj is not checked in.
+name: Talk
+options:
+  bundleIdPrefix: dev.princeuniverse
+  deploymentTarget:
+    iOS: "26.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    DEVELOPMENT_TEAM: RMVX38Q6NU
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_VERSION: "6.0"
+    SWIFT_APPROACHABLE_CONCURRENCY: YES
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    TARGETED_DEVICE_FAMILY: "1"
+packages:
+  WebRTC:
+    url: https://github.com/stasel/WebRTC
+    from: 156.0.0
+targets:
+  Talk:
+    type: application
+    platform: iOS
+    sources: [App, Shared]
+    dependencies:
+      - target: NotificationService
+      - package: WebRTC
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.princeuniverse.talk
+        SWIFT_DEFAULT_ACTOR_ISOLATION: MainActor
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: Talk
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        UIBackgroundModes: [voip, audio, remote-notification]
+        NSMicrophoneUsageDescription: Talk uses the microphone for calls and voice messages.
+        NSCameraUsageDescription: Talk uses the camera for video calls and photos you send.
+        NSUserActivityTypes: [INStartCallIntent, INSendMessageIntent]
+        ITSAppUsesNonExemptEncryption: false
+        # http only to local dev servers; real servers are https
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+    entitlements:
+      path: App/Talk.entitlements
+      properties:
+        aps-environment: development
+        keychain-access-groups: [$(AppIdentifierPrefix)dev.princeuniverse.talk.shared]
+        com.apple.developer.usernotifications.communication: true
+  NotificationService:
+    type: app-extension
+    platform: iOS
+    sources: [NSE, Shared]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.princeuniverse.talk.notifications
+    info:
+      path: NSE/Info.plist
+      properties:
+        CFBundleDisplayName: Talk Notifications
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.usernotifications.service
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).NotificationService
+    entitlements:
+      path: NSE/NotificationService.entitlements
+      properties:
+        keychain-access-groups: [$(AppIdentifierPrefix)dev.princeuniverse.talk.shared]
+  TalkTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - Tests
+      - Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.princeuniverse.talk.tests
+        GENERATE_INFOPLIST_FILE: YES
+schemes:
+  Talk:
+    build:
+      targets:
+        Talk: all
+    test:
+      targets: [TalkTests]
