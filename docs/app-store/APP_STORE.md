@@ -6,10 +6,12 @@ Demo account passphrases live in `docs/app-store/demo-accounts.local.md`, which 
 
 ## Before you start
 
-1. Apple Developer account (team RMVX38Q6NU): Certificates, IDs & Profiles → Keys → create an APNs key. Give its `.p8` and Key ID to the relay (`APNS_KEY`, `APNS_KEY_ID` on Railway project `talk-push`).
-2. Identifiers: `dev.princeuniverse.talk` (Push Notifications on) and `dev.princeuniverse.talk.notifications`. Xcode's automatic signing creates both on the first device build.
-3. App Store Connect → Apps → + → New App: platform iOS, name below, primary language English (U.S.), bundle ID `dev.princeuniverse.talk`, SKU `talk-ios`, user access Full Access.
-4. Archive in Xcode (Product → Archive) and upload. The build appears under TestFlight after processing.
+The app ships under Abhishek Shekhar's paid team `34XFNGD2MY`, an Individual enrolment: only he, as Account Holder, can open Certificates, IDs & Profiles. Personal team `RMVX38Q6NU` is for device builds only and has no push.
+
+1. Abhishek: Certificates, IDs & Profiles → Keys → create an APNs key. Its `.p8` and Key ID go to the relay (`APNS_KEY`, `APNS_KEY_ID` on Railway project `talk-push`), and `APNS_TEAM_ID` there becomes `34XFNGD2MY`. Without the key the relay refuses every push, so calls don't ring and notifications never arrive.
+2. The App Store record uses bundle ID `com.abhishekshekhar.talk`, not the repo's `dev.princeuniverse.talk`. The archive needs that ID (and `com.abhishekshekhar.talk.notifications` for the extension) with Push Notifications on, and the relay's `APNS_BUNDLE_ID` must match it.
+3. The App Store Connect record exists: "Talk: Private Calls & Chat", app id 6828441266.
+4. Abhishek archives and uploads. Bump `CURRENT_PROJECT_VERSION` in `ios/project.yml` before every archive; App Store Connect refuses a build number it has seen.
 
 ## App Information
 
@@ -17,7 +19,7 @@ Demo account passphrases live in `docs/app-store/demo-accounts.local.md`, which 
 | --- | --- |
 | Name (30) | `Talk: Private Calls & Chat` (26) |
 | Subtitle (30) | `Encrypted chat for your circle` (30) |
-| Bundle ID | `dev.princeuniverse.talk` |
+| Bundle ID | `com.abhishekshekhar.talk` |
 | SKU | `talk-ios` |
 | Primary language | English (U.S.) |
 | Primary category | Social Networking |
@@ -172,22 +174,22 @@ US: X25519, HKDF, AES-GCM, PBKDF2 and DTLS-SRTP are standard, mass-market encryp
 | Sign-in required | Yes |
 | User name | `App Review` |
 | Password | The passphrase for `App Review` in `demo-accounts.local.md` |
-| Contact first and last name | Your name |
+| Contact first and last name | The person who answers App Review's calls |
 | Contact phone | Your phone |
 | Contact email | Your personal email |
 | Attachment | A short screen recording from a real iPhone: sign in, send a message, place a call that rings on a second device, answer, hang up |
 
-**Notes** (4000 bytes; replace the two passphrase placeholders):
+**Notes** (4000 bytes; replace `<SAM PASSPHRASE>` with Sam's passphrase from `demo-accounts.local.md`):
 
 ```
 Talk is a client for a self-hosted, open-source messaging server (https://github.com/Princeu3/talk). We run a demo server for review.
 
 SIGN IN
-1. In the first field enter: server-production-0ecf.up.railway.app
+1. In "Invite link or server" enter: server-production-0ecf.up.railway.app
 2. Name: App Review
-3. Passphrase: <APP REVIEW PASSPHRASE>
+3. Passphrase: the password in the Sign-In Information above
 4. Turn on "I agree to the terms of use" and tap Sign in.
-New accounts need a one-time invite link from someone already on the server, so please use this account.
+New accounts need a one-time invite link from someone already on the server, so please use this account. Allow notifications when asked; calls and message alerts need them.
 
 TO TEST MESSAGES AND CALLS WITH ONE iPHONE
 The second demo account is "Sam" (passphrase: <SAM PASSPHRASE>). The server also hosts the web version of Talk:

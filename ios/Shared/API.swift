@@ -21,7 +21,8 @@ nonisolated enum Vault {
     kSecClass as String: kSecClassGenericPassword,
     kSecAttrService as String: "talk",
     kSecAttrAccount as String: "account",
-    kSecAttrAccessGroup as String: "RMVX38Q6NU.dev.princeuniverse.talk.shared",
+    // No access group: items land in the first keychain-access-groups entry (the shared one the
+    // extension reads), whichever team signed the build.
   ] }
 
   static func load() -> Account? {

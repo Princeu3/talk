@@ -3,7 +3,8 @@ import SwiftUI
 // The web palette (src/styles.css): soft white, sage, deep olive, split
 // 60/30/10. Each token holds both themes.
 extension Color {
-  private static func pair(_ light: UInt32, _ dark: UInt32, alpha: Double = 1) -> Color {
+  // nonisolated: UIKit resolves dynamic colors off the main thread; a MainActor closure traps there.
+  nonisolated private static func pair(_ light: UInt32, _ dark: UInt32, alpha: Double = 1) -> Color {
     Color(UIColor { $0.userInterfaceStyle == .dark ? .hex(dark, alpha) : .hex(light, alpha) })
   }
   static let bg = pair(0xe8e9df, 0x12170f)
@@ -23,7 +24,7 @@ extension Color {
 }
 
 extension UIColor {
-  static func hex(_ v: UInt32, _ alpha: Double = 1) -> UIColor {
+  nonisolated static func hex(_ v: UInt32, _ alpha: Double = 1) -> UIColor {
     UIColor(red: CGFloat(v >> 16 & 0xff) / 255, green: CGFloat(v >> 8 & 0xff) / 255, blue: CGFloat(v & 0xff) / 255, alpha: alpha)
   }
 }
