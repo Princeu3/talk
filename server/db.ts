@@ -63,7 +63,32 @@ db.exec(`
     key text primary key,
     value text not null
   );
+  create table if not exists devices (
+    token text primary key, -- APNs device token, hex
+    user_id text not null references users(id),
+    kind text not null check (kind in ('alert', 'voip')),
+    env text not null check (env in ('sandbox', 'production')),
+    created_at integer not null
+  );
+  create table if not exists blocks (
+    user_id text not null references users(id),
+    blocked_id text not null references users(id),
+    primary key (user_id, blocked_id)
+  );
+  create table if not exists reports (
+    id integer primary key autoincrement,
+    reporter_id text not null references users(id),
+    user_id text not null references users(id),
+    conv_id text,
+    note text,
+    created_at integer not null
+  );
 `)
+
+// Deleted accounts stay as a row with only the public key, so conversation
+// keys they sealed for others can still be opened.
+if (!(db.prepare('pragma table_info(users)').all() as { name: string }[]).some((c) => c.name === 'deleted_at'))
+  db.exec('alter table users add column deleted_at integer')
 
 // Secrets live in the DB (on the volume) so a fresh deploy needs no config;
 // an env var with the same name overrides.
@@ -80,6 +105,10 @@ export const SESSION_SECRET = setting('SESSION_SECRET', () => randomBytes(32).to
 
 export const isMember = (convId: string, userId: string) =>
   !!db.prepare('select 1 from members where conv_id = ? and user_id = ?').get(convId, userId)
+
+// Has `owner` blocked `other`?
+export const blocks = (owner: string, other: string) =>
+  !!db.prepare('select 1 from blocks where user_id = ? and blocked_id = ?').get(owner, other)
 
 export const memberIds = (convId: string) =>
   (db.prepare('select user_id from members where conv_id = ?').all(convId) as { user_id: string }[]).map((r) => r.user_id)

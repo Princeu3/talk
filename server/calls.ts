@@ -3,8 +3,8 @@
 // audio and video flow peer to peer (or through Cloudflare TURN).
 import { randomUUID } from 'node:crypto'
 import type { Server, Socket } from 'socket.io'
-import { db, isMember, memberIds } from './db.ts'
-import { notifyIfAway } from './push.ts'
+import { db, blocks, isMember, memberIds } from './db.ts'
+import { apns, notifyIfAway } from './push.ts'
 import type { CallEnd, CallKind, CallRing } from '../shared/types.ts'
 
 interface Call extends CallRing {
@@ -24,18 +24,28 @@ const label = (k: CallKind) => (k === 'video' ? 'video call' : 'voice call')
 
 type Ack = (r: { id?: string; error?: string }) => void
 
+// For the phone woken by a call push: is this call still ringing for me?
+export function callState(id: string, userId: string) {
+  const c = calls.get(id)
+  if (!c || (c.from !== userId && c.to !== userId)) return null
+  return { ...ring(c), state: c.answered ? 'answered' : 'ringing' }
+}
+const ring = ({ id, convId, from, kind }: Call): CallRing => ({ id, convId, from, kind })
+
 export function callHandlers(io: Server) {
   const end = (c: Call, reason: CallEnd) => {
     clearTimeout(c.timer)
     calls.delete(c.id)
     io.to([`user:${c.from}`, `user:${c.to}`]).emit('call:end', { id: c.id, reason })
-    if (reason === 'missed') notifyIfAway(io, c.to, { title: nameOf(c.from), body: `Missed ${label(c.kind)}`, convId: c.convId })
+    if (reason === 'missed')
+      notifyIfAway(io, c.to, { title: nameOf(c.from), body: `Missed ${label(c.kind)}`, convId: c.convId }, {
+        apns: { type: 'missed', convId: c.convId, callId: c.id, kind: c.kind },
+      })
   }
   const ringFor = (c: Call) => {
     clearTimeout(c.timer)
     c.timer = setTimeout(() => end(c, 'missed'), RING_MS)
   }
-  const ring = ({ id, convId, from, kind }: Call): CallRing => ({ id, convId, from, kind })
 
   return (socket: Socket) => {
     const me = socket.data.userId as string
@@ -54,7 +64,10 @@ export function callHandlers(io: Server) {
       const conv = typeof convId === 'string' && db.prepare('select kind from conversations where id = ?').get(convId) as { kind: string } | undefined
       if (!conv || conv.kind !== 'dm' || !isMember(convId as string, me) || (kind !== 'audio' && kind !== 'video'))
         return ack({ error: 'bad request' })
-      const to = memberIds(convId as string).find((u) => u !== me)!
+      const to = memberIds(convId as string).find((u) => u !== me)
+      if (!to) return ack({ error: 'This account was deleted.' })
+      if (blocks(me, to)) return ack({ error: `Unblock ${nameOf(to)} to call them.` })
+      if (blocks(to, me)) return ack({ error: `${nameOf(to)} isn't taking calls from you.` })
       if (inCall(me)) return ack({ error: 'You are already in a call.' })
       if (inCall(to)) return ack({ error: `${nameOf(to)} is on another call.` })
       const c: Call = { id: randomUUID(), convId: convId as string, from: me, kind, to, device: { [me]: socket.id, [to]: null }, answered: false }
@@ -62,7 +75,10 @@ export function callHandlers(io: Server) {
       ringFor(c)
       io.to(`user:${to}`).emit('call:ring', ring(c))
       ack({ id: c.id })
-      notifyIfAway(io, to, { title: nameOf(me), body: `Incoming ${label(kind)}`, convId: c.convId }, 45)
+      notifyIfAway(io, to, { title: nameOf(me), body: `Incoming ${label(kind)}`, convId: c.convId }, { ttl: 45 })
+      // Always, even with the app open: the app shows every call through CallKit
+      // and drops the duplicate by call id.
+      apns(to, { type: 'call', convId: c.convId, callId: c.id, kind, from: me })
     })
 
     socket.on('call:accept', (p: { id?: unknown }, ack: Ack) => {

@@ -7,8 +7,11 @@ Node 24+ runs `server/*.ts` directly (type stripping): imports need `.ts` extens
 - `npm run check`: typecheck
 - `npm test`: end-to-end tests (spawns the server)
 - `railway up`: deploy (project `talk`, volume at `/data`)
+- `railway up relay --path-as-root -p 093e4eba-958d-4c1e-8d34-915c4288894a -e production -s relay`: deploy the push relay (project `talk-push`); plain `railway up .` from `relay/` fails with "prefix not found"
 
 ## Gotchas
+- Keep every server change backward compatible: the live web app and the iPhone app talk to the same API.
+- APNs pushes carry ids only; the relay (`relay/index.ts`) builds payloads itself, so never pass text through it.
 - Resolve paths from env with `path.resolve`; `res.sendFile` rejects relative paths.
 - Set long-lived cache headers through `sendFile` options, never before the call, or a cached error sticks for a year.
 - Write Tailwind classes as full literal strings; built names like `rounded-t${side}-md` never get generated.

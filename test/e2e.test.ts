@@ -3,6 +3,7 @@
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn, type ChildProcess } from 'node:child_process'
+import { createServer } from 'node:http'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -16,10 +17,30 @@ const dataDir = mkdtempSync(path.join(tmpdir(), 'talk-test-'))
 let server: ChildProcess
 const sockets: Socket[] = []
 
+// Stands in for the APNs push relay and records what the server asks it to send.
+const relayed: Record<string, unknown>[] = []
+const relay = createServer((req, res) => {
+  let b = ''
+  req.on('data', (c) => (b += c))
+  req.on('end', () => (relayed.push(JSON.parse(b)), res.end('{}')))
+})
+const pushed = async (match: (p: Record<string, unknown>) => boolean) => {
+  for (let i = 0; i < 50; i++) {
+    const p = relayed.find(match)
+    if (p) return p
+    await new Promise((r) => setTimeout(r, 20))
+  }
+  assert.fail('no push reached the relay')
+}
+
 before(async () => {
+  await new Promise<void>((r) => relay.listen(0, r))
   server = spawn(process.execPath, ['server/index.ts'], {
     // relative on purpose: production configs may pass one
-    env: { ...process.env, PORT: String(PORT), DATA_DIR: path.relative(process.cwd(), dataDir), SETUP_CODE: 'setup-test' },
+    env: {
+      ...process.env, PORT: String(PORT), DATA_DIR: path.relative(process.cwd(), dataDir), SETUP_CODE: 'setup-test',
+      PUSH_RELAY_URL: `http://localhost:${(relay.address() as { port: number }).port}`,
+    },
     stdio: 'inherit',
   })
   for (let i = 0; i < 50; i++) {
@@ -32,6 +53,7 @@ before(async () => {
 after(() => {
   for (const s of sockets) s.close()
   server.kill()
+  relay.close()
   rmSync(dataDir, { recursive: true, force: true })
 })
 
@@ -167,9 +189,18 @@ test('three people: accounts, DM, group, realtime, attachments, access', async (
   assert.equal((await sc.emitWithAck('call:start', { convId: dm.id, kind: 'audio' })).error, 'bad request', 'outsider')
   assert.equal((await sa.emitWithAck('call:start', { convId: group.id, kind: 'audio' })).error, 'bad request', 'groups have no calls')
   const sb2 = await socket(bob)
+  const VOIP = 'ab'.repeat(32)
+  const ALERT = 'cd'.repeat(32)
+  assert.equal((await api(bob, 'POST', '/api/devices', { token: 'nope', kind: 'voip', env: 'sandbox' })).status, 400)
+  assert.equal((await api(bob, 'POST', '/api/devices', { token: VOIP, kind: 'voip', env: 'sandbox' })).status, 200)
+  assert.equal((await api(bob, 'POST', '/api/devices', { token: ALERT, kind: 'alert', env: 'production' })).status, 200)
   const rings = [sb, sb2].map((s) => new Promise<{ id: string; from: string }>((r) => s.once('call:ring', r)))
   const { id: callId } = await sa.emitWithAck('call:start', { convId: dm.id, kind: 'video' })
   for (const r of await Promise.all(rings)) assert.deepEqual([r.id, r.from], [callId, alice.id])
+  // the phone rings through a VoIP push even with the app open
+  assert.deepEqual(await pushed((p) => p.callId === callId), { token: VOIP, env: 'sandbox', type: 'call', convId: dm.id, callId, kind: 'video', from: alice.id })
+  assert.equal((await (await api(bob, 'GET', `/api/calls/${callId}`)).r.json()).state, 'ringing')
+  assert.equal((await api(carol, 'GET', `/api/calls/${callId}`)).status, 404)
   const elsewhere = new Promise<{ reason: string }>((r) => sb2.once('call:end', r))
   const accepted = new Promise((r) => sa.once('call:accepted', r))
   assert.equal((await sb.emitWithAck('call:accept', { id: callId })).id, callId)
@@ -184,7 +215,45 @@ test('three people: accounts, DM, group, realtime, attachments, access', async (
   const ended = new Promise<{ reason: string }>((r) => sa.once('call:end', r))
   sb.emit('call:hangup', { id: callId })
   assert.equal((await ended).reason, 'hangup')
-  assert.ok((await sc.emitWithAck('call:start', { convId: ca.id, kind: 'audio' })).id, 'free again after hangup')
+  const { id: carolCall } = await sc.emitWithAck('call:start', { convId: ca.id, kind: 'audio' })
+  assert.ok(carolCall, 'free again after hangup')
+  sc.emit('call:hangup', { id: carolCall })
+
+  // an away phone gets an ids-only alert push for a new message
+  sb.emit('active', false)
+  sb2.emit('active', false)
+  const { message: away } = await sa.emitWithAck('send', { convId: dm.id, body })
+  assert.deepEqual(await pushed((p) => p.messageId === away.id), { token: ALERT, env: 'production', type: 'message', convId: dm.id, messageId: away.id })
+
+  // block: the DM refuses both ways, their group messages disappear for me
+  assert.equal((await api(bob, 'PUT', `/api/blocks/${alice.id}`)).status, 200)
+  assert.deepEqual((await me(bob)).blocked, [alice.id])
+  assert.match((await sa.emitWithAck('send', { convId: dm.id, body })).error, /isn’t taking messages/)
+  assert.match((await sb.emitWithAck('send', { convId: dm.id, body })).error, /Unblock/)
+  assert.match((await sa.emitWithAck('call:start', { convId: dm.id, kind: 'audio' })).error, /isn't taking calls/)
+  const groupFor = async (cl: Client) => ((await (await api(cl, 'GET', `/api/conversations/${group.id}/messages`)).r.json()) as Message[]).length
+  assert.equal(await groupFor(bob), 0)
+  assert.equal(await groupFor(carol), 1)
+  assert.equal((await api(bob, 'DELETE', `/api/blocks/${alice.id}`)).status, 200)
+  assert.equal(await groupFor(bob), 1)
+
+  // report: stored, and blocks
+  assert.equal((await api(carol, 'POST', '/api/reports', { userId: alice.id, convId: dm.id })).status, 400, 'not my chat')
+  assert.equal((await api(carol, 'POST', '/api/reports', { userId: alice.id, convId: ca.id, note: 'spam' })).status, 200)
+  assert.deepEqual((await me(carol)).blocked, [alice.id])
+
+  // delete account: passphrase again, then gone; the public key stays for old keys
+  assert.equal((await api(carol, 'DELETE', '/api/me', { auth: alice.ident.auth })).status, 403)
+  const gone = new Promise((r) => sc.once('disconnect', r))
+  assert.equal((await api(carol, 'DELETE', '/api/me', { auth: carol.ident.auth })).status, 200)
+  await gone
+  assert.equal((await api(carol, 'GET', '/api/me')).status, 401)
+  assert.equal((await api(null, 'POST', '/api/login', { name: 'Carol', auth: carol.ident.auth })).status, 401)
+  const after = await me(alice)
+  assert.deepEqual(after.users.find((u) => u.id === carol.id), { id: carol.id, name: 'Deleted account', pubkey: carol.ident.publicKey, deleted: true })
+  assert.deepEqual(after.conversations.find((x) => x.id === ca.id)!.members, [alice.id])
+  assert.match((await sa.emitWithAck('call:start', { convId: ca.id, kind: 'audio' })).error, /deleted/)
+  assert.equal((await register('Carol', await invite(alice))).name, 'Carol', 'name is free again')
 })
 
 test('safety code is stable and short', async () => {

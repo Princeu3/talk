@@ -80,7 +80,7 @@ export function NewChat({ talk, onClose, onOpen }: { talk: Talk; onClose: () => 
 
   return (
     <Sheet title="New chat" onClose={onClose}>
-      <PeoplePicker talk={talk} ids={me.users.filter((u) => u.id !== me.user.id).map((u) => u.id)} picked={picked} onToggle={(id) => setPicked(toggle(picked, id))} />
+      <PeoplePicker talk={talk} ids={me.users.filter((u) => u.id !== me.user.id && !u.deleted).map((u) => u.id)} picked={picked} onToggle={(id) => setPicked(toggle(picked, id))} />
       {group && (
         <input
           value={title}
@@ -112,7 +112,7 @@ export function AddPeople({ talk, convId, onClose }: { talk: Talk; convId: strin
   return (
     <Sheet title="Add people" onClose={onClose}>
       <p className="mb-3 text-sm text-mut">New members can read the whole history of this group.</p>
-      <PeoplePicker talk={talk} ids={me.users.filter((u) => !conv.members.includes(u.id)).map((u) => u.id)} picked={picked} onToggle={(id) => setPicked(toggle(picked, id))} />
+      <PeoplePicker talk={talk} ids={me.users.filter((u) => !conv.members.includes(u.id) && !u.deleted).map((u) => u.id)} picked={picked} onToggle={(id) => setPicked(toggle(picked, id))} />
       <button onClick={add} disabled={busy || !picked.size} className={`${primary} mt-4`}>Add</button>
     </Sheet>
   )
@@ -219,7 +219,7 @@ export function Settings({ talk, onClose, onSignOut }: { talk: Talk; onClose: ()
       <section className="mb-7">
         <h3 className="mb-1 font-semibold">Safety codes</h3>
         <p className="mb-3 text-sm text-mut">Compare these in person or on a call. If they match on both phones, nobody swapped a key.</p>
-        {me.users.map((u) => (
+        {me.users.filter((u) => !u.deleted).map((u) => (
           <div key={u.id} className="flex items-center gap-3 py-1.5">
             <Avatar name={u.name} size={32} />
             <span className="flex-1 font-medium">{u.id === me.user.id ? `${u.name} (you)` : u.name}</span>

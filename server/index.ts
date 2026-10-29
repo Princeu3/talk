@@ -5,10 +5,10 @@ import { writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Server } from 'socket.io'
-import { db, BLOB_DIR, setting, isMember, memberIds } from './db.ts'
+import { db, BLOB_DIR, setting, blocks, isMember, memberIds } from './db.ts'
 import { authMatches, hashAuth, setSession, clearSession, userFromCookie, requireUser, throttled, recordFail } from './auth.ts'
 import { vapidPublicKey, saveSubscription, notifyIfAway } from './push.ts'
-import { callHandlers } from './calls.ts'
+import { callHandlers, callState } from './calls.ts'
 import type { Conversation, Me, Message, SendPayload, User } from '../shared/types.ts'
 
 const PORT = Number(process.env.PORT ?? 3000)
@@ -23,7 +23,9 @@ const isAuth = (v: unknown): v is string => typeof v === 'string' && /^[0-9a-f]{
 const isSealed = (v: unknown, max: number): v is string => typeof v === 'string' && v.length <= max && B64.test(v)
 
 const userCount = () => (db.prepare('select count(*) as n from users').get() as { n: number }).n
-const userExists = (id: string) => !!db.prepare('select 1 from users where id = ?').get(id)
+const userExists = (id: string) => !!db.prepare('select 1 from users where id = ? and deleted_at is null').get(id)
+// Hides messages from people `?` blocked, in groups (DMs refuse them at send).
+const NOT_BLOCKED = 'sender_id not in (select blocked_id from blocks where user_id = ?)'
 
 const app = express()
 const server = createServer(app)
@@ -82,31 +84,66 @@ app.post('/api/logout', (_req, res) => {
   res.json({ ok: true })
 })
 
-app.use('/api', requireUser)
+app.use('/api', requireUser, (req, res, next) => (userExists(req.userId) ? next() : void res.status(401).json({ error: 'signed out' })))
 
 app.get('/api/me', (req, res) => {
-  const user = db.prepare('select id, name, pubkey from users where id = ?').get(req.userId) as User | undefined
-  if (!user) return void res.status(401).json({ error: 'signed out' })
-  const users = db.prepare('select id, name, pubkey from users order by name').all() as unknown as User[]
+  const user = db.prepare('select id, name, pubkey from users where id = ?').get(req.userId) as unknown as User
+  // Deleted accounts keep their public key: keys they sealed for others still open.
+  const users = (
+    db.prepare(`select id, case when deleted_at is null then name else 'Deleted account' end as name, pubkey, deleted_at as deleted from users order by name`).all() as unknown as User[]
+  ).map(({ deleted, ...u }) => (deleted ? { ...u, deleted: true } : u))
+  const blocked = (db.prepare('select blocked_id as id from blocks where user_id = ?').all(req.userId) as { id: string }[]).map((r) => r.id)
   const rows = db
     .prepare(
       `select c.id, c.kind, c.title, m.wrapped_key as wrappedKey, m.wrapped_by as wrappedBy,
          (select max(created_at) from messages where conv_id = c.id) as lastMessageAt,
-         (select count(*) from messages where conv_id = c.id and id > m.last_read and sender_id != m.user_id) as unread
+         (select count(*) from messages where conv_id = c.id and id > m.last_read and sender_id != m.user_id and ${NOT_BLOCKED}) as unread
        from conversations c join members m on m.conv_id = c.id and m.user_id = ?
        order by coalesce(lastMessageAt, c.created_at) desc`,
     )
-    .all(req.userId) as unknown as Omit<Conversation, 'members' | 'lastMessage'>[]
+    .all(req.userId, req.userId) as unknown as Omit<Conversation, 'members' | 'lastMessage'>[]
   const last = db.prepare(
     `select id, conv_id as convId, sender_id as senderId, body, created_at as createdAt
-     from messages where conv_id = ? order by id desc limit 1`,
+     from messages where conv_id = ? and ${NOT_BLOCKED} order by id desc limit 1`,
   )
   const conversations = rows.map((c) => ({
     ...c,
     members: memberIds(c.id),
-    lastMessage: (last.get(c.id) as unknown as Message | undefined) ?? null,
+    lastMessage: (last.get(c.id, req.userId) as unknown as Message | undefined) ?? null,
   }))
-  res.json({ user, users, conversations, vapidPublicKey } satisfies Me)
+  res.json({ user, users, conversations, blocked, vapidPublicKey } satisfies Me)
+})
+
+// Deletes the account for good: sign-in, devices, memberships and every
+// message it sent. Asks for the passphrase-derived auth again first.
+app.delete('/api/me', (req, res) => {
+  const { auth } = req.body ?? {}
+  const row = db.prepare('select auth_hash from users where id = ?').get(req.userId) as { auth_hash: string }
+  if (!isAuth(auth) || !authMatches(auth, row.auth_hash)) return void res.status(403).json({ error: 'Wrong passphrase.' })
+  const convs = (db.prepare('select conv_id as id from members where user_id = ?').all(req.userId) as { id: string }[]).map((r) => r.id)
+  const others = new Set(convs.flatMap(memberIds))
+  db.exec('begin')
+  try {
+    for (const sql of [
+      'delete from messages where sender_id = ?',
+      'delete from members where user_id = ?',
+      'delete from invites where created_by = ?',
+      'delete from push_subs where user_id = ?',
+      'delete from devices where user_id = ?',
+      'delete from blocks where user_id = ?1 or blocked_id = ?1',
+      'delete from reports where reporter_id = ?',
+    ]) db.prepare(sql).run(req.userId)
+    // shortcut: attachment blobs stay on disk (sealed, now unreachable); sweep orphans if storage matters.
+    db.prepare(`update users set name = id, auth_hash = '', deleted_at = ? where id = ?`).run(Date.now(), req.userId)
+    db.exec('commit')
+  } catch (e) {
+    db.exec('rollback')
+    throw e
+  }
+  io.in(`user:${req.userId}`).disconnectSockets(true)
+  sync([...others])
+  clearSession(res)
+  res.json({ ok: true })
 })
 
 app.post('/api/invites', (req, res) => {
@@ -122,6 +159,58 @@ app.post('/api/push', (req, res) => {
     return void res.status(400).json({ error: 'bad subscription' })
   saveSubscription(req.userId, sub)
   res.json({ ok: true })
+})
+
+// iPhone push tokens (hex, from APNs). One phone has an alert token and a
+// VoIP token; a token moves to whoever signs in on that phone last.
+app.post('/api/devices', (req, res) => {
+  const { token, kind, env } = req.body ?? {}
+  if (typeof token !== 'string' || !/^[0-9a-f]{64,200}$/.test(token) || (kind !== 'alert' && kind !== 'voip') || (env !== 'sandbox' && env !== 'production'))
+    return void res.status(400).json({ error: 'bad request' })
+  db.prepare('insert or replace into devices (token, user_id, kind, env, created_at) values (?, ?, ?, ?, ?)').run(token, req.userId, kind, env, Date.now())
+  res.json({ ok: true })
+})
+
+// Called on sign-out, so the phone stops getting this account's pushes.
+app.delete('/api/devices/:token', (req, res) => {
+  db.prepare('delete from devices where token = ? and user_id = ?').run(req.params.token, req.userId)
+  res.json({ ok: true })
+})
+
+// Blocking hides someone's messages and calls from you; in a DM neither side
+// can send or call until it's lifted.
+app.put('/api/blocks/:userId', (req, res) => {
+  if (req.params.userId === req.userId || !userExists(req.params.userId)) return void res.status(400).json({ error: 'bad request' })
+  db.prepare('insert or ignore into blocks (user_id, blocked_id) values (?, ?)').run(req.userId, req.params.userId)
+  sync([req.userId])
+  res.json({ ok: true })
+})
+
+app.delete('/api/blocks/:userId', (req, res) => {
+  db.prepare('delete from blocks where user_id = ? and blocked_id = ?').run(req.userId, req.params.userId)
+  sync([req.userId])
+  res.json({ ok: true })
+})
+
+// Messages are end-to-end encrypted, so a report carries what the reporter
+// chose to quote. It also blocks. The server's owner reads reports in the logs.
+app.post('/api/reports', (req, res) => {
+  const { userId, convId, note } = req.body ?? {}
+  if (typeof userId !== 'string' || userId === req.userId || !userExists(userId) ||
+      (convId != null && (typeof convId !== 'string' || !isMember(convId, req.userId))) ||
+      (note != null && (typeof note !== 'string' || note.length > 2000)))
+    return void res.status(400).json({ error: 'bad request' })
+  db.prepare('insert into reports (reporter_id, user_id, conv_id, note, created_at) values (?, ?, ?, ?, ?)').run(req.userId, userId, convId ?? null, note ?? null, Date.now())
+  db.prepare('insert or ignore into blocks (user_id, blocked_id) values (?, ?)').run(req.userId, userId)
+  console.log(`[report] ${req.userId} reported ${userId}${convId ? ` in ${convId}` : ''}: ${JSON.stringify(note ?? '')}`)
+  sync([req.userId])
+  res.json({ ok: true })
+})
+
+app.get('/api/calls/:id', (req, res) => {
+  const call = callState(req.params.id, req.userId)
+  if (!call) return void res.status(404).json({ error: 'This call has ended.' })
+  res.set('Cache-Control', 'no-store').json(call)
 })
 
 // Cloudflare TURN relays calls that can't connect directly (cellular, strict
@@ -208,9 +297,9 @@ app.get('/api/conversations/:id/messages', (req, res) => {
   const rows = db
     .prepare(
       `select id, conv_id as convId, sender_id as senderId, body, created_at as createdAt
-       from messages where conv_id = ? and id < ? order by id desc limit 50`,
+        from messages where conv_id = ? and id < ? and ${NOT_BLOCKED} order by id desc limit 50`,
     )
-    .all(convId, before) as unknown as Message[]
+    .all(convId, before, req.userId) as unknown as Message[]
   res.json(rows.reverse())
 })
 
@@ -270,18 +359,24 @@ io.on('connection', (socket) => {
     if (typeof ack !== 'function') return
     if (typeof p?.convId !== 'string' || !isSealed(p.body, 64 * 1024) || !isMember(p.convId, me))
       return ack({ error: 'bad request' })
+    const members = memberIds(p.convId)
+    const dm = (db.prepare('select kind from conversations where id = ?').get(p.convId) as { kind: string }).kind === 'dm'
+    const other = dm ? members.find((u) => u !== me) : undefined
+    if (other && blocks(me, other)) return ack({ error: 'Unblock this person to message them.' })
+    if (other && blocks(other, me)) return ack({ error: 'This person isn’t taking messages from you.' })
     const createdAt = Date.now()
     const { lastInsertRowid } = db
       .prepare('insert into messages (conv_id, sender_id, body, created_at) values (?, ?, ?, ?)')
       .run(p.convId, me, p.body, createdAt)
     const message: Message = { id: Number(lastInsertRowid), convId: p.convId, senderId: me, body: p.body, createdAt }
-    const members = memberIds(p.convId)
-    io.to(members.map((u) => `user:${u}`)).emit('message', message)
+    const to = members.filter((u) => !blocks(u, me))
+    io.to(to.map((u) => `user:${u}`)).emit('message', message)
     ack({ message })
 
     if (p.quiet) return
     const sender = (db.prepare('select name from users where id = ?').get(me) as { name: string }).name
-    for (const u of members) if (u !== me) notifyIfAway(io, u, { title: sender, body: 'New message', convId: p.convId })
+    for (const u of to) if (u !== me)
+      notifyIfAway(io, u, { title: sender, body: 'New message', convId: p.convId }, { apns: { type: 'message', convId: p.convId, messageId: message.id } })
   })
 
   calls(socket)

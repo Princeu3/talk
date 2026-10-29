@@ -1,0 +1,11 @@
+{
+  "name": "talk-push-relay",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node index.ts"
+  }
+}

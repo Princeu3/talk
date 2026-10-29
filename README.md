@@ -46,8 +46,15 @@ Railway project `talk`, one service with a volume at `/data`. Deploy with `railw
 | `NODE_ENV` | `production` turns on secure cookies |
 | `CF_TURN_KEY_ID`, `CF_TURN_API_TOKEN` | Cloudflare TURN key for calls; without them calls use STUN only and fail on many cellular networks |
 | `SETUP_CODE`, `SESSION_SECRET`, `VAPID_KEYS` | Optional; generated and stored in the database when unset |
+| `PUSH_RELAY_URL` | Where iPhone app pushes go (default `https://push.princeuniverse.dev`); empty turns them off |
 
 The first-account link (`/?invite=<setup code>`) is printed in the deploy logs while no account exists.
+
+### Push relay
+
+The iPhone app's pushes need the app developer's APNs key, which self-hosted servers don't have. `relay/` is a small service that holds it and sends to Apple. It builds every payload from ids, so it can't carry message text, and it stores nothing. It also serves the privacy policy (`/privacy`) and support page (`/support`).
+
+Railway project `talk-push`. Deploy with `railway up relay --path-as-root -s relay`. Variables: `APNS_KEY` (the `.p8` contents), `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_BUNDLE_ID`.
 
 ## What it doesn't do
 

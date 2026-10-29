@@ -5,6 +5,7 @@ export interface User {
   id: string
   name: string
   pubkey: string // X25519 public key, base64url
+  deleted?: boolean // account deleted; kept so keys it sealed still open
 }
 
 export interface Conversation {
@@ -73,6 +74,7 @@ export interface Me {
   user: User
   users: User[]
   conversations: Conversation[]
+  blocked: string[] // user ids I blocked
   vapidPublicKey: string
 }
 
