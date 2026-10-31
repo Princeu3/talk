@@ -83,4 +83,5 @@ export interface SendPayload {
   body: string
   quiet?: boolean // no push (call logs: the ring already notified)
   seen?: boolean // not unread for anyone (an answered call: both were there)
+  cid?: string // client-made UUID; a resend with the same one acks the stored message
 }

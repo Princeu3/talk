@@ -94,6 +94,12 @@ if (!(db.prepare('pragma table_info(users)').all() as { name: string }[]).some((
 if (!(db.prepare('pragma table_info(messages)').all() as { name: string }[]).some((c) => c.name === 'seen'))
   db.exec('alter table messages add column seen integer not null default 0')
 
+// Client-made id, so an outbox resend after a lost ack stores nothing new.
+// Old clients send none; nulls never collide in a unique index.
+if (!(db.prepare('pragma table_info(messages)').all() as { name: string }[]).some((c) => c.name === 'cid'))
+  db.exec('alter table messages add column cid text')
+db.exec('create unique index if not exists messages_by_cid on messages (sender_id, cid)')
+
 // Secrets live in the DB (on the volume) so a fresh deploy needs no config;
 // an env var with the same name overrides.
 export function setting(key: string, make: () => string): string {

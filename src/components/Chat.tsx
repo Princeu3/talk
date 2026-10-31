@@ -175,6 +175,7 @@ export default function Chat({ talk, convId, onBack, onCall, onAddPeople }: {
   const me = talk.me!
   const conv = me.conversations.find((c) => c.id === convId)
   const list = talk.messages[convId] ?? []
+  const queued = talk.pending[convId] ?? []
   const [text, setText] = useState('')
   const [files, setFiles] = useState<File[]>([])
   const [busy, setBusy] = useState(false)
@@ -197,7 +198,7 @@ export default function Chat({ talk, convId, onBack, onCall, onAddPeople }: {
       el.scrollTop += el.scrollHeight - olderFrom.current
       olderFrom.current = null
     } else if (stick.current) el.scrollTop = el.scrollHeight
-  }, [list.length, convId])
+  }, [list.length, queued.length, convId])
 
   useEffect(() => {
     if (!zoom) return
@@ -393,6 +394,27 @@ export default function Chat({ talk, convId, onBack, onCall, onAddPeople }: {
             </div>
           )
         })}
+        {queued.map((p) => (
+          <div key={p.cid} className="mt-0.5 flex flex-col">
+            <Bubble
+              m={{ id: 0, convId, senderId: me.user.id, body: p.body, createdAt: p.createdAt, content: p.content, forged: false }}
+              mine first last talk={talk} onZoom={setZoom}
+            />
+            {p.sending ? (
+              <span className="mt-1 self-end px-2 text-xs text-mut" aria-live="polite">Sending…</span>
+            ) : (
+              <div className="flex items-center gap-1 self-end">
+                <span className="pl-2 text-xs text-danger" role="alert">{p.error ?? 'Not sent'}</span>
+                <button type="button" onClick={() => talk.retry(p)} className="min-h-11 rounded-full px-3 text-sm font-semibold text-accent hover:bg-raised">
+                  Retry
+                </button>
+                <button type="button" onClick={() => talk.discard(p)} className="min-h-11 rounded-full px-3 text-sm text-mut hover:bg-raised">
+                  Discard
+                </button>
+              </div>
+            )}
+          </div>
+        ))}
       </div>
 
       <form onSubmit={submit} className="pb-safe bg-surface px-2 pt-2">

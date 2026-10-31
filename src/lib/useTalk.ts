@@ -9,6 +9,19 @@ export interface Decrypted extends Message {
   forged: boolean // inner sender differs from the one the server claims
 }
 
+// A message on its way out, sealed. Resends reuse `cid`, so the server stores it once.
+export interface Pending {
+  cid: string
+  convId: string
+  body: string
+  content: MessageBody
+  createdAt: number
+  quiet?: boolean
+  seen?: boolean
+  sending: boolean // false: failed; shows a retry
+  error?: string // the server refused it; no automatic resend
+}
+
 const PAGE = 50
 export const MAX_FILE = 50 * 1024 * 1024
 
@@ -22,10 +35,14 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
   const [messages, setMessages] = useState<Record<string, Decrypted[]>>({})
   const [hasOlder, setHasOlder] = useState<Record<string, boolean>>({})
   const [activeId, setActiveId] = useState<string | null>(null)
+  // shortcut: in memory, so a reload drops unsent messages; IndexedDB if that bites.
+  const [pending, setPending] = useState<Record<string, Pending[]>>({})
 
   const meRef = useRef(me)
   const activeRef = useRef(activeId)
   activeRef.current = activeId
+  const pendingRef = useRef(pending)
+  pendingRef.current = pending
   const keys = useRef(new Map<string, { key: CryptoKey; raw: Uint8Array<ArrayBuffer> }>())
   const loaded = useRef(new Set<string>())
   const blobs = useRef(new Map<string, Promise<string>>())
@@ -85,6 +102,26 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
       return { ...prev, [convId]: [...byId.values()].sort((a, b) => a.id - b.id) }
     })
 
+  // null drops the item.
+  const patch = (p: Pending, change: Partial<Pending> | null) =>
+    setPending((prev) => ({
+      ...prev,
+      [p.convId]: (prev[p.convId] ?? []).flatMap((x) => (x.cid !== p.cid ? [x] : change ? [{ ...x, ...change }] : [])),
+    }))
+
+  const deliver = useCallback(async (p: Pending) => {
+    patch(p, { sending: true, error: undefined })
+    try {
+      const { convId, body, quiet, seen, cid } = p
+      const r = await socket.timeout(15_000).emitWithAck('send', { convId, body, quiet, seen, cid })
+      if (r.error) return patch(p, { sending: false, error: r.error })
+      merge(convId, [{ ...r.message, content: p.content, forged: false }])
+      patch(p, null)
+    } catch {
+      patch(p, { sending: false }) // timed out; the next connect resends it
+    }
+  }, [])
+
   const fetchPage = useCallback(
     async (convId: string, before?: number) => {
       const page = await api<Message[]>('GET', `/api/conversations/${convId}/messages${before ? `?before=${before}` : ''}`)
@@ -110,6 +147,8 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
       socket.emit('active', !document.hidden)
       onSync()
       for (const id of loaded.current) fetchPage(id).catch(() => {})
+      // In order: one socket keeps emits in sequence.
+      for (const list of Object.values(pendingRef.current)) for (const p of list) if (!p.error) deliver(p)
     }
     const onError = (e: Error) => e.message === 'signed out' && onSignedOut()
     const onVisibility = () => socket.emit('active', !document.hidden)
@@ -128,7 +167,7 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
       document.removeEventListener('visibilitychange', onVisibility)
       socket.disconnect()
     }
-  }, [load, decrypt, fetchPage, onSignedOut])
+  }, [load, decrypt, fetchPage, deliver, onSignedOut])
 
   // Mark the open conversation read whenever its newest message changes.
   const lastId = activeId ? messages[activeId]?.at(-1)?.id : undefined
@@ -164,12 +203,17 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
     if (first) return fetchPage(convId, first.id)
   }
 
+  // Sealed and queued; resolves before the server hears, and a failure shows on the pending row.
   const send = async (convId: string, content: Omit<MessageBody, 'from'>, quiet?: boolean, seen?: boolean) => {
     const { key } = await keyFor(convId)
-    const body = await c.sealMessage(key, convId, { ...content, from: meRef.current!.user.id })
-    const r = await socket.timeout(15_000).emitWithAck('send', { convId, body, quiet, seen })
-    if (r.error) throw new Error(r.error)
+    const full = { ...content, from: meRef.current!.user.id }
+    const body = await c.sealMessage(key, convId, full)
+    const p: Pending = { cid: crypto.randomUUID(), convId, body, content: full, createdAt: Date.now(), quiet, seen, sending: true }
+    setPending((prev) => ({ ...prev, [convId]: [...(prev[convId] ?? []), p] }))
+    deliver(p)
   }
+
+  const discard = (p: Pending) => patch(p, null)
 
   const sendWithFiles = async (convId: string, text: string, files: File[], voice?: Voice) => {
     const { key } = await keyFor(convId)
@@ -230,8 +274,8 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
   }
 
   return {
-    me, messages, hasOlder, activeId, totalUnread,
-    open, loadOlder, send, sendWithFiles, fileUrl, createConversation, addMember,
+    me, messages, pending, hasOlder, activeId, totalUnread,
+    open, loadOlder, send, retry: deliver, discard, sendWithFiles, fileUrl, createConversation, addMember,
   }
 }
 

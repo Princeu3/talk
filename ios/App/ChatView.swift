@@ -27,6 +27,7 @@ struct ChatView: View {
 
   var body: some View {
     let list = talk.messages[convId] ?? []
+    let queued = talk.pending.filter { $0.convId == convId }
     ScrollView {
       LazyVStack(spacing: 2) {
         if talk.hasOlder[convId] == true {
@@ -44,7 +45,24 @@ struct ChatView: View {
           }
             .padding(.top, gap ? 8 : 0)
         }
-        if list.isEmpty, conv != nil {
+        ForEach(queued) { p in
+          VStack(alignment: .trailing, spacing: 0) {
+            MessageRow(convId: convId, m: talk.shown(p), group: false, first: false, onCall: callAgain, onZoom: { zoom = $0 }) { _ in }
+            if p.sending {
+              Text("Sending…").font(.caption).foregroundStyle(Color.mut).padding(.horizontal, 4).padding(.vertical, 4)
+            } else {
+              HStack(spacing: 16) {
+                Button((p.error.map { $0 + " " } ?? "Not sent. ") + "Tap to retry.") { Task { await talk.deliver(p) } }
+                  .foregroundStyle(Color.danger)
+                Button("Delete", role: .destructive) { talk.discard(p) }
+                  .foregroundStyle(Color.mut)
+              }
+              .font(.caption).padding(.horizontal, 4).frame(minHeight: 32)
+            }
+          }
+          .frame(maxWidth: .infinity, alignment: .trailing)
+        }
+        if list.isEmpty, queued.isEmpty, conv != nil {
           Label("Messages here are end-to-end encrypted.", systemImage: "lock.fill")
             .font(.footnote).foregroundStyle(Color.mut).padding(.top, 40)
         }
@@ -206,7 +224,7 @@ struct ChatView: View {
     guard !t.isEmpty else { return }
     text = ""
     run {
-      // Put the text back on failure, as the web does, so a refused send isn't lost.
+      // Network trouble leaves it queued; only a failure to seal puts the text back.
       do { try await talk.send(convId, text: t) } catch { if text.isEmpty { text = t }; throw error }
     }
   }

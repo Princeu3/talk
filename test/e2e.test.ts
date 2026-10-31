@@ -176,6 +176,21 @@ test('three people: accounts, DM, group, realtime, attachments, access', async (
   await sa.emitWithAck('send', { convId: dm.id, body: await log(0), quiet: true })
   assert.equal((await me(bob)).conversations.find((x) => x.id === dm.id)!.unread, 1, 'missed call')
 
+  // outbox: a resend with the same client id stores one message, acks it twice, reaches Bob once
+  const count = async () => ((await (await api(bob, 'GET', `/api/conversations/${dm.id}/messages`)).r.json()) as Message[]).length
+  const before = await count()
+  const echoes: Message[] = []
+  const onEcho = (m: Message) => echoes.push(m)
+  sb.on('message', onEcho)
+  const cid = crypto.randomUUID()
+  const first = await sa.emitWithAck('send', { convId: dm.id, body, cid })
+  const resent = await sa.emitWithAck('send', { convId: dm.id, body, cid })
+  assert.equal(resent.message.id, first.message.id)
+  assert.equal(await count(), before + 1)
+  sb.off('message', onEcho)
+  assert.deepEqual(echoes.map((m) => m.id), [first.message.id])
+  assert.equal((await sa.emitWithAck('send', { convId: dm.id, body, cid: 'not-a-uuid' })).error, 'bad request')
+
   // group of two, then Carol is added by Bob re-wrapping the key
   const group = await createConv(alice, 'group', [alice, bob], 'Crew')
   assert.equal(group.res.status, 200)

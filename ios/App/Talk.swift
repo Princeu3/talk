@@ -10,6 +10,19 @@ struct Decrypted: Identifiable, Hashable {
   var forged: Bool { content.map { $0.from != message.senderId } ?? false }
 }
 
+// A message on its way out, sealed. Resends reuse `cid`, so the server stores it once.
+struct Pending: Codable, Identifiable, Hashable {
+  let cid: String
+  let convId: String
+  let body: String
+  let createdAt: Double
+  var quiet = false
+  var seen = false
+  var sending = true // false: failed; shows a retry
+  var error: String? // the server refused it; no automatic resend
+  var id: String { cid }
+}
+
 // All signed-in state and actions, like src/lib/useTalk.ts on the web.
 @Observable
 final class Talk {
@@ -19,6 +32,7 @@ final class Talk {
   private(set) var me: Me? { didSet { UNUserNotificationCenter.current().setBadgeCount(totalUnread) } }
   private(set) var messages: [String: [Decrypted]] = [:]
   private(set) var hasOlder: [String: Bool] = [:]
+  private(set) var pending: [Pending] = [] // unsent, oldest first, all chats
   private(set) var online = false // the socket is up; the list says "Connecting…" otherwise
   var activeId: String?
   var onSignedOut: () -> Void = {}
@@ -48,6 +62,8 @@ final class Talk {
       guard let self else { return }
       online = true
       socket.emit("active", visible)
+      // One at a time, so they land in the order they were written.
+      Task { for p in self.pending where p.error == nil { await self.deliver(p) } }
       Task {
         try? await self.load()
         for id in self.loaded { try? await self.fetchPage(id) }
@@ -186,6 +202,7 @@ final class Talk {
   private struct Snapshot: Codable {
     let me: Me
     let messages: [String: [Message]]
+    let pending: [Pending]? // absent in caches from before the outbox
   }
 
   private var cacheURL: URL {
@@ -196,20 +213,28 @@ final class Talk {
     guard let data = try? Data(contentsOf: cacheURL), let snap = try? JSONDecoder().decode(Snapshot.self, from: data) else { return }
     me = snap.me
     for (convId, list) in snap.messages { merge(convId, list.map(decrypt)) }
+    // Shown as failed until the socket is up and resends them, so nothing spins with no network.
+    pending = (snap.pending ?? []).map { var p = $0; p.sending = false; return p }
   }
 
-  // Coalesced: a burst of messages writes once.
-  private func save() {
+  // Coalesced: a burst of messages writes once. `now` for what mustn't be lost
+  // if the app is killed in the next second (a message just queued).
+  private func save(now: Bool = false) {
     saving?.cancel()
+    if now { return write() }
     saving = Task {
       try? await Task.sleep(for: .seconds(1))
-      guard !Task.isCancelled, let me else { return }
-      let snap = Snapshot(me: me, messages: messages.mapValues { $0.suffix(Self.page).map(\.message) })
-      let url = cacheURL
-      try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-      // Readable after first unlock, so a call push in a locked pocket still finds names and keys.
-      try? JSONEncoder().encode(snap).write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+      if !Task.isCancelled { write() }
     }
+  }
+
+  private func write() {
+    guard let me else { return }
+    let snap = Snapshot(me: me, messages: messages.mapValues { $0.suffix(Self.page).map(\.message) }, pending: pending)
+    let url = cacheURL
+    try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+    // Readable after first unlock, so a call push in a locked pocket still finds names and keys.
+    try? JSONEncoder().encode(snap).write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
   }
 
   // On sign-out: the next account on this phone mustn't see this one's chats.
@@ -220,13 +245,45 @@ final class Talk {
 
   // MARK: - sending
 
+  // Sealed, saved, then sent; returns once queued. A failure shows on the pending row.
   func send(_ convId: String, text: String? = nil, files refs: [FileRef]? = nil, call: CallLog? = nil, quiet: Bool = false, seen: Bool = false) async throws {
     let body = MessageBody(from: account.userId, text: text, files: refs, call: call)
     let sealed = try Crypto.sealMessage(try await key(convId), convId: convId, body)
-    let r = try await socket.ack("send", ["convId": convId, "body": sealed, "quiet": quiet, "seen": seen])
-    if let err = (try? JSONSerialization.jsonObject(with: r) as? [String: Any])?["error"] as? String {
-      throw APIError(status: 0, message: err)
+    let p = Pending(cid: UUID().uuidString.lowercased(), convId: convId, body: sealed, createdAt: Date().timeIntervalSince1970 * 1000, quiet: quiet, seen: seen)
+    pending.append(p)
+    save(now: true)
+    Task { await deliver(p) }
+  }
+
+  func deliver(_ p: Pending) async {
+    guard pending.contains(where: { $0.cid == p.cid }) else { return } // sent or discarded meanwhile
+    func set(_ change: (inout Pending) -> Void) {
+      guard let i = pending.firstIndex(where: { $0.cid == p.cid }) else { return }
+      change(&pending[i])
+      save()
     }
+    set { $0.sending = true; $0.error = nil }
+    struct Ack: Decodable { let message: Message?; let error: String? }
+    do {
+      let r = try await socket.ack("send", ["convId": p.convId, "body": p.body, "quiet": p.quiet, "seen": p.seen, "cid": p.cid])
+      let ack = try JSONDecoder().decode(Ack.self, from: r)
+      guard let msg = ack.message else { return set { $0.sending = false; $0.error = ack.error ?? "Couldn’t send." } }
+      pending.removeAll { $0.cid == p.cid }
+      merge(msg.convId, [decrypt(msg)])
+      save()
+    } catch {
+      set { $0.sending = false } // offline or no answer; the next connect resends it
+    }
+  }
+
+  func discard(_ p: Pending) {
+    pending.removeAll { $0.cid == p.cid }
+    save(now: true)
+  }
+
+  // A pending message as a row, decrypted in memory like the rest.
+  func shown(_ p: Pending) -> Decrypted {
+    decrypt(Message(id: 0, convId: p.convId, senderId: account.userId, body: p.body, createdAt: p.createdAt))
   }
 
   static let maxFile = 50 * 1024 * 1024

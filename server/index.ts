@@ -357,8 +357,14 @@ io.on('connection', (socket) => {
 
   socket.on('send', (p: SendPayload, ack: (r: { message?: Message; error?: string }) => void) => {
     if (typeof ack !== 'function') return
-    if (typeof p?.convId !== 'string' || !isSealed(p.body, 64 * 1024) || !isMember(p.convId, me))
+    if (typeof p?.convId !== 'string' || !isSealed(p.body, 64 * 1024) || !isMember(p.convId, me) ||
+        (p.cid !== undefined && (typeof p.cid !== 'string' || !UUID.test(p.cid))))
       return ack({ error: 'bad request' })
+    // A resend (the first ack was lost): ack what's stored, with no second broadcast or push.
+    const sent = p.cid && db
+      .prepare('select id, conv_id as convId, sender_id as senderId, body, created_at as createdAt from messages where sender_id = ? and cid = ?')
+      .get(me, p.cid) as unknown as Message | undefined
+    if (sent) return ack({ message: sent })
     const members = memberIds(p.convId)
     const dm = (db.prepare('select kind from conversations where id = ?').get(p.convId) as { kind: string }).kind === 'dm'
     const other = dm ? members.find((u) => u !== me) : undefined
@@ -366,8 +372,8 @@ io.on('connection', (socket) => {
     if (other && blocks(other, me)) return ack({ error: 'This person isn’t taking messages from you.' })
     const createdAt = Date.now()
     const { lastInsertRowid } = db
-      .prepare('insert into messages (conv_id, sender_id, body, created_at, seen) values (?, ?, ?, ?, ?)')
-      .run(p.convId, me, p.body, createdAt, p.seen === true ? 1 : 0)
+      .prepare('insert into messages (conv_id, sender_id, body, created_at, seen, cid) values (?, ?, ?, ?, ?, ?)')
+      .run(p.convId, me, p.body, createdAt, p.seen === true ? 1 : 0, p.cid ?? null)
     const message: Message = { id: Number(lastInsertRowid), convId: p.convId, senderId: me, body: p.body, createdAt }
     const to = members.filter((u) => !blocks(u, me))
     io.to(to.map((u) => `user:${u}`)).emit('message', message)
