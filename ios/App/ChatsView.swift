@@ -35,7 +35,7 @@ struct ChatsView: View {
       .listStyle(.plain)
       .scrollContentBackground(.hidden)
       .background(Color.bg)
-      .navigationTitle("Chats")
+      .navigationTitle(talk.online ? "Chats" : "Connecting…")
       .navigationDestination(for: String.self) { ChatView(convId: $0) }
       .toolbar {
         ToolbarItem(placement: .topBarLeading) {

@@ -77,6 +77,9 @@ targets:
     sources:
       - Tests
       - Shared
+      - App/PeerConfig.swift
+    dependencies:
+      - package: WebRTC
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.princeuniverse.talk.tests

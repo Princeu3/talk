@@ -32,7 +32,7 @@ function Main({ ident, onSignOut }: { ident: StoredIdentity; onSignOut: () => vo
   const talk = useTalk(ident.privateKey, onSignOut)
   const [sheet, setSheet] = useState<'new' | 'settings' | 'add' | null>(null)
   const { open, me, send } = talk
-  const calls = useCall(useCallback((convId, kind, ms) => void send(convId, { call: { kind, ms } }, true).catch(() => {}), [send]))
+  const calls = useCall(useCallback((convId, kind, ms) => void send(convId, { call: { kind, ms } }, true, ms > 0).catch(() => {}), [send]))
   const { call } = calls
   const [minimized, setMinimized] = useState(false)
   useEffect(() => {

@@ -21,6 +21,8 @@ Node 24+ runs `server/*.ts` directly (type stripping): imports need `.ts` extens
 - Write Tailwind classes as full literal strings; built names like `rounded-t${side}-md` never get generated.
 - Railway sets `PORT=8080`; point domains at 8080.
 - Calls are 1:1 WebRTC, signaled over our socket (`server/calls.ts`, `src/lib/useCall.ts`) and never stored. `/api/ice` hands out Cloudflare TURN credentials from `CF_TURN_KEY_ID`/`CF_TURN_API_TOKEN`, since Railway can't host TURN (no UDP). To test the cellular path, force `iceTransportPolicy: 'relay'` in the browser.
+- Both call sides offer at once, so native WebRTC needs `enableImplicitRollback` (`ios/App/PeerConfig.swift`); build every iPhone peer connection from `RTCConfiguration.talk`.
+- Wire anything a push needs (calls, the socket) in `AppDelegate.didFinishLaunching`, never in SwiftUI `onAppear`: a VoIP push launches the app with no window.
 - The iPhone app's crypto must match `src/lib/crypto.ts` byte for byte; `ios/Tests/vectors.json` comes from `ios/Tests/make-vectors.ts`, so regenerate it after any web crypto change.
 - The Simulator ends every CallKit call (no system call UI there), so calls only test on a device. Messages, sign-in and settings test fine against a local server (`http://localhost:<port>/?invite=...`, allowed by `NSAllowsLocalNetworking`). For App Store screenshots, launch a Debug build with `-demoCall <name>` to show a live call screen with that person.
 - Test browser profiles may keep year-cached 500s for old attachments; a 500 with no server log line is that cache, not a bug.

@@ -90,6 +90,10 @@ db.exec(`
 if (!(db.prepare('pragma table_info(users)').all() as { name: string }[]).some((c) => c.name === 'deleted_at'))
   db.exec('alter table users add column deleted_at integer')
 
+// Seen messages (answered call logs) never count as unread.
+if (!(db.prepare('pragma table_info(messages)').all() as { name: string }[]).some((c) => c.name === 'seen'))
+  db.exec('alter table messages add column seen integer not null default 0')
+
 // Secrets live in the DB (on the volume) so a fresh deploy needs no config;
 // an env var with the same name overrides.
 export function setting(key: string, make: () => string): string {

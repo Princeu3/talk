@@ -35,6 +35,9 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
   const load = useCallback(async () => {
     try {
       const m = await api<Me>('GET', '/api/me')
+      // The open chat is read even if the server hasn't heard yet (that request may still be in flight).
+      const shown = activeRef.current && !document.hidden ? activeRef.current : null
+      m.conversations = m.conversations.map((x) => (x.id === shown ? { ...x, unread: 0 } : x))
       meRef.current = m
       setMe(m)
       for (const conv of m.conversations)
@@ -98,7 +101,7 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
       const d = await decrypt(msg)
       merge(msg.convId, [d])
       const mine = msg.senderId === meRef.current?.user.id
-      const seen = activeRef.current === msg.convId && !document.hidden
+      const seen = (activeRef.current === msg.convId && !document.hidden) || !!d.content?.call?.ms
       setMe((m) => m && { ...m, conversations: bump(m.conversations, msg, !mine && !seen) })
     }
     const onSync = () => void load().catch(() => {})
@@ -161,10 +164,10 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
     if (first) return fetchPage(convId, first.id)
   }
 
-  const send = async (convId: string, content: Omit<MessageBody, 'from'>, quiet?: boolean) => {
+  const send = async (convId: string, content: Omit<MessageBody, 'from'>, quiet?: boolean, seen?: boolean) => {
     const { key } = await keyFor(convId)
     const body = await c.sealMessage(key, convId, { ...content, from: meRef.current!.user.id })
-    const r = await socket.timeout(15_000).emitWithAck('send', { convId, body, quiet })
+    const r = await socket.timeout(15_000).emitWithAck('send', { convId, body, quiet, seen })
     if (r.error) throw new Error(r.error)
   }
 

@@ -1,6 +1,7 @@
 import CryptoKit
 import Foundation
 import Observation
+import UserNotifications
 
 struct Decrypted: Identifiable, Hashable {
   let message: Message
@@ -13,9 +14,12 @@ struct Decrypted: Identifiable, Hashable {
 @Observable
 final class Talk {
   let account: Account
-  private(set) var me: Me?
+  // The icon badge follows the server's unread counts, which the notification
+  // extension also uses, so the two never drift apart.
+  private(set) var me: Me? { didSet { UNUserNotificationCenter.current().setBadgeCount(totalUnread) } }
   private(set) var messages: [String: [Decrypted]] = [:]
   private(set) var hasOlder: [String: Bool] = [:]
+  private(set) var online = false // the socket is up; the list says "Connecting…" otherwise
   var activeId: String?
   var onSignedOut: () -> Void = {}
 
@@ -23,6 +27,9 @@ final class Talk {
   @ObservationIgnored private var keys: [String: Data] = [:]
   @ObservationIgnored private var loaded = Set<String>()
   @ObservationIgnored private var files: [String: Data] = [:]
+  // On screen, not just running: a call push wakes the app in the background.
+  @ObservationIgnored private var visible = false
+  @ObservationIgnored private var saving: Task<Void, Never>?
   private static let page = 50
 
   var api: API { account.api }
@@ -39,13 +46,16 @@ final class Talk {
     // Reconnects (phones drop sockets constantly) refetch what we may have missed.
     socket.on("connect") { [weak self] _ in
       guard let self else { return }
-      socket.emit("active", true)
+      online = true
+      socket.emit("active", visible)
       Task {
         try? await self.load()
         for id in self.loaded { try? await self.fetchPage(id) }
       }
     }
     socket.onSignedOut = { [weak self] in self?.onSignedOut() }
+    socket.onDrop = { [weak self] in self?.online = false }
+    restore()
   }
 
   func start() {
@@ -54,8 +64,11 @@ final class Talk {
   }
 
   func setActive(_ visible: Bool) {
-    if visible { socket.connect() }
+    self.visible = visible
     socket.emit("active", visible)
+    guard visible else { return }
+    socket.connect()
+    if let activeId { markRead(activeId) }
   }
 
   // MARK: - loading
@@ -66,12 +79,15 @@ final class Talk {
       var m: Me = try await api.call("GET", "/api/me")
       m.conversations = m.conversations.map { c in
         var c = c
-        if c.id == activeId { c.unread = 0 }
+        if visible && c.id == activeId { c.unread = 0 }
         return c
       }
       me = m
+      // Tell the server too, or the next push's badge counts what's on screen.
+      if visible, let activeId { markRead(activeId) }
       Names.save(m.users)
       for c in m.conversations { if let last = c.lastMessage { merge(c.id, [decrypt(last)]) } }
+      save()
       return m
     } catch let e as APIError where e.status == 401 {
       onSignedOut()
@@ -118,6 +134,7 @@ final class Talk {
     merge(convId, page.map(decrypt))
     if before != nil || !loaded.contains(convId) { hasOlder[convId] = page.count == Self.page }
     loaded.insert(convId)
+    save()
   }
 
   func open(_ convId: String?) {
@@ -133,24 +150,28 @@ final class Talk {
 
   private func receive(_ msg: Message) async {
     _ = try? await rawKey(msg.convId)
-    merge(msg.convId, [decrypt(msg)])
+    let d = decrypt(msg)
+    merge(msg.convId, [d])
     let mine = msg.senderId == account.userId
-    let seen = activeId == msg.convId
+    let answered = (d.content?.call?.ms ?? 0) > 0
+    let seen = visible && activeId == msg.convId
     guard var m = me else { return }
     m.conversations = m.conversations.map { c in
       guard c.id == msg.convId else { return c }
       var c = c
       c.lastMessageAt = msg.createdAt
       c.lastMessage = msg
-      if !mine && !seen { c.unread += 1 }
+      if !mine && !seen && !answered { c.unread += 1 }
       return c
     }.sorted { ($0.lastMessageAt ?? 0) > ($1.lastMessageAt ?? 0) }
     me = m
     if seen { markRead(msg.convId) }
+    save()
   }
 
   func markRead(_ convId: String) {
-    guard let last = messages[convId]?.last?.id ?? me?.conversations.first(where: { $0.id == convId })?.lastMessage?.id else { return }
+    let ids = [messages[convId]?.last?.id, me?.conversations.first(where: { $0.id == convId })?.lastMessage?.id]
+    guard let last = ids.compactMap({ $0 }).max() else { return }
     Task { let _: OK? = try? await api.call("POST", "/api/conversations/\(convId)/read", ["upTo": last]) }
     if var m = me, let i = m.conversations.firstIndex(where: { $0.id == convId }), m.conversations[i].unread > 0 {
       m.conversations[i].unread = 0
@@ -158,12 +179,51 @@ final class Talk {
     }
   }
 
+  // MARK: - offline cache
+
+  // What the server last sent, still sealed, so chats open with no network.
+  // Bodies are decrypted only in memory, like everything else here.
+  private struct Snapshot: Codable {
+    let me: Me
+    let messages: [String: [Message]]
+  }
+
+  private var cacheURL: URL {
+    URL.applicationSupportDirectory.appending(path: "cache-\(account.userId).json")
+  }
+
+  private func restore() {
+    guard let data = try? Data(contentsOf: cacheURL), let snap = try? JSONDecoder().decode(Snapshot.self, from: data) else { return }
+    me = snap.me
+    for (convId, list) in snap.messages { merge(convId, list.map(decrypt)) }
+  }
+
+  // Coalesced: a burst of messages writes once.
+  private func save() {
+    saving?.cancel()
+    saving = Task {
+      try? await Task.sleep(for: .seconds(1))
+      guard !Task.isCancelled, let me else { return }
+      let snap = Snapshot(me: me, messages: messages.mapValues { $0.suffix(Self.page).map(\.message) })
+      let url = cacheURL
+      try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+      // Readable after first unlock, so a call push in a locked pocket still finds names and keys.
+      try? JSONEncoder().encode(snap).write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+    }
+  }
+
+  // On sign-out: the next account on this phone mustn't see this one's chats.
+  func forget() {
+    saving?.cancel()
+    try? FileManager.default.removeItem(at: cacheURL)
+  }
+
   // MARK: - sending
 
-  func send(_ convId: String, text: String? = nil, files refs: [FileRef]? = nil, call: CallLog? = nil, quiet: Bool = false) async throws {
+  func send(_ convId: String, text: String? = nil, files refs: [FileRef]? = nil, call: CallLog? = nil, quiet: Bool = false, seen: Bool = false) async throws {
     let body = MessageBody(from: account.userId, text: text, files: refs, call: call)
     let sealed = try Crypto.sealMessage(try await key(convId), convId: convId, body)
-    let r = try await socket.ack("send", ["convId": convId, "body": sealed, "quiet": quiet])
+    let r = try await socket.ack("send", ["convId": convId, "body": sealed, "quiet": quiet, "seen": seen])
     if let err = (try? JSONSerialization.jsonObject(with: r) as? [String: Any])?["error"] as? String {
       throw APIError(status: 0, message: err)
     }

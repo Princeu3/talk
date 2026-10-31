@@ -72,7 +72,7 @@ final class Calls: NSObject {
   private(set) var current: CallView?
   var minimized = false
   var openChat: String? // a chat to show, from a call or a notification tap
-  var error: String?
+  var error: String? // shown as an alert, with a way to Settings
 
   @ObservationIgnored private var talk: Talk?
   @ObservationIgnored private var session: Session?
@@ -109,7 +109,9 @@ final class Calls: NSObject {
     registry = r
   }
 
+  // Runs at launch and again when the window appears; handlers go on once per account.
   func attach(_ talk: Talk) {
+    guard self.talk !== talk else { return }
     self.talk = talk
     if let token = registry?.pushToken(for: .voIP) { talk.registerDevice(token: token, kind: "voip") }
     let s = talk.socket
@@ -158,6 +160,27 @@ final class Calls: NSObject {
 
   func start(convId: String, peer: String, kind: String) {
     guard session == nil, talk != nil else { return }
+    Task {
+      guard await mediaAllowed(video: kind == "video"), session == nil else { return }
+      place(convId: convId, peer: peer, kind: kind)
+    }
+  }
+
+  // Asked before a call, not during one: a denied mic or camera would mean a
+  // silent or black call with no reason given.
+  private func mediaAllowed(video: Bool) async -> Bool {
+    guard await AVAudioApplication.requestRecordPermission() else {
+      error = "Allow Talk to use the microphone in Settings to make calls."
+      return false
+    }
+    if video, !(await AVCaptureDevice.requestAccess(for: .video)) {
+      error = "Allow Talk to use the camera in Settings for video calls."
+      return false
+    }
+    return true
+  }
+
+  private func place(convId: String, peer: String, kind: String) {
     let s = Session(id: nil, uuid: UUID(), convId: convId, peer: peer, kind: kind, outgoing: true)
     session = s
     current = CallView(convId: convId, peer: peer, kind: kind, phase: .calling, camera: s.camera, remoteCamera: kind == "video")
@@ -187,6 +210,14 @@ final class Calls: NSObject {
   // Off stops the camera (its light goes out); on starts it, adding video to a voice call.
   func toggleCamera() {
     guard let s = session else { return }
+    if !s.camera, AVCaptureDevice.authorizationStatus(for: .video) != .authorized {
+      // Not yet asked (answered on the lock screen) or turned off in Settings.
+      Task {
+        if await AVCaptureDevice.requestAccess(for: .video) { toggleCamera() }
+        else { error = "Allow Talk to use the camera in Settings for video calls." }
+      }
+      return
+    }
     if s.camera {
       s.capturer?.stopCapture()
       s.camera = false
@@ -286,7 +317,7 @@ final class Calls: NSObject {
     s.pc?.close()
     if s.outgoing, s.id != nil, let talk {
       let ms = s.since.map { Date().timeIntervalSince($0) * 1000 } ?? 0
-      Task { try? await talk.send(s.convId, call: CallLog(kind: s.kind, ms: ms), quiet: true) }
+      Task { try? await talk.send(s.convId, call: CallLog(kind: s.kind, ms: ms), quiet: true, seen: ms > 0) }
     }
     if session === s { session = nil }
     guard let note else { return current = nil }
@@ -328,10 +359,7 @@ final class Calls: NSObject {
   }
 
   private func connect(_ s: Session) async {
-    let config = RTCConfiguration()
-    config.iceServers = await iceServers()
-    config.sdpSemantics = .unifiedPlan
-    config.continualGatheringPolicy = .gatherContinually
+    let config = RTCConfiguration.talk(await iceServers())
     guard !s.done else { return }
     let events = PeerEvents { [weak self] e in Task { @MainActor in self?.event(s, e) } }
     guard let pc = factory.peerConnection(with: config, constraints: RTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: nil), delegate: events) else {
@@ -547,7 +575,12 @@ extension Calls: CXProviderDelegate {
     s.accepted = true
     configureAudio(video: s.kind == "video")
     action.fulfill()
-    patch { $0.phase = .connecting }
+    // No prompt can show over the lock screen: answer without what we may not use.
+    if s.camera, AVCaptureDevice.authorizationStatus(for: .video) != .authorized { s.camera = false }
+    if AVAudioApplication.shared.recordPermission == .denied {
+      error = "Talk can't use the microphone, so they can't hear you. Allow it in Settings."
+    }
+    patch { $0.phase = .connecting; $0.camera = s.camera }
     minimized = false
     Task {
       // Answered from the lock screen: the socket may still be connecting.

@@ -82,4 +82,5 @@ export interface SendPayload {
   convId: string
   body: string
   quiet?: boolean // no push (call logs: the ring already notified)
+  seen?: boolean // not unread for anyone (an answered call: both were there)
 }

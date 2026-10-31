@@ -1,4 +1,5 @@
 import Foundation
+import Network
 
 // A small Socket.IO v5 client (Engine.IO 4, websocket only), enough for
 // Talk: events both ways and acks for what we emit. socket.io-client-swift
@@ -6,6 +7,7 @@ import Foundation
 // 0 open, 2/3 ping/pong, 40 connected, 44 refused, 42 event, 43 ack.
 final class Socket {
   var onSignedOut: () -> Void = {}
+  var onDrop: () -> Void = {}
   private(set) var connected = false
 
   private let url: URL
@@ -18,6 +20,7 @@ final class Socket {
   private var retries = 0
   private var lastHeard = Date()
   private var watchdog: Task<Void, Never>?
+  private let path = NWPathMonitor()
 
   init(account: Account) {
     var c = URLComponents(url: account.server, resolvingAgainstBaseURL: false)!
@@ -26,6 +29,16 @@ final class Socket {
     c.queryItems = [.init(name: "EIO", value: "4"), .init(name: "transport", value: "websocket")]
     url = c.url!
     cookie = account.cookie
+    // Network back (out of a tunnel, wifi joined): reconnect now, not at the next backoff.
+    path.pathUpdateHandler = { [weak self] p in
+      guard p.status == .satisfied else { return }
+      Task { @MainActor in
+        guard let self, self.wanted else { return }
+        self.retries = 0
+        self.connect()
+      }
+    }
+    path.start(queue: .main)
   }
 
   // "connect" fires on every (re)connect, with no data.
@@ -147,6 +160,7 @@ final class Socket {
     watchdog?.cancel()
     task?.cancel(with: .goingAway, reason: nil)
     task = nil
+    if connected { onDrop() }
     connected = false
     for (_, c) in acks { c.resume(throwing: APIError(status: 0, message: "Connection lost.")) }
     acks = [:]

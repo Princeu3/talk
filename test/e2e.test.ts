@@ -169,6 +169,13 @@ test('three people: accounts, DM, group, realtime, attachments, access', async (
   const hist = (await (await api(bob, 'GET', `/api/conversations/${dm.id}/messages`)).r.json()) as Message[]
   assert.equal(hist.length, 1)
 
+  // call logs: an answered call isn't unread (both were there), a missed one is
+  const log = (ms: number) => c.sealMessage(aKey, dm.id, { from: alice.id, call: { kind: 'audio', ms } } satisfies MessageBody)
+  await sa.emitWithAck('send', { convId: dm.id, body: await log(61_000), quiet: true, seen: true })
+  assert.equal((await me(bob)).conversations.find((x) => x.id === dm.id)!.unread, 0, 'answered call')
+  await sa.emitWithAck('send', { convId: dm.id, body: await log(0), quiet: true })
+  assert.equal((await me(bob)).conversations.find((x) => x.id === dm.id)!.unread, 1, 'missed call')
+
   // group of two, then Carol is added by Bob re-wrapping the key
   const group = await createConv(alice, 'group', [alice, bob], 'Crew')
   assert.equal(group.res.status, 200)

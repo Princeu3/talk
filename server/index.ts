@@ -97,7 +97,7 @@ app.get('/api/me', (req, res) => {
     .prepare(
       `select c.id, c.kind, c.title, m.wrapped_key as wrappedKey, m.wrapped_by as wrappedBy,
          (select max(created_at) from messages where conv_id = c.id) as lastMessageAt,
-         (select count(*) from messages where conv_id = c.id and id > m.last_read and sender_id != m.user_id and ${NOT_BLOCKED}) as unread
+         (select count(*) from messages where conv_id = c.id and id > m.last_read and sender_id != m.user_id and not seen and ${NOT_BLOCKED}) as unread
        from conversations c join members m on m.conv_id = c.id and m.user_id = ?
        order by coalesce(lastMessageAt, c.created_at) desc`,
     )
@@ -366,8 +366,8 @@ io.on('connection', (socket) => {
     if (other && blocks(other, me)) return ack({ error: 'This person isn’t taking messages from you.' })
     const createdAt = Date.now()
     const { lastInsertRowid } = db
-      .prepare('insert into messages (conv_id, sender_id, body, created_at) values (?, ?, ?, ?)')
-      .run(p.convId, me, p.body, createdAt)
+      .prepare('insert into messages (conv_id, sender_id, body, created_at, seen) values (?, ?, ?, ?, ?)')
+      .run(p.convId, me, p.body, createdAt, p.seen === true ? 1 : 0)
     const message: Message = { id: Number(lastInsertRowid), convId: p.convId, senderId: me, body: p.body, createdAt }
     const to = members.filter((u) => !blocks(u, me))
     io.to(to.map((u) => `user:${u}`)).emit('message', message)
