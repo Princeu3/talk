@@ -18,7 +18,7 @@ struct Pending: Codable, Identifiable, Hashable {
   let createdAt: Double
   var quiet = false
   var seen = false
-  var sending = true // false: failed; shows a retry
+  var sending = true // false: waiting for the socket
   var error: String? // the server refused it; no automatic resend
   var id: String { cid }
 }
@@ -44,6 +44,8 @@ final class Talk {
   // On screen, not just running: a call push wakes the app in the background.
   @ObservationIgnored private var visible = false
   @ObservationIgnored private var saving: Task<Void, Never>?
+  @ObservationIgnored private var draining = false
+  @ObservationIgnored private var forgotten = false // signed out: a late delivery mustn't write the cache back
   private static let page = 50
 
   var api: API { account.api }
@@ -62,8 +64,8 @@ final class Talk {
       guard let self else { return }
       online = true
       socket.emit("active", visible)
-      // One at a time, so they land in the order they were written.
-      Task { for p in self.pending where p.error == nil { await self.deliver(p) } }
+      for i in pending.indices where pending[i].error == nil { pending[i].sending = true }
+      Task { await self.drain() }
       Task {
         try? await self.load()
         for id in self.loaded { try? await self.fetchPage(id) }
@@ -229,7 +231,7 @@ final class Talk {
   }
 
   private func write() {
-    guard let me else { return }
+    guard let me, !forgotten else { return }
     let snap = Snapshot(me: me, messages: messages.mapValues { $0.suffix(Self.page).map(\.message) }, pending: pending)
     let url = cacheURL
     try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -239,6 +241,7 @@ final class Talk {
 
   // On sign-out: the next account on this phone mustn't see this one's chats.
   func forget() {
+    forgotten = true
     saving?.cancel()
     try? FileManager.default.removeItem(at: cacheURL)
   }
@@ -249,31 +252,44 @@ final class Talk {
   func send(_ convId: String, text: String? = nil, files refs: [FileRef]? = nil, call: CallLog? = nil, quiet: Bool = false, seen: Bool = false) async throws {
     let body = MessageBody(from: account.userId, text: text, files: refs, call: call)
     let sealed = try Crypto.sealMessage(try await key(convId), convId: convId, body)
-    let p = Pending(cid: UUID().uuidString.lowercased(), convId: convId, body: sealed, createdAt: Date().timeIntervalSince1970 * 1000, quiet: quiet, seen: seen)
+    // The server's limit; thrown here, so the draft comes back instead of a row that can never send.
+    guard sealed.count <= 64 * 1024 else { throw APIError(status: 0, message: "That message is too long to send.") }
+    let p = Pending(cid: UUID().uuidString.lowercased(), convId: convId, body: sealed, createdAt: Date().timeIntervalSince1970 * 1000, quiet: quiet, seen: seen, sending: socket.connected)
     pending.append(p)
     save(now: true)
-    Task { await deliver(p) }
+    Task { await drain() }
   }
 
-  func deliver(_ p: Pending) async {
-    guard pending.contains(where: { $0.cid == p.cid }) else { return } // sent or discarded meanwhile
-    func set(_ change: (inout Pending) -> Void) {
-      guard let i = pending.firstIndex(where: { $0.cid == p.cid }) else { return }
-      change(&pending[i])
-      save()
-    }
-    set { $0.sending = true; $0.error = nil }
+  // One at a time, oldest first, so messages land in the order they were written.
+  private func drain() async {
+    guard !draining else { return }
+    draining = true
     struct Ack: Decodable { let message: Message?; let error: String? }
-    do {
-      let r = try await socket.ack("send", ["convId": p.convId, "body": p.body, "quiet": p.quiet, "seen": p.seen, "cid": p.cid])
-      let ack = try JSONDecoder().decode(Ack.self, from: r)
-      guard let msg = ack.message else { return set { $0.sending = false; $0.error = ack.error ?? "Couldn’t send." } }
-      pending.removeAll { $0.cid == p.cid }
-      merge(msg.convId, [decrypt(msg)])
-      save()
-    } catch {
-      set { $0.sending = false } // offline or no answer; the next connect resends it
+    while socket.connected, let p = pending.first(where: { $0.error == nil }) {
+      do {
+        let r = try await socket.ack("send", ["convId": p.convId, "body": p.body, "quiet": p.quiet, "seen": p.seen, "cid": p.cid])
+        let ack = try? JSONDecoder().decode(Ack.self, from: r)
+        if let msg = ack?.message {
+          pending.removeAll { $0.cid == p.cid }
+          merge(msg.convId, [decrypt(msg)])
+        } else if let i = pending.firstIndex(where: { $0.cid == p.cid }) {
+          pending[i].sending = false
+          pending[i].error = ack?.error ?? "Couldn’t send."
+        }
+        save()
+      } catch {
+        // No answer in time, or the link dropped. Online, the loop resends it; the cid stores it once.
+      }
     }
+    for i in pending.indices where pending[i].error == nil { pending[i].sending = false }
+    draining = false
+  }
+
+  func retry(_ p: Pending) {
+    guard let i = pending.firstIndex(where: { $0.cid == p.cid }) else { return }
+    pending[i].error = nil
+    pending[i].sending = socket.connected
+    Task { await drain() }
   }
 
   func discard(_ p: Pending) {

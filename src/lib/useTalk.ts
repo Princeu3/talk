@@ -18,7 +18,7 @@ export interface Pending {
   createdAt: number
   quiet?: boolean
   seen?: boolean
-  sending: boolean // false: failed; shows a retry
+  sending: boolean // false: waiting for the socket
   error?: string // the server refused it; no automatic resend
 }
 
@@ -35,14 +35,15 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
   const [messages, setMessages] = useState<Record<string, Decrypted[]>>({})
   const [hasOlder, setHasOlder] = useState<Record<string, boolean>>({})
   const [activeId, setActiveId] = useState<string | null>(null)
+  // Unsent, oldest first, all chats. The ref is the truth (drain reads it between awaits); state mirrors it.
   // shortcut: in memory, so a reload drops unsent messages; IndexedDB if that bites.
-  const [pending, setPending] = useState<Record<string, Pending[]>>({})
+  const queue = useRef<Pending[]>([])
+  const [pending, setPending] = useState<Pending[]>([])
 
   const meRef = useRef(me)
   const activeRef = useRef(activeId)
   activeRef.current = activeId
-  const pendingRef = useRef(pending)
-  pendingRef.current = pending
+  const draining = useRef(false)
   const keys = useRef(new Map<string, { key: CryptoKey; raw: Uint8Array<ArrayBuffer> }>())
   const loaded = useRef(new Set<string>())
   const blobs = useRef(new Map<string, Promise<string>>())
@@ -102,24 +103,35 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
       return { ...prev, [convId]: [...byId.values()].sort((a, b) => a.id - b.id) }
     })
 
+  const setQueue = (next: Pending[]) => {
+    queue.current = next
+    setPending(next)
+  }
   // null drops the item.
   const patch = (p: Pending, change: Partial<Pending> | null) =>
-    setPending((prev) => ({
-      ...prev,
-      [p.convId]: (prev[p.convId] ?? []).flatMap((x) => (x.cid !== p.cid ? [x] : change ? [{ ...x, ...change }] : [])),
-    }))
+    setQueue(queue.current.flatMap((x) => (x.cid !== p.cid ? [x] : change ? [{ ...x, ...change }] : [])))
 
-  const deliver = useCallback(async (p: Pending) => {
-    patch(p, { sending: true, error: undefined })
-    try {
-      const { convId, body, quiet, seen, cid } = p
-      const r = await socket.timeout(15_000).emitWithAck('send', { convId, body, quiet, seen, cid })
-      if (r.error) return patch(p, { sending: false, error: r.error })
-      merge(convId, [{ ...r.message, content: p.content, forged: false }])
-      patch(p, null)
-    } catch {
-      patch(p, { sending: false }) // timed out; the next connect resends it
+  // One at a time, oldest first, so messages land in the order they were written. Nothing goes out
+  // offline: socket.io would buffer it and flush it on reconnect ahead of older messages.
+  const drain = useCallback(async () => {
+    if (draining.current) return
+    draining.current = true
+    let p: Pending | undefined
+    while (socket.connected && (p = queue.current.find((x) => !x.error))) {
+      const { convId, body, quiet, seen, cid, content } = p
+      try {
+        const r = await socket.timeout(15_000).emitWithAck('send', { convId, body, quiet, seen, cid })
+        if (r.error) patch(p, { sending: false, error: r.error })
+        else {
+          merge(convId, [{ ...r.message, content, forged: false }])
+          patch(p, null)
+        }
+      } catch {
+        // No answer in time, or the socket dropped. Online, the loop resends it; the cid stores it once.
+      }
     }
+    setQueue(queue.current.map((x) => (x.error ? x : { ...x, sending: false })))
+    draining.current = false
   }, [])
 
   const fetchPage = useCallback(
@@ -147,8 +159,8 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
       socket.emit('active', !document.hidden)
       onSync()
       for (const id of loaded.current) fetchPage(id).catch(() => {})
-      // In order: one socket keeps emits in sequence.
-      for (const list of Object.values(pendingRef.current)) for (const p of list) if (!p.error) deliver(p)
+      setQueue(queue.current.map((x) => (x.error ? x : { ...x, sending: true })))
+      drain()
     }
     const onError = (e: Error) => e.message === 'signed out' && onSignedOut()
     const onVisibility = () => socket.emit('active', !document.hidden)
@@ -167,7 +179,7 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
       document.removeEventListener('visibilitychange', onVisibility)
       socket.disconnect()
     }
-  }, [load, decrypt, fetchPage, deliver, onSignedOut])
+  }, [load, decrypt, fetchPage, drain, onSignedOut])
 
   // Mark the open conversation read whenever its newest message changes.
   const lastId = activeId ? messages[activeId]?.at(-1)?.id : undefined
@@ -208,11 +220,17 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
     const { key } = await keyFor(convId)
     const full = { ...content, from: meRef.current!.user.id }
     const body = await c.sealMessage(key, convId, full)
-    const p: Pending = { cid: crypto.randomUUID(), convId, body, content: full, createdAt: Date.now(), quiet, seen, sending: true }
-    setPending((prev) => ({ ...prev, [convId]: [...(prev[convId] ?? []), p] }))
-    deliver(p)
+    // The server's limit; caught here, so the draft comes back instead of a row that can never send.
+    if (body.length > 64 * 1024) throw new Error('That message is too long to send.')
+    const p: Pending = { cid: crypto.randomUUID(), convId, body, content: full, createdAt: Date.now(), quiet, seen, sending: socket.connected }
+    setQueue([...queue.current, p])
+    drain()
   }
 
+  const retry = (p: Pending) => {
+    patch(p, { sending: socket.connected, error: undefined })
+    drain()
+  }
   const discard = (p: Pending) => patch(p, null)
 
   const sendWithFiles = async (convId: string, text: string, files: File[], voice?: Voice) => {
@@ -275,7 +293,7 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
 
   return {
     me, messages, pending, hasOlder, activeId, totalUnread,
-    open, loadOlder, send, retry: deliver, discard, sendWithFiles, fileUrl, createConversation, addMember,
+    open, loadOlder, send, retry, discard, sendWithFiles, fileUrl, createConversation, addMember,
   }
 }
 

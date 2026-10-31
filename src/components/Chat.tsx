@@ -175,7 +175,7 @@ export default function Chat({ talk, convId, onBack, onCall, onAddPeople }: {
   const me = talk.me!
   const conv = me.conversations.find((c) => c.id === convId)
   const list = talk.messages[convId] ?? []
-  const queued = talk.pending[convId] ?? []
+  const queued = talk.pending.filter((p) => p.convId === convId)
   const [text, setText] = useState('')
   const [files, setFiles] = useState<File[]>([])
   const [busy, setBusy] = useState(false)
@@ -404,10 +404,16 @@ export default function Chat({ talk, convId, onBack, onCall, onAddPeople }: {
               <span className="mt-1 self-end px-2 text-xs text-mut" aria-live="polite">Sending…</span>
             ) : (
               <div className="flex items-center gap-1 self-end">
-                <span className="pl-2 text-xs text-danger" role="alert">{p.error ?? 'Not sent'}</span>
-                <button type="button" onClick={() => talk.retry(p)} className="min-h-11 rounded-full px-3 text-sm font-semibold text-accent hover:bg-raised">
-                  Retry
-                </button>
+                {p.error ? (
+                  <>
+                    <span className="pl-2 text-xs text-danger" role="alert">{p.error}</span>
+                    <button type="button" onClick={() => talk.retry(p)} className="min-h-11 rounded-full px-3 text-sm font-semibold text-accent hover:bg-raised">
+                      Retry
+                    </button>
+                  </>
+                ) : (
+                  <span className="pl-2 text-xs text-mut" aria-live="polite">Waiting for connection</span>
+                )}
                 <button type="button" onClick={() => talk.discard(p)} className="min-h-11 rounded-full px-3 text-sm text-mut hover:bg-raised">
                   Discard
                 </button>

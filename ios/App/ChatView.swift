@@ -317,8 +317,12 @@ private struct PendingRow: View {
         Text("Sending…").font(.caption).foregroundStyle(Color.mut).padding(.horizontal, 4).padding(.vertical, 4)
       } else {
         HStack(spacing: 16) {
-          Button((p.error.map { $0 + " " } ?? "Not sent. ") + "Tap to retry.") { Task { await talk.deliver(p) } }
-            .foregroundStyle(Color.danger)
+          if let error = p.error {
+            Button(error + " Tap to retry.") { talk.retry(p) }
+              .foregroundStyle(Color.danger)
+          } else {
+            Text("Waiting for connection").foregroundStyle(Color.mut)
+          }
           Button("Delete", role: .destructive) { talk.discard(p) }
             .foregroundStyle(Color.mut)
         }
