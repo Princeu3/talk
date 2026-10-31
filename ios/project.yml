@@ -12,8 +12,7 @@ settings:
     SWIFT_VERSION: "6.0"
     SWIFT_APPROACHABLE_CONCURRENCY: YES
     MARKETING_VERSION: "1.0"
-    CURRENT_PROJECT_VERSION: "1"
-    TARGETED_DEVICE_FAMILY: "1"
+    CURRENT_PROJECT_VERSION: "4"
 packages:
   WebRTC:
     url: https://github.com/stasel/WebRTC
@@ -29,12 +28,17 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.princeuniverse.talk
+        # iPhone only; on the project it loses to XcodeGen's per-target "1,2"
+        TARGETED_DEVICE_FAMILY: "1"
         SWIFT_DEFAULT_ACTOR_ISOLATION: MainActor
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
     info:
       path: App/Info.plist
       properties:
         CFBundleDisplayName: Talk
+        # XcodeGen writes literal 1.0 / 1 otherwise, so the settings above would never reach the build
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         UILaunchScreen: {}
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         UIBackgroundModes: [voip, audio]
@@ -60,10 +64,13 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.princeuniverse.talk.notifications
+        TARGETED_DEVICE_FAMILY: "1"
     info:
       path: NSE/Info.plist
       properties:
         CFBundleDisplayName: Talk Notifications
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         NSExtension:
           NSExtensionPointIdentifier: com.apple.usernotifications.service
           NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).NotificationService

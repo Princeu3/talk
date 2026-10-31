@@ -156,7 +156,7 @@ Expected result: the lowest tier that allows messaging (Apple computes it). Do n
 
 ## Export compliance
 
-`ITSAppUsesNonExemptEncryption` is `YES` in the app, so App Store Connect asks on the first build:
+`ITSAppUsesNonExemptEncryption` is `YES` in the app. Apple now refuses that upload (error 90592) until the app has an approved encryption declaration. File one under App Information → App Encryption Documentation with the answers below. Then add the code Apple gives as `ITSEncryptionExportComplianceCode` to the Talk target's `info` properties in `ios/project.yml`. Builds 1–3 were recorded as using no non-exempt encryption, and the account has no declaration yet.
 
 | Question | Answer |
 | --- | --- |
