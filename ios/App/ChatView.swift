@@ -38,30 +38,14 @@ struct ChatView: View {
           if prev.map({ !Calendar.current.isDate(date($0), inSameDayAs: date(m)) }) ?? true {
             Text(Format.day(m.message.createdAt)).font(.caption.weight(.medium)).foregroundStyle(Color.mut).padding(.vertical, 12)
           }
-          let gap = prev.map { m.message.createdAt - $0.message.createdAt > 5 * 60_000 || $0.message.senderId != m.message.senderId } ?? true
+          let gap: Bool = prev.map { m.message.createdAt - $0.message.createdAt > 5 * 60_000 || $0.message.senderId != m.message.senderId } ?? true
           MessageRow(convId: convId, m: m, group: conv?.kind == "group", first: gap, onCall: callAgain, onZoom: { zoom = $0 }) {
             reported = $0
             reporting = true
           }
             .padding(.top, gap ? 8 : 0)
         }
-        ForEach(queued) { p in
-          VStack(alignment: .trailing, spacing: 0) {
-            MessageRow(convId: convId, m: talk.shown(p), group: false, first: false, onCall: callAgain, onZoom: { zoom = $0 }) { _ in }
-            if p.sending {
-              Text("Sending…").font(.caption).foregroundStyle(Color.mut).padding(.horizontal, 4).padding(.vertical, 4)
-            } else {
-              HStack(spacing: 16) {
-                Button((p.error.map { $0 + " " } ?? "Not sent. ") + "Tap to retry.") { Task { await talk.deliver(p) } }
-                  .foregroundStyle(Color.danger)
-                Button("Delete", role: .destructive) { talk.discard(p) }
-                  .foregroundStyle(Color.mut)
-              }
-              .font(.caption).padding(.horizontal, 4).frame(minHeight: 32)
-            }
-          }
-          .frame(maxWidth: .infinity, alignment: .trailing)
-        }
+        ForEach(queued) { p in PendingRow(convId: convId, p: p, onCall: callAgain, onZoom: { zoom = $0 }) }
         if list.isEmpty, queued.isEmpty, conv != nil {
           Label("Messages here are end-to-end encrypted.", systemImage: "lock.fill")
             .font(.footnote).foregroundStyle(Color.mut).padding(.top, 40)
@@ -316,6 +300,33 @@ struct ChatView: View {
 private struct Zoomed: Identifiable {
   let image: UIImage
   var id: ObjectIdentifier { ObjectIdentifier(image) }
+}
+
+// An unsent message: sending, or failed with retry and delete.
+private struct PendingRow: View {
+  @Environment(Talk.self) private var talk
+  let convId: String
+  let p: Pending
+  let onCall: (String) -> Void
+  let onZoom: (UIImage) -> Void
+
+  var body: some View {
+    VStack(alignment: .trailing, spacing: 0) {
+      MessageRow(convId: convId, m: talk.shown(p), group: false, first: false, onCall: onCall, onZoom: onZoom) { _ in }
+      if p.sending {
+        Text("Sending…").font(.caption).foregroundStyle(Color.mut).padding(.horizontal, 4).padding(.vertical, 4)
+      } else {
+        HStack(spacing: 16) {
+          Button((p.error.map { $0 + " " } ?? "Not sent. ") + "Tap to retry.") { Task { await talk.deliver(p) } }
+            .foregroundStyle(Color.danger)
+          Button("Delete", role: .destructive) { talk.discard(p) }
+            .foregroundStyle(Color.mut)
+        }
+        .font(.caption).padding(.horizontal, 4).frame(minHeight: 32)
+      }
+    }
+    .frame(maxWidth: .infinity, alignment: .trailing)
+  }
 }
 
 private struct MessageRow: View {
