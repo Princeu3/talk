@@ -1,0 +1,9 @@
+// App Store build signed by hand on Prince's Mac, the only place with the private key of the
+// team's distribution certificate. Pass this with -xcconfig instead of Release.xcconfig (docs/app-store/TESTFLIGHT.md).
+#include "Release.xcconfig"
+CODE_SIGN_STYLE = Manual
+CODE_SIGN_IDENTITY = Apple Distribution
+PROVISIONING_PROFILE_SPECIFIER = $(TALK_PROFILE_$(TARGET_NAME))
+TALK_PROFILE_Talk = Talk App Store
+TALK_PROFILE_NotificationService = Talk Notifications App Store
+TALK_PROFILE_Share = Talk Share App Store

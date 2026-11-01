@@ -11,7 +11,7 @@ The app ships under Abhishek Shekhar's paid team `34XFNGD2MY`, an Individual enr
 1. Abhishek: Certificates, IDs & Profiles → Keys → create an APNs key. Its `.p8` and Key ID go to the relay (`APNS_KEY`, `APNS_KEY_ID` on Railway project `talk-push`), and `APNS_TEAM_ID` there becomes `34XFNGD2MY`. Without the key the relay refuses every push, so calls don't ring and notifications never arrive.
 2. The App Store record uses bundle ID `com.abhishekshekhar.talk`, not the repo's `dev.princeuniverse.talk`. The archive needs that ID (plus `com.abhishekshekhar.talk.notifications` and `com.abhishekshekhar.talk.share` for the two extensions) with Push Notifications on, and the relay's `APNS_BUNDLE_ID` must match it.
 3. The App Store Connect record exists: "Talk: Private Calls & Chat", app id 6828441266.
-4. Abhishek archives and uploads, following [TESTFLIGHT.md](TESTFLIGHT.md). Bump `CURRENT_PROJECT_VERSION` in `ios/project.yml` before every archive; App Store Connect refuses a build number it has seen.
+4. Abhishek or Prince archives and uploads, following [TESTFLIGHT.md](TESTFLIGHT.md). Bump `CURRENT_PROJECT_VERSION` in `ios/project.yml` before every archive; App Store Connect refuses a build number it has seen.
 
 ## App Information
 

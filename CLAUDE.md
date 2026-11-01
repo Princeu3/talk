@@ -10,6 +10,7 @@ Node 24+ runs `server/*.ts` directly (type stripping): imports need `.ts` extens
 - Pushes to `master` deploy the push relay (`talk-push`) and the demo server (`talk-demo`, App Review uses it) through Railway's GitHub integration; GitHub Actions runs CI (`.github/workflows/ci.yml`)
 - `railway up relay --path-as-root -p cfe9ad88-4f60-417e-808b-bfe41b9d4da4 -e production -s relay`: deploy the push relay (project `talk-push` in the personal Railway workspace, never the work one); plain `railway up .` from `relay/` fails with "prefix not found"
 - `cd ios && xcodegen`: regenerate `Talk.xcodeproj` from `project.yml` (the project file is not committed)
+- TestFlight upload: `docs/app-store/TESTFLIGHT.md`. Where `~/.appstoreconnect/talk.env` exists (Prince's Mac), use its "From Prince's Mac" section; elsewhere, steps 1 to 5
 - `xcodebuild test -project ios/Talk.xcodeproj -scheme Talk -destination 'platform=iOS Simulator,name=iPhone 18 Pro'`: iPhone crypto interop tests
 
 ## Gotchas
