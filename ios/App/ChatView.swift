@@ -1,4 +1,5 @@
 import AVFoundation
+import ImageIO
 import PhotosUI
 import SwiftUI
 import UniformTypeIdentifiers
@@ -416,20 +417,28 @@ private struct Attachment: View {
   let mine: Bool
   let onZoom: (UIImage) -> Void
   @State private var data: Data?
+  @State private var saved: URL? // over Talk.inMemory: a temp file instead of `data`
+  @State private var preview: UIImage? // a big photo, decoded at screen size
+  @State private var tapped = false
   @State private var failed = false
   @State private var playback = VoicePlayback()
   @State private var unplayable = false
 
+  private var big: Bool { file.size > Talk.inMemory && file.voice == nil }
+  private var wanted: Bool { tapped || talk.saved[file.id] != nil } // a big one, tapped here or loaded earlier
+  private var waiting: Bool { big && !wanted && !failed }
+  private var loading: Bool { !failed && (big ? wanted && saved == nil : data == nil) }
+
   var body: some View {
     Group {
-      if file.type.hasPrefix("image/"), let data, let img = UIImage(data: data) {
+      if file.type.hasPrefix("image/"), let img = preview ?? data.flatMap(UIImage.init(data:)) {
         Button { onZoom(img) } label: {
           Image(uiImage: img).resizable().scaledToFill().frame(maxWidth: 260, maxHeight: 320).clipShape(.rect(cornerRadius: 16))
         }
         .accessibilityLabel("Open \(file.name)")
       } else if file.voice != nil {
         voice
-      } else if file.type.hasPrefix("image/") && data == nil && !failed {
+      } else if file.type.hasPrefix("image/") && loading {
         RoundedRectangle(cornerRadius: 16).fill(Color.raised).frame(width: 240, height: 180).overlay { ProgressView() }
       } else {
         chip
@@ -477,22 +486,48 @@ private struct Attachment: View {
 
   private var chip: some View {
     HStack(spacing: 10) {
-      Image(systemName: failed ? "exclamationmark.triangle" : "doc").font(.title3)
+      Image(systemName: failed ? "exclamationmark.triangle" : waiting ? "arrow.down.circle" : "doc").font(.title3)
       VStack(alignment: .leading) {
         Text(file.name).lineLimit(1)
-        Text(failed ? "Couldn’t load. Tap to retry." : Format.size(file.size)).font(.caption).foregroundStyle(Color.mut)
+        Text(failed ? "Couldn’t load. Tap to retry." : waiting ? "\(Format.size(file.size)) · Tap to download" : Format.size(file.size))
+          .font(.caption).foregroundStyle(Color.mut)
       }
-      if let data { ShareLink(item: DataFile(data: data, name: file.name), preview: SharePreview(file.name)) { Image(systemName: "square.and.arrow.up") } }
+      if let data {
+        ShareLink(item: DataFile(data: data, name: file.name), preview: SharePreview(file.name)) { Image(systemName: "square.and.arrow.up") }
+      } else if let saved {
+        ShareLink(item: saved, preview: SharePreview(file.name)) { Image(systemName: "square.and.arrow.up") }
+      } else if big && loading {
+        ProgressView()
+      }
     }
     .padding(12)
     .background(mine ? Color.mine : Color.bubble, in: .rect(cornerRadius: 16))
     .foregroundStyle(Color.ink)
-    .onTapGesture { if failed { failed = false; Task { await load() } } }
+    .onTapGesture {
+      guard failed || waiting else { return }
+      failed = false
+      tapped = true
+      Task { await load() }
+    }
   }
 
   private func load() async {
-    guard data == nil, file.size <= 25 * 1024 * 1024 || file.voice != nil else { return }
-    do { data = try await talk.file(convId, file) } catch { failed = true }
+    do {
+      if !big {
+        if data == nil { data = try await talk.file(convId, file) }
+      } else if saved == nil, wanted {
+        let url = try await talk.save(convId, file)
+        if file.type.hasPrefix("image/") { preview = await Self.downsample(url) }
+        saved = url
+      }
+    } catch { failed = true }
+  }
+
+  // A full 48 MP photo decodes to about 190 MB; the bubble and the zoom need only screen size.
+  @concurrent nonisolated private static func downsample(_ url: URL) async -> UIImage? {
+    let opts = [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceCreateThumbnailWithTransform: true, kCGImageSourceThumbnailMaxPixelSize: 2048] as CFDictionary
+    guard let src = CGImageSourceCreateWithURL(url as CFURL, nil), let img = CGImageSourceCreateThumbnailAtIndex(src, 0, opts) else { return nil }
+    return UIImage(cgImage: img)
   }
 
   private func toggle() {

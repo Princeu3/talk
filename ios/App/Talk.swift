@@ -41,6 +41,7 @@ final class Talk {
   @ObservationIgnored private var keys: [String: Data] = [:]
   @ObservationIgnored private var loaded = Set<String>()
   @ObservationIgnored private var files: [String: Data] = [:]
+  @ObservationIgnored private(set) var saved: [String: URL] = [:] // attachments over `inMemory`, as temp files
   // On screen, not just running: a call push wakes the app in the background.
   @ObservationIgnored private var visible = false
   @ObservationIgnored private var saving: Task<Void, Never>?
@@ -244,6 +245,7 @@ final class Talk {
     forgotten = true
     saving?.cancel()
     try? FileManager.default.removeItem(at: cacheURL)
+    try? FileManager.default.removeItem(at: Self.savedDir)
   }
 
   // MARK: - sending
@@ -309,7 +311,7 @@ final class Talk {
     let sealed = try Crypto.sealFile(try await key(convId), convId: convId, data)
     let (res, _) = try await api.data("POST", "/api/conversations/\(convId)/attachments", body: sealed, type: "application/octet-stream")
     let id = try JSONDecoder().decode(Created.self, from: res).id
-    files[id] = data
+    if data.count > Self.inMemory { _ = try? keep(id, name, data) } else { files[id] = data }
     return FileRef(id: id, name: name, type: type, size: data.count, voice: voice)
   }
 
@@ -320,6 +322,26 @@ final class Talk {
     let plain = try Crypto.openFile(try await key(convId), convId: convId, sealed)
     files[ref.id] = plain
     return plain
+  }
+
+  // Bigger attachments load on a tap and stay on disk, not in memory.
+  static let inMemory = 25 * 1024 * 1024
+  private static let savedDir = URL.temporaryDirectory.appending(path: "attachments")
+
+  // Decrypted to a temp file named like the original, fetched once per session.
+  func save(_ convId: String, _ ref: FileRef) async throws -> URL {
+    if let u = saved[ref.id] { return u }
+    let (sealed, _) = try await api.data("GET", "/api/attachments/\(ref.id)")
+    return try keep(ref.id, ref.name, try Crypto.openFile(try await key(convId), convId: convId, sealed))
+  }
+
+  private func keep(_ id: String, _ name: String, _ data: Data) throws -> URL {
+    // The sender picks the name: keep it one path component, in a folder of its own.
+    let url = Self.savedDir.appending(path: "\(UUID().uuidString)/\(name.replacingOccurrences(of: "/", with: "-"))")
+    try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try data.write(to: url, options: .completeFileProtection)
+    saved[id] = url
+    return url
   }
 
   // MARK: - people and chats
