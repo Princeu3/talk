@@ -518,6 +518,7 @@ private struct Attachment: View {
         if data == nil { data = try await talk.file(convId, file) }
       } else if saved == nil {
         let url = try await talk.save(convId, file)
+        guard !Task.isCancelled else { return } // off screen: decode once when it comes back
         if file.type.hasPrefix("image/") { preview = await Self.downsample(url) }
         saved = url
       }

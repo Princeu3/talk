@@ -74,6 +74,7 @@ struct Vectors: Decodable {
   #expect(diskName("") == "file")
   #expect(diskName(".") == "file")
   #expect(diskName("..") == "file")
+  #expect(diskName("Dr. Patel referral letter") == "Dr. Patel referral letter")
   let long = diskName(String(repeating: "👩‍💻", count: 200) + ".mov")
   #expect(long.hasSuffix(".mov") && long.utf8.count <= 255)
 }

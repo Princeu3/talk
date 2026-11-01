@@ -51,9 +51,10 @@ nonisolated struct FileRef: Codable, Hashable, Sendable {
 nonisolated func diskName(_ name: String) -> String {
   let n = name.replacingOccurrences(of: "/", with: "-") as NSString
   var bytes = 0
-  var stem = String(n.deletingPathExtension.prefix { bytes += $0.utf8.count; return bytes <= 100 })
-  if stem.isEmpty || stem == "." || stem == ".." { stem = "file" }
+  // A long "extension" is part of the name ("Dr. Patel referral letter"), so keep it in the stem.
   let ext = n.pathExtension.utf8.count <= 16 ? n.pathExtension : ""
+  var stem = String((ext.isEmpty ? n as String : n.deletingPathExtension).prefix { bytes += $0.utf8.count; return bytes <= 100 })
+  if stem.isEmpty || stem == "." || stem == ".." { stem = "file" }
   return ext.isEmpty ? stem : "\(stem).\(ext)"
 }
 
