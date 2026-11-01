@@ -68,15 +68,14 @@ nonisolated struct API: Sendable {
     return URLSession(configuration: c)
   }()
 
-  func data(_ method: String, _ path: String, body: Data? = nil, type: String = "application/json") async throws -> (Data, HTTPURLResponse) {
+  // `file` streams the body from disk, for the share extension's small memory limit.
+  func data(_ method: String, _ path: String, body: Data? = nil, file: URL? = nil, type: String = "application/json") async throws -> (Data, HTTPURLResponse) {
     var req = URLRequest(url: URL(string: path, relativeTo: server)!)
     req.httpMethod = method
     if let cookie { req.setValue(cookie, forHTTPHeaderField: "Cookie") }
-    if let body {
-      req.httpBody = body
-      req.setValue(type, forHTTPHeaderField: "Content-Type")
-    }
-    let (data, res) = try await Self.session.data(for: req)
+    if body != nil || file != nil { req.setValue(type, forHTTPHeaderField: "Content-Type") }
+    req.httpBody = body
+    let (data, res) = if let file { try await Self.session.upload(for: req, fromFile: file) } else { try await Self.session.data(for: req) }
     let http = res as! HTTPURLResponse
     guard (200..<300).contains(http.statusCode) else {
       let msg = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["error"] as? String

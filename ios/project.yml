@@ -24,6 +24,7 @@ targets:
     sources: [App, Shared]
     dependencies:
       - target: NotificationService
+      - target: Share
       - package: WebRTC
     settings:
       base:
@@ -76,6 +77,45 @@ targets:
           NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).NotificationService
     entitlements:
       path: NSE/NotificationService.entitlements
+      properties:
+        keychain-access-groups: [$(AppIdentifierPrefix)dev.princeuniverse.talk.shared]
+  # "Talk" in the share sheet: screenshots, photos, files, text and links to a chat.
+  Share:
+    type: app-extension
+    platform: iOS
+    sources:
+      - Share
+      - Shared
+      - App/Socket.swift
+      - App/Theme.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.princeuniverse.talk.share
+        TARGETED_DEVICE_FAMILY: "1"
+        SWIFT_DEFAULT_ACTOR_ISOLATION: MainActor
+    info:
+      path: Share/Info.plist
+      properties:
+        CFBundleDisplayName: Talk
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.share-services
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).ShareViewController
+          NSExtensionAttributes:
+            # Lets the share sheet's top row suggest Talk chats (from the notification donations).
+            IntentsSupported: [INSendMessageIntent]
+            NSExtensionActivationRule:
+              NSExtensionActivationSupportsAttachmentsWithMaxCount: 10
+              NSExtensionActivationSupportsImageWithMaxCount: 10
+              NSExtensionActivationSupportsMovieWithMaxCount: 10
+              NSExtensionActivationSupportsFileWithMaxCount: 10
+              NSExtensionActivationSupportsWebURLWithMaxCount: 1
+              NSExtensionActivationSupportsText: true
+    entitlements:
+      path: Share/Share.entitlements
       properties:
         keychain-access-groups: [$(AppIdentifierPrefix)dev.princeuniverse.talk.shared]
   TalkTests:

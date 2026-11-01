@@ -9,7 +9,7 @@ Demo account passphrases live in `docs/app-store/demo-accounts.local.md`, which 
 The app ships under Abhishek Shekhar's paid team `34XFNGD2MY`, an Individual enrolment: only he, as Account Holder, can open Certificates, IDs & Profiles. Personal team `RMVX38Q6NU` is for device builds only and has no push.
 
 1. Abhishek: Certificates, IDs & Profiles → Keys → create an APNs key. Its `.p8` and Key ID go to the relay (`APNS_KEY`, `APNS_KEY_ID` on Railway project `talk-push`), and `APNS_TEAM_ID` there becomes `34XFNGD2MY`. Without the key the relay refuses every push, so calls don't ring and notifications never arrive.
-2. The App Store record uses bundle ID `com.abhishekshekhar.talk`, not the repo's `dev.princeuniverse.talk`. The archive needs that ID (and `com.abhishekshekhar.talk.notifications` for the extension) with Push Notifications on, and the relay's `APNS_BUNDLE_ID` must match it.
+2. The App Store record uses bundle ID `com.abhishekshekhar.talk`, not the repo's `dev.princeuniverse.talk`. The archive needs that ID (plus `com.abhishekshekhar.talk.notifications` and `com.abhishekshekhar.talk.share` for the two extensions) with Push Notifications on, and the relay's `APNS_BUNDLE_ID` must match it.
 3. The App Store Connect record exists: "Talk: Private Calls & Chat", app id 6828441266.
 4. Abhishek archives and uploads. Bump `CURRENT_PROJECT_VERSION` in `ios/project.yml` before every archive; App Store Connect refuses a build number it has seen.
 

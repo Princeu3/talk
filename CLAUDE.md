@@ -24,6 +24,7 @@ Node 24+ runs `server/*.ts` directly (type stripping): imports need `.ts` extens
 - Both call sides offer at once, so native WebRTC needs `enableImplicitRollback` (`ios/App/PeerConfig.swift`); build every iPhone peer connection from `RTCConfiguration.talk`.
 - Wire anything a push needs (calls, the socket) in `AppDelegate.didFinishLaunching`, never in SwiftUI `onAppear`: a VoIP push launches the app with no window.
 - Send messages through `send()` in `useTalk.ts` / `Talk.swift`: it queues a sealed `Pending` row with a `cid` so a resend stores once. Never emit the socket `send` without a `cid`, or a retry after a lost ack stores a duplicate.
+- The share extension (`ios/Share`) gets about 120 MB: map shared files and upload sealed ones from disk with `API.data(file:)`, never as an in-memory body (that costs two more copies). Check its peak with `footprint -p <pid>` in the Simulator.
 - The iPhone app's crypto must match `src/lib/crypto.ts` byte for byte; `ios/Tests/vectors.json` comes from `ios/Tests/make-vectors.ts`, so regenerate it after any web crypto change.
 - The Simulator ends every CallKit call (no system call UI there), so calls only test on a device. Messages, sign-in and settings test fine against a local server (`http://localhost:<port>/?invite=...`, allowed by `NSAllowsLocalNetworking`). For App Store screenshots, launch a Debug build with `-demoCall <name>` to show a live call screen with that person.
 - Test browser profiles may keep year-cached 500s for old attachments; a 500 with no server log line is that cache, not a bug.

@@ -45,6 +45,8 @@ struct TalkApp: App {
       calls.detach()
       delegate.talk = nil
       UNUserNotificationCenter.current().setBadgeCount(0)
+      // The share sheet suggests chats from these donations; they belong to this account.
+      Task { try? await INInteraction.deleteAll() }
       talk = nil
     }
     delegate.wire(t)
