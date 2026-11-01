@@ -8,18 +8,20 @@ State on 2026-11-01:
 - App IDs `com.abhishekshekhar.talk` (Push Notifications, Communication Notifications), `com.abhishekshekhar.talk.notifications` and `com.abhishekshekhar.talk.share` (no capabilities).
 - The team has one registered iPhone. Keep at least one: Xcode signs the archive with a development profile, which needs a device.
 - The push relay sends for team `34XFNGD2MY` and bundle `com.abhishekshekhar.talk`.
-- Builds 1 to 4 are on TestFlight, all recorded as using no non-exempt encryption. The app now sets `ITSAppUsesNonExemptEncryption` to YES, and an upload with that was refused with error 90592: "The export compliance key value [] in the app's Info.plist doesn't match the key value of the app's export compliance documentation." The app has no encryption declaration yet.
+- Builds 1 to 5 are on TestFlight. Builds 1 to 4 were recorded as using no non-exempt encryption. The app sets no `ITSAppUsesNonExemptEncryption` key: with YES and no code, the upload is refused with error 90592, and App Store Connect only issues an `ITSEncryptionExportComplianceCode` after it reviews an uploaded export document (the "App Encryption Documentation" dialog under App Information is the gate in front of that upload, and saves nothing on its own). With the key absent, TestFlight shows each new build as "Missing Compliance" and asks the questions per build instead. Build 5 went through that way on 2026-11-01.
+- Version 1.0 with build 4 is Waiting for Review since 2026-10-31. Swapping in a newer build means cancelling that submission and queueing again.
 
-## 1. Encryption declaration (Abhishek, once)
+## 1. Encryption questions (Abhishek, per build)
 
-The bundled WebRTC library brings its own encryption for calls, which is why the app says YES. The answers are legal statements about the app, so a person files them, not Claude.
+The bundled WebRTC library brings its own encryption for calls, so the app can't honestly say NO, and YES needs a code Apple only gives for a reviewed export document. So the app carries neither key, and whoever has the Account Holder, Admin or App Manager role answers in App Store Connect once per build. The answers are legal statements about the app, so a person clicks them, not Claude.
 
-1. At developer.apple.com/account and appstoreconnect.apple.com, accept any pending agreements. Only the Account Holder can, and an open one can block signing and uploads.
-2. App Store Connect → Apps → Talk → App Information → App Encryption Documentation → add a declaration.
-3. Answer as listed in [APP_STORE.md, Export compliance](APP_STORE.md#export-compliance). For France, either upload the French declaration or untick France under Pricing and Availability.
-4. Once Apple approves it, copy the code it shows for `ITSEncryptionExportComplianceCode`. A declaration with a document to review can take a few days.
+After step 4, App Store Connect → TestFlight → iOS shows the build as "Missing Compliance" with a Manage link. The answers, from [APP_STORE.md, Export compliance](APP_STORE.md#export-compliance):
 
-If App Store Connect finishes without giving a code, stop and tell Prince. Uploading with YES and no code fails with 90592 again. Going back to NO, as builds 1 to 4 were recorded, is a decision for Prince and Abhishek, not for Claude.
+1. Algorithms: "Standard encryption algorithms instead of, or in addition to, using or accessing the encryption within Apple's operating system". Not proprietary, not both, not none.
+2. Available in France: No. France is already excluded under Pricing and Availability; keep the two in step.
+3. No document is asked for. If one ever is, stop and tell Prince.
+
+The build then reads "Ready to Submit".
 
 ## 2. Mac setup
 
@@ -27,17 +29,11 @@ If App Store Connect finishes without giving a code, stop and tell Prince. Uploa
 - XcodeGen: `brew install xcodegen`.
 - The repo: `git clone https://github.com/Princeu3/talk.git`, or `git pull` on `master`.
 
-## 3. Build number and compliance code
+## 3. Build number
 
 In `ios/project.yml`:
 
-- Add the code from step 1 to the `Talk` target's `info` → `properties`, indented 8 spaces like `ITSAppUsesNonExemptEncryption` beside it:
-
-```yaml
-        ITSEncryptionExportComplianceCode: <code from step 1>
-```
-
-- Set `CURRENT_PROJECT_VERSION` one above the higher of its value on `master` and the newest build under App Store Connect → TestFlight. App Store Connect refuses a number it has seen. On 2026-11-01 both were 4, so the next is 5.
+- Set `CURRENT_PROJECT_VERSION` one above the higher of its value on `master` and the newest build under App Store Connect → TestFlight. App Store Connect refuses a number it has seen. On 2026-11-01 build 5 went up, so the next is 6.
 
 ## 4. Archive and upload
 
@@ -61,7 +57,7 @@ If the archive works but the export can't sign or upload, run `open build/Talk.x
 
 | Error | Fix |
 | --- | --- |
-| 90592, "Invalid Export Compliance Code" | The code in `ios/project.yml` is missing, mistyped or not yet approved, or `xcodegen` didn't run after the edit |
+| 90592, "Invalid Export Compliance Code" | `ITSAppUsesNonExemptEncryption` crept back into `ios/project.yml`. Remove it and rerun `xcodegen` |
 | The bundle version must be higher | Raise `CURRENT_PROJECT_VERSION` again |
 | "Your team has no devices from which to generate a provisioning profile" | Register an iPhone under Certificates, IDs & Profiles → Devices, then rerun the archive |
 | "No Accounts" or no signing certificate | Sign in to Xcode as in step 2; Xcode makes an Apple Distribution certificate on the first export |
@@ -69,7 +65,7 @@ If the archive works but the export can't sign or upload, run `open build/Talk.x
 ## 5. After the upload
 
 - App Store Connect → TestFlight shows the build as Processing, which can take from a few minutes to over an hour.
-- When it's ready, Abhishek adds it to the internal testing group if it isn't there yet. No compliance question should come up, since the build carries the code.
+- When it's ready, Abhishek answers the compliance questions (step 1) and adds the build to the internal testing group if it isn't there yet.
 - What to Test:
   - calls
   - the microphone prompt at first launch, and the Settings link when the microphone or camera is off
@@ -78,7 +74,7 @@ If the archive works but the export can't sign or upload, run `open build/Talk.x
   - messages written offline, which send once, in order, when back online
   - Talk in the share sheet of Photos, Safari and Files, with Talk chats suggested in its top row
   - attachments over 25 MB, which download on a tap
-- `xcodegen` also rewrites the tracked `ios/App/Info.plist`. Either open a pull request with `ios/project.yml` and `ios/App/Info.plist` together, or run `git checkout ios/App/Info.plist ios/project.yml` and send Prince the build number and the code, so later builds carry both.
+- `xcodegen` also rewrites the tracked `ios/App/Info.plist`. Either open a pull request with `ios/project.yml` and `ios/App/Info.plist` together, or run `git checkout ios/App/Info.plist ios/project.yml` and send Prince the build number, so later builds start above it.
 
 ## From Prince's Mac
 
@@ -86,7 +82,7 @@ Prince's Mac signs by hand, so it needs no Apple ID in Xcode. Only that Mac has 
 
 Builds 1 to 4 came from Abhishek's Mac. The one upload from Prince's Mac, on 2026-10-31, was refused with 90592 (no compliance code) and 90474 (iPad orientations, fixed since: the app is iPhone only). An archive of `master` signed this way on 2026-11-01 exports with all three targets signed correctly, but no build from this path has been accepted yet.
 
-Step 1 still needs Abhishek: he sends Prince the code, and once step 3 puts it in `ios/project.yml`, later builds need nothing from him. Start from an up-to-date `master` with a clean `ios/` folder, do step 3, then run these from `ios/`:
+Step 1 still needs Abhishek after every upload: the compliance questions in TestFlight. Start from an up-to-date `master` with a clean `ios/` folder, do step 3, then run these from `ios/`:
 
 ```bash
 rm -rf build && xcodegen
@@ -104,6 +100,6 @@ xcodebuild -exportArchive -archivePath build/Talk.xcarchive -exportOptionsPlist 
 . ~/.appstoreconnect/talk.env && xcrun altool --upload-app -f build/export/Talk.ipa -t ios --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER"
 ```
 
-Then do step 5, except its last bullet: commit `ios/project.yml` and `ios/App/Info.plist` together on `master` and push, so the next build starts from this number and code. Pushing `master` also redeploys the push relay and the demo server.
+Then do step 5, except its last bullet: commit `ios/project.yml` and `ios/App/Info.plist` together on `master` and push, so the next build starts from this number. Pushing `master` also redeploys the push relay and the demo server.
 
 The certificate and the three profiles expire at 02:45 UTC on 2027-09-12, the evening of 2027-09-11 in the US. By the end of August 2027, make a new Apple Distribution certificate from this Mac and remake the three profiles with it under the same names. The API key can do this: it registered the share App ID and made its profile on 2026-11-01.
