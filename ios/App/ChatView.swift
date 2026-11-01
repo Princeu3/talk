@@ -425,7 +425,7 @@ private struct Attachment: View {
   @State private var unplayable = false
 
   private var big: Bool { file.size > Talk.inMemory && file.voice == nil }
-  private var wanted: Bool { tapped || talk.saved[file.id] != nil } // a big one, tapped here or loaded earlier
+  private var wanted: Bool { tapped || talk.saved[file.id] != nil || talk.fetching[file.id] != nil } // a big one, tapped, loading or loaded
   private var waiting: Bool { big && !wanted && !failed }
   private var loading: Bool { !failed && (big ? wanted && saved == nil : data == nil) }
 
@@ -444,7 +444,8 @@ private struct Attachment: View {
         chip
       }
     }
-    .task(id: file.id) { await load() }
+    // Only a tap starts a big one; coming back on screen joins its download or picks up the file.
+    .task(id: file.id) { if !big || talk.saved[file.id] != nil || talk.fetching[file.id] != nil { await load() } }
   }
 
   private var voice: some View {
@@ -515,12 +516,15 @@ private struct Attachment: View {
     do {
       if !big {
         if data == nil { data = try await talk.file(convId, file) }
-      } else if saved == nil, wanted {
+      } else if saved == nil {
         let url = try await talk.save(convId, file)
         if file.type.hasPrefix("image/") { preview = await Self.downsample(url) }
         saved = url
       }
-    } catch { failed = true }
+    } catch {
+      // Scrolling away cancels the row's task; that isn't a failed download.
+      if !Task.isCancelled { failed = true }
+    }
   }
 
   // A full 48 MP photo decodes to about 190 MB; the bubble and the zoom need only screen size.
@@ -667,7 +671,9 @@ struct DataFile: Transferable {
   let name: String
   static var transferRepresentation: some TransferRepresentation {
     FileRepresentation(exportedContentType: .data) { f in
-      let url = FileManager.default.temporaryDirectory.appending(path: f.name)
+      // In Talk's temp folder, so sign-out and the next launch clear it too.
+      let url = Talk.savedDir.appending(path: "\(UUID().uuidString)/\(diskName(f.name))")
+      try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
       try f.data.write(to: url)
       return SentTransferredFile(url)
     }

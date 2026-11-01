@@ -46,6 +46,17 @@ nonisolated struct FileRef: Codable, Hashable, Sendable {
   var voice: Voice?
 }
 
+// The sender picks file names: make one a single path component the disk accepts (no "/",
+// never "", "." or "..", well under 255 bytes), keeping a short extension.
+nonisolated func diskName(_ name: String) -> String {
+  let n = name.replacingOccurrences(of: "/", with: "-") as NSString
+  var bytes = 0
+  var stem = String(n.deletingPathExtension.prefix { bytes += $0.utf8.count; return bytes <= 100 })
+  if stem.isEmpty || stem == "." || stem == ".." { stem = "file" }
+  let ext = n.pathExtension.utf8.count <= 16 ? n.pathExtension : ""
+  return ext.isEmpty ? stem : "\(stem).\(ext)"
+}
+
 nonisolated struct Voice: Codable, Hashable, Sendable {
   let duration: Double
   let peaks: [Double]

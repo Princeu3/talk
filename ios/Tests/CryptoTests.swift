@@ -68,6 +68,16 @@ struct Vectors: Decodable {
   #expect(Report.note("", quoting: [String(repeating: "z", count: 900)]).count == 23 + 301)
 }
 
+@Test func diskNameIsOneSafePathComponent() {
+  #expect(diskName("photo.JPG") == "photo.JPG")
+  #expect(diskName("../../Library/x.plist") == "..-..-Library-x.plist")
+  #expect(diskName("") == "file")
+  #expect(diskName(".") == "file")
+  #expect(diskName("..") == "file")
+  let long = diskName(String(repeating: "👩‍💻", count: 200) + ".mov")
+  #expect(long.hasSuffix(".mov") && long.utf8.count <= 255)
+}
+
 @Test func avatarSeedMatchesTheWeb() {
   // Expected values from the hash in Avatar, src/components/Sidebar.tsx.
   #expect(avatarSeed("Alice") == 2267157479)
