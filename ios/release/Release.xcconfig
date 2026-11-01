@@ -1,0 +1,8 @@
+// App Store build on Abhishek's team, signed by Xcode with the account signed in there.
+// The repo keeps the dev IDs; pass this with -xcconfig to archive (docs/app-store/TESTFLIGHT.md).
+DEVELOPMENT_TEAM = 34XFNGD2MY
+CODE_SIGN_STYLE = Automatic
+PRODUCT_BUNDLE_IDENTIFIER = $(TALK_ID_$(TARGET_NAME))
+TALK_ID_Talk = com.abhishekshekhar.talk
+TALK_ID_NotificationService = com.abhishekshekhar.talk.notifications
+TALK_ID_Share = com.abhishekshekhar.talk.share

@@ -11,7 +11,7 @@ The app ships under Abhishek Shekhar's paid team `34XFNGD2MY`, an Individual enr
 1. Abhishek: Certificates, IDs & Profiles → Keys → create an APNs key. Its `.p8` and Key ID go to the relay (`APNS_KEY`, `APNS_KEY_ID` on Railway project `talk-push`), and `APNS_TEAM_ID` there becomes `34XFNGD2MY`. Without the key the relay refuses every push, so calls don't ring and notifications never arrive.
 2. The App Store record uses bundle ID `com.abhishekshekhar.talk`, not the repo's `dev.princeuniverse.talk`. The archive needs that ID (plus `com.abhishekshekhar.talk.notifications` and `com.abhishekshekhar.talk.share` for the two extensions) with Push Notifications on, and the relay's `APNS_BUNDLE_ID` must match it.
 3. The App Store Connect record exists: "Talk: Private Calls & Chat", app id 6828441266.
-4. Abhishek archives and uploads. Bump `CURRENT_PROJECT_VERSION` in `ios/project.yml` before every archive; App Store Connect refuses a build number it has seen.
+4. Abhishek archives and uploads, following [TESTFLIGHT.md](TESTFLIGHT.md). Bump `CURRENT_PROJECT_VERSION` in `ios/project.yml` before every archive; App Store Connect refuses a build number it has seen.
 
 ## App Information
 
@@ -156,7 +156,7 @@ Expected result: the lowest tier that allows messaging (Apple computes it). Do n
 
 ## Export compliance
 
-`ITSAppUsesNonExemptEncryption` is `YES` in the app. Apple now refuses that upload (error 90592) until the app has an approved encryption declaration. File one under App Information → App Encryption Documentation with the answers below. Then add the code Apple gives as `ITSEncryptionExportComplianceCode` to the Talk target's `info` properties in `ios/project.yml`. Builds 1–3 were recorded as using no non-exempt encryption, and the account has no declaration yet.
+`ITSAppUsesNonExemptEncryption` is `YES` in the app. An upload with that and no code was refused (error 90592). File a declaration under App Information → App Encryption Documentation with the answers below. Then add the code Apple gives as `ITSEncryptionExportComplianceCode` to the Talk target's `info` properties in `ios/project.yml` ([TESTFLIGHT.md](TESTFLIGHT.md) has the steps). Builds 1–4 were recorded as using no non-exempt encryption, and the app has no declaration yet.
 
 | Question | Answer |
 | --- | --- |
