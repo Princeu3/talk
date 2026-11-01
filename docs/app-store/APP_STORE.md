@@ -96,7 +96,7 @@ messenger,e2ee,secure,voice,video,family,friends,self-hosted,invite,group,voip,o
 | Support URL | `https://push.princeuniverse.dev/support` |
 | Marketing URL | `https://github.com/Princeu3/talk` |
 | Version | 1.0 |
-| Copyright | `2026 Prince Upadhyay` |
+| Copyright | `2026 Talk` |
 | Routing app coverage file | None |
 | Version release | Manually release this version |
 | Phased release | Not offered for 1.0 |
