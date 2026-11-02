@@ -7,13 +7,14 @@
 <p align="center">
   <a href="https://github.com/Princeu3/talk/actions/workflows/ci.yml"><img src="https://github.com/Princeu3/talk/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-2e3d28" alt="AGPL-3.0"></a>
+  <a href="https://apps.apple.com/app/id6828441266"><img src="https://img.shields.io/badge/App%20Store-Talk-2e3d28?logo=apple" alt="Talk on the App Store"></a>
 </p>
 
 ![Talk on iPhone](docs/images/hero.png)
 
 Talk is a messenger for family, close friends or a small team. Messages, photos, files and voice notes are encrypted on your device before they leave it, so the server stores only ciphertext. Voice and video calls ring like phone calls and go straight between the two devices when the network allows.
 
-There is a web app (works as an iPhone home-screen app too) and a native iPhone app with lock-screen calls. Both talk to the same server.
+There is a web app (works as an iPhone home-screen app too) and a native iPhone app with lock-screen calls, [on the App Store](https://apps.apple.com/app/id6828441266). Both talk to the same server.
 
 ![Screens](docs/images/screens.png)
 
@@ -59,7 +60,7 @@ Talk runs on [Railway](https://railway.com) as one service with a volume.
 
 1. Open the invite link you were sent.
 2. Pick a name and a passphrase. Four random words works well. Your passphrase is your key: nobody can reset it, and if you forget it your old messages are gone. Use the same name and passphrase on every device.
-3. On iPhone, install the Talk app and paste the invite link into the first field. Or use the web app: open the link in Safari, tap Share → Add to Home Screen, and open Talk from the new icon (iPhone only sends web notifications to home-screen apps).
+3. On iPhone, install [Talk from the App Store](https://apps.apple.com/app/id6828441266) and paste the invite link into the first field. Or use the web app: open the link in Safari, tap Share → Add to Home Screen, and open Talk from the new icon (iPhone only sends web notifications to home-screen apps).
 4. Compare safety codes in Settings, in person or on a call. If they match on both phones, nobody swapped a key.
 
 ## Development
