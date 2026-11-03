@@ -12,7 +12,7 @@ settings:
     SWIFT_VERSION: "6.0"
     SWIFT_APPROACHABLE_CONCURRENCY: YES
     MARKETING_VERSION: "1.1"
-    CURRENT_PROJECT_VERSION: "6"
+    CURRENT_PROJECT_VERSION: "7"
 packages:
   WebRTC:
     url: https://github.com/stasel/WebRTC

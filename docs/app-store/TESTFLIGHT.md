@@ -8,7 +8,7 @@ State on 2026-11-03:
 - App IDs `com.abhishekshekhar.talk` (Push Notifications, Communication Notifications), `com.abhishekshekhar.talk.notifications` and `com.abhishekshekhar.talk.share` (no capabilities).
 - The team has one registered iPhone. Keep at least one: Xcode signs the archive with a development profile, which needs a device.
 - The push relay sends for team `34XFNGD2MY` and bundle `com.abhishekshekhar.talk`.
-- Builds 1 to 6 are on TestFlight (6 is version 1.1). Builds 1 to 4 were recorded as using no non-exempt encryption. The app sets no `ITSAppUsesNonExemptEncryption` key: with YES and no code, the upload is refused with error 90592, and App Store Connect only issues an `ITSEncryptionExportComplianceCode` after it reviews an uploaded export document (the "App Encryption Documentation" dialog under App Information is the gate in front of that upload, and saves nothing on its own). With the key absent, TestFlight shows each new build as "Missing Compliance" and asks the questions per build instead. Build 5 went through that way on 2026-11-01.
+- Builds 1 to 7 are on TestFlight (6 and 7 are version 1.1). Builds 1 to 4 were recorded as using no non-exempt encryption. The app sets no `ITSAppUsesNonExemptEncryption` key: with YES and no code, the upload is refused with error 90592, and App Store Connect only issues an `ITSEncryptionExportComplianceCode` after it reviews an uploaded export document (the "App Encryption Documentation" dialog under App Information is the gate in front of that upload, and saves nothing on its own). With the key absent, TestFlight shows each new build as "Missing Compliance" and asks the questions per build instead. Build 5 went through that way on 2026-11-01.
 - Version 1.0 with build 4 is Waiting for Review since 2026-10-31. Swapping in a newer build means cancelling that submission and queueing again.
 
 ## 1. Encryption questions (Abhishek or Prince, per build)
@@ -33,7 +33,7 @@ The build then reads "Ready to Submit".
 
 In `ios/project.yml`:
 
-- Set `CURRENT_PROJECT_VERSION` one above the higher of its value on `master` and the newest build under App Store Connect → TestFlight. App Store Connect refuses a number it has seen. On 2026-11-03 build 6 went up, so the next is 7.
+- Set `CURRENT_PROJECT_VERSION` one above the higher of its value on `master` and the newest build under App Store Connect → TestFlight. App Store Connect refuses a number it has seen. On 2026-11-03 build 7 went up, so the next is 8.
 
 ## 4. Archive and upload
 
@@ -80,7 +80,7 @@ If the archive works but the export can't sign or upload, run `open build/Talk.x
 
 Prince's Mac signs by hand, so it needs no Apple ID in Xcode. Only that Mac has the private key of the team's Apple Distribution certificate (`86L82FD4U9`, in the login keychain) and the team's App Store Connect API key (in `~/.appstoreconnect/private_keys`, with its key ID and issuer ID in `~/.appstoreconnect/talk.env`, outside the repo). It also has the profiles "Talk App Store", "Talk Notifications App Store" and "Talk Share App Store" installed. They are made with that certificate and can be downloaded again from the portal.
 
-Builds 1 to 4 came from Abhishek's Mac. The one upload from Prince's Mac, on 2026-10-31, was refused with 90592 (no compliance code) and 90474 (iPad orientations, fixed since: the app is iPhone only). Build 6 (version 1.1) went up this way on 2026-11-03, the first upload from this path that App Store Connect accepted.
+Builds 1 to 4 came from Abhishek's Mac. The one upload from Prince's Mac, on 2026-10-31, was refused with 90592 (no compliance code) and 90474 (iPad orientations, fixed since: the app is iPhone only). Build 6 (version 1.1) went up this way on 2026-11-03, the first upload from this path that App Store Connect accepted, and build 7 the same day.
 
 Step 1 still needs Abhishek after every upload: the compliance questions in TestFlight. Start from an up-to-date `master` with a clean `ios/` folder, do step 3, then run these from `ios/`:
 
