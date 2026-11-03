@@ -33,7 +33,8 @@ struct ChatView: View {
   private var conv: Conversation? { talk.me?.conversations.first { $0.id == convId } }
   private var peer: String? { conv.flatMap(talk.peer) }
 
-  var body: some View {
+  // The body comes in three parts: as one chain it took too long for CI's Xcode 26 to type-check.
+  @ViewBuilder private var thread: some View {
     let list = talk.messages[convId] ?? []
     let queued = talk.pending.filter { $0.convId == convId }
     let newest = list.last { $0.message.senderId == talk.account.userId && !$0.system && $0.content?.call == nil }
@@ -43,9 +44,7 @@ struct ChatView: View {
           if talk.hasOlder[convId] == true {
             ProgressView().padding().onAppear { Task { await talk.loadOlder(convId) } }
           }
-          ForEach(Array(list.enumerated()), id: \.element.id) { i, m in
-            row(m, after: i > 0 ? list[i - 1] : nil, newest: m.id == newest?.id, proxy)
-          }
+          ForEach(Array(list.enumerated()), id: \.element.id) { i, _ in row(i, of: list, newest: newest, proxy) }
           ForEach(queued) { p in PendingRow(convId: convId, p: p, onCall: callAgain, onZoom: { zoom = $0 }) }
           TypingRow(convId: convId, group: conv?.kind == "group")
           if list.isEmpty, queued.isEmpty, conv != nil {
@@ -66,6 +65,10 @@ struct ChatView: View {
     .navigationBarTitleDisplayMode(.inline)
     .toolbar { toolbar }
     .navigationDestination(isPresented: $info) { ChatInfoView(convId: convId) }
+  }
+
+  private var watched: some View {
+    thread
     .onAppear {
       shown = true
       talk.open(convId)
@@ -87,6 +90,10 @@ struct ChatView: View {
         VoicePlayback.current?.pause()
       }
     }
+  }
+
+  var body: some View {
+    watched
     .alert("Couldn’t send", isPresented: .constant(error != nil), presenting: error) { _ in
       Button("OK") { error = nil }
     } message: { Text($0) }
@@ -342,19 +349,25 @@ struct ChatView: View {
   private func callAgain(_ kind: String) { calls.start(convId: convId, kind: kind) }
 
   // One message: a day label when the day changes, the bubble, and the receipt under my newest.
-  // Its own function: inline in the body, it was too slow for CI's compiler to type-check.
-  @ViewBuilder private func row(_ m: Decrypted, after prev: Decrypted?, newest: Bool, _ proxy: ScrollViewProxy) -> some View {
+  // Its own function, with no operators left in the ForEach: inline, CI's Xcode 26 couldn't type-check it.
+  @ViewBuilder private func row(_ i: Int, of list: [Decrypted], newest: Decrypted?, _ proxy: ScrollViewProxy) -> some View {
+    let m = list[i]
+    let prev: Decrypted? = i > 0 ? list[i - 1] : nil
     let newDay: Bool = prev.map { !Calendar.current.isDate(date($0), inSameDayAs: date(m)) } ?? true
     let gap: Bool = prev.map { breaks($0, m) } ?? true
+    let last: Bool = m.id == newest?.id
+    let group: Bool = conv?.kind == "group"
+    let flashing: Bool = flash == m.id
+    let top: CGFloat = gap ? 8 : 0
     if newDay {
       Text(Format.day(m.message.createdAt)).font(.caption.weight(.medium)).foregroundStyle(Color.mut).padding(.vertical, 12)
     }
-    MessageRow(convId: convId, m: m, group: conv?.kind == "group", first: gap, flashing: flash == m.id, onCall: callAgain, onZoom: { zoom = $0 }) {
+    MessageRow(convId: convId, m: m, group: group, first: gap, flashing: flashing, onCall: callAgain, onZoom: { zoom = $0 }) {
       act($0, on: m, proxy)
     }
-      .padding(.top, gap ? 8 : 0)
+      .padding(.top, top)
       .id(m.id)
-    if newest {
+    if last {
       Text(receipt(m)).font(.caption).foregroundStyle(Color.mut)
         .frame(maxWidth: .infinity, alignment: .trailing).padding(.horizontal, 4).padding(.top, 2)
     }
