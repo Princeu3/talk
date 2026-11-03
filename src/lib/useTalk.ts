@@ -68,12 +68,17 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
   const keys = useRef(new Map<string, { key: CryptoKey; raw: Uint8Array<ArrayBuffer> }>())
   const loaded = useRef(new Set<string>())
   const blobs = useRef(new Map<string, Promise<string>>())
+  const heard = useRef(0) // messages received, so a reload can tell it raced one
   // load() needs decrypt(), which needs keyFor(), which needs load(): break the cycle with a ref.
   const decryptRef = useRef<(m: Message) => Promise<Decrypted>>(null!)
 
   const load = useCallback(async () => {
     try {
+      const before = heard.current
       const m = await api<Me>('GET', '/api/me')
+      // A message landed while this was in flight (a rename's sync, then its line): the
+      // answer may predate it and would undo its bump, so ask again.
+      if (heard.current !== before) return load()
       // The open chat is read even if the server hasn't heard yet (that request may still be in flight).
       const shown = activeRef.current && !document.hidden ? activeRef.current : null
       m.conversations = m.conversations.map((x) => (x.id === shown ? { ...x, unread: 0 } : x))
@@ -210,6 +215,7 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
   useEffect(() => {
     load().catch(() => {})
     const onMessage = async (msg: Message) => {
+      heard.current++
       const d = await decrypt(msg)
       merge(msg.convId, [d])
       setTyper(msg.convId, msg.senderId, false)
