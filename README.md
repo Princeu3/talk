@@ -21,7 +21,9 @@ There is a web app (works as an iPhone home-screen app too) and a native iPhone 
 ## What it does
 
 - One-to-one chats and groups: text, photos, files, voice messages
-- Voice and video calls between two people, through CallKit on iPhone (lock screen, Recents, Siri)
+- Reactions, replies, editing (15 minutes), unsending, forwarding, read receipts and typing indicators
+- Group info: rename, add or remove people, leave; mute or pin any chat
+- Voice and video calls, one-to-one or in groups of up to 8, through CallKit on iPhone (lock screen, Recents, Siri)
 - End-to-end encryption: X25519 key agreement, AES-GCM, keys derived from your passphrase on your device
 - Safety codes to check that nobody swapped a key
 - Sign-up by invite link only; no phone number, no email
@@ -100,7 +102,8 @@ GitHub Actions runs the typecheck, web build, server and relay tests on Linux, a
 ## Limits
 
 - No forward secrecy: anyone who gets a passphrase can read that person's history.
-- Removing someone from a group isn't supported.
+- Removing someone from a group stops the server sending them messages, but the group key isn't rotated.
+- Group calls connect everyone to everyone, so each phone sends its video once per person; past 8 people that's too much.
 - Voice messages recorded in older desktop Chrome (Opus) don't play on iPhone.
 
 ## License
