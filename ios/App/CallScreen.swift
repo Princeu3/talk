@@ -113,7 +113,7 @@ struct CallBar: View {
     // A group call is on as soon as we're in it; its timer starts when someone else is.
     if c.group != nil, c.tiles.isEmpty, [.ringing, .connecting, .live].contains(c.phase) { return "Waiting for others…" }
     return switch c.phase {
-    case .incoming: c.kind == "video" ? "Video call" : "Voice call"
+    case .incoming: Format.callNoun(c.kind, group: c.group != nil)
     case .calling: "Calling…"
     case .ringing: "Ringing…"
     case .connecting: "Connecting…"

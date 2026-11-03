@@ -4,11 +4,13 @@ import Observation
 import UserNotifications
 
 struct Decrypted: Identifiable, Hashable {
-  let message: Message
+  var message: Message
   let content: MessageBody? // nil: could not decrypt
   var reactions: [String: String] = [:] // user id -> emoji, only those whose sealed from/to match the row
   var id: Int { message.id }
   var forged: Bool { content.map { $0.from != message.senderId } ?? false }
+  // A group event line ("Alice added Bob"). A forged one shows as a message, with the warning.
+  var system: Bool { content?.system == true && !forged }
 }
 
 // A message on its way out, sealed. Resends reuse `cid`, so the server stores it once.
@@ -51,6 +53,7 @@ final class Talk {
   @ObservationIgnored private var draining = false
   @ObservationIgnored private var forgotten = false // signed out: a late delivery mustn't write the cache back
   @ObservationIgnored private var typedAt: [String: Date] = [:] // my last typing signal per chat
+  @ObservationIgnored private var heard = 0 // messages received, so a reload can tell it raced one
   private static let page = 50
   static let emoji = ["👍", "❤️", "😂", "😮", "😢", "🙏"]
 
@@ -63,25 +66,30 @@ final class Talk {
     socket = Socket(account: account)
     socket.on("message") { [weak self] data in
       guard let self, let msg = try? JSONDecoder().decode(Message.self, from: data) else { return }
+      heard += 1
       Task { await self.receive(msg) }
     }
     socket.on("sync") { [weak self] _ in Task { try? await self?.load() } }
     // A chat's live group call, or null once it's over.
     socket.on("call:update") { [weak self] data in
       struct Update: Decodable { let convId: String; let call: GroupCall? }
-      guard let self, let u = try? JSONDecoder().decode(Update.self, from: data), var m = me,
-            let i = m.conversations.firstIndex(where: { $0.id == u.convId }) else { return }
-      m.conversations[i].call = u.call
-      me = m
+      guard let u = try? JSONDecoder().decode(Update.self, from: data) else { return }
+      self?.updateConv(u.convId) { $0.call = u.call }
     }
     socket.on("reaction") { [weak self] data in
       struct R: Decodable { let messageId: Int; let convId: String; let userId: String; let body: String? }
       guard let r = try? JSONDecoder().decode(R.self, from: data) else { return }
       self?.setReaction(r.convId, r.messageId, r.userId, r.body)
     }
+    // Sent without reactions: keep the ones we hold, take the new body.
     socket.on("edit") { [weak self] data in
       guard let self, let msg = try? JSONDecoder().decode(Message.self, from: data) else { return }
-      merge(msg.convId, [decrypt(msg)])
+      var d = decrypt(msg)
+      if let old = messages[msg.convId]?.first(where: { $0.id == msg.id }) {
+        d.message.reactions = old.message.reactions
+        d.reactions = old.reactions
+      }
+      merge(msg.convId, [d])
       save()
     }
     // A `sync` follows, for previews and unread counts.
@@ -92,10 +100,8 @@ final class Talk {
     }
     socket.on("read") { [weak self] data in
       struct R: Decodable { let convId: String; let userId: String; let upTo: Int }
-      guard let self, let r = try? JSONDecoder().decode(R.self, from: data), var m = me,
-            let i = m.conversations.firstIndex(where: { $0.id == r.convId }) else { return }
-      m.conversations[i].reads = (m.conversations[i].reads ?? [:]).merging([r.userId: r.upTo]) { max($0, $1) }
-      me = m
+      guard let r = try? JSONDecoder().decode(R.self, from: data) else { return }
+      self?.updateConv(r.convId) { $0.reads = ($0.reads ?? [:]).merging([r.userId: r.upTo]) { max($0, $1) } }
     }
     socket.on("typing") { [weak self] data in
       struct T: Decodable { let convId: String; let userId: String }
@@ -141,24 +147,26 @@ final class Talk {
 
   @discardableResult
   func load() async throws -> Me {
-    do {
-      var m: Me = try await api.call("GET", "/api/me")
-      m.conversations = m.conversations.map { c in
-        var c = c
-        if visible && c.id == activeId { c.unread = 0 }
-        return c
-      }
-      me = m
-      // Tell the server too, or the next push's badge counts what's on screen.
-      if visible, let activeId { markRead(activeId) }
-      Names.save(m.users, m.conversations)
-      for c in m.conversations { if let last = c.lastMessage { merge(c.id, [decrypt(last)]) } }
-      save()
-      return m
-    } catch let e as APIError where e.status == 401 {
+    let before = heard
+    var m: Me
+    do { m = try await api.call("GET", "/api/me") } catch let e as APIError where e.status == 401 {
       onSignedOut()
       throw e
     }
+    // A message landed mid-fetch (a rename's sync, then its line): this answer may predate it and undo its bump.
+    if heard != before { return try await load() }
+    m.conversations = m.conversations.map { c in
+      var c = c
+      if visible && c.id == activeId { c.unread = 0 }
+      return c
+    }
+    me = m
+    // Tell the server too, or the next push's badge counts what's on screen.
+    if visible, let activeId { markRead(activeId) }
+    Names.save(m.users, m.conversations)
+    for c in m.conversations { if let last = c.lastMessage { merge(c.id, [decrypt(last)]) } }
+    save()
+    return m
   }
 
   func key(_ convId: String) async throws -> SymmetricKey { SymmetricKey(data: try await rawKey(convId)) }
@@ -178,12 +186,15 @@ final class Talk {
     guard let raw = keys[msg.convId] ?? (try? keyNow(msg.convId)) else { return Decrypted(message: msg, content: nil) }
     let key = SymmetricKey(data: raw)
     var d = Decrypted(message: msg, content: try? Crypto.openMessage(key, convId: msg.convId, msg.body))
-    for r in msg.reactions ?? [] {
-      guard let b: ReactionBody = try? Crypto.openMessage(key, convId: msg.convId, r.body), b.from == r.userId, b.to == msg.id,
-            let e = b.emoji.first else { continue }
-      d.reactions[r.userId] = String(e) // one character: it's someone else's text in our layout
-    }
+    for r in msg.reactions ?? [] { d.reactions[r.userId] = emoji(key, msg, r) }
     return d
+  }
+
+  // Only if its sealed from/to match the row.
+  private func emoji(_ key: SymmetricKey, _ msg: Message, _ r: Reaction) -> String? {
+    guard let b: ReactionBody = try? Crypto.openMessage(key, convId: msg.convId, r.body), b.from == r.userId, b.to == msg.id,
+          let e = b.emoji.first else { return nil }
+    return String(e) // one character: it's someone else's text in our layout
   }
 
   // Synchronous unwrap when `me` already has the conversation.
@@ -237,7 +248,7 @@ final class Talk {
       var c = c
       c.lastMessageAt = msg.createdAt
       c.lastMessage = msg
-      if !mine && !seen && !answered { c.unread += 1 }
+      if !mine && !seen && !answered && !d.system { c.unread += 1 } // event lines are sent `seen`: the server doesn't count them either
       return c
     }.sorted(by: Self.listed)
     me = m
@@ -250,10 +261,13 @@ final class Talk {
     (a.pinned == true) != (b.pinned == true) ? a.pinned == true : (a.lastMessageAt ?? 0) > (b.lastMessageAt ?? 0)
   }
 
+  // Opens only the new reaction; `message.reactions` stays current for the cache.
   private func setReaction(_ convId: String, _ messageId: Int, _ userId: String, _ body: String?) {
-    guard let i = messages[convId]?.firstIndex(where: { $0.id == messageId }), var msg = messages[convId]?[i].message else { return }
-    msg.reactions = (msg.reactions ?? []).filter { $0.userId != userId } + (body.map { [Reaction(userId: userId, body: $0)] } ?? [])
-    messages[convId]?[i] = decrypt(msg)
+    guard let i = messages[convId]?.firstIndex(where: { $0.id == messageId }), var d = messages[convId]?[i], let raw = keys[convId] ?? (try? keyNow(convId)) else { return }
+    let r = body.map { Reaction(userId: userId, body: $0) }
+    d.message.reactions = (d.message.reactions ?? []).filter { $0.userId != userId } + (r.map { [$0] } ?? [])
+    d.reactions[userId] = r.flatMap { emoji(SymmetricKey(data: raw), d.message, $0) }
+    messages[convId]?[i] = d
     save()
   }
 
@@ -266,10 +280,14 @@ final class Talk {
     let ids = [messages[convId]?.last?.id, me?.conversations.first(where: { $0.id == convId })?.lastMessage?.id]
     guard let last = ids.compactMap({ $0 }).max() else { return }
     Task { let _: OK? = try? await api.call("POST", "/api/conversations/\(convId)/read", ["upTo": last]) }
-    if var m = me, let i = m.conversations.firstIndex(where: { $0.id == convId }), m.conversations[i].unread > 0 {
-      m.conversations[i].unread = 0
-      me = m
-    }
+    if me?.conversations.first(where: { $0.id == convId })?.unread ?? 0 > 0 { updateConv(convId) { $0.unread = 0 } }
+  }
+
+  // One chat in `me`, changed in place, if it's there.
+  private func updateConv(_ id: String, _ f: (inout Conversation) -> Void) {
+    guard var m = me, let i = m.conversations.firstIndex(where: { $0.id == id }) else { return }
+    f(&m.conversations[i])
+    me = m
   }
 
   // MARK: - offline cache
@@ -326,15 +344,19 @@ final class Talk {
 
   // Sealed, saved, then sent; returns once queued. A failure shows on the pending row.
   func send(_ convId: String, text: String? = nil, files refs: [FileRef]? = nil, call: CallLog? = nil, reply: Reply? = nil, forwarded: Bool? = nil,
-            quiet: Bool = false, seen: Bool = false) async throws {
-    let body = MessageBody(from: account.userId, text: text, files: refs, call: call, reply: reply, forwarded: forwarded)
-    let sealed = try Crypto.sealMessage(try await key(convId), convId: convId, body)
-    // The server's limit; thrown here, so the draft comes back instead of a row that can never send.
-    guard sealed.count <= 64 * 1024 else { throw APIError(status: 0, message: "That message is too long to send.") }
+            system: Bool? = nil, quiet: Bool = false, seen: Bool = false) async throws {
+    let sealed = try await seal(convId, MessageBody(from: account.userId, text: text, files: refs, call: call, reply: reply, forwarded: forwarded, system: system))
     let p = Pending(cid: UUID().uuidString.lowercased(), convId: convId, body: sealed, createdAt: Date().timeIntervalSince1970 * 1000, quiet: quiet, seen: seen, sending: socket.connected)
     pending.append(p)
     save(now: true)
     Task { await drain() }
+  }
+
+  // The server's limit; thrown here, so the draft comes back instead of a row that can never send.
+  private func seal(_ convId: String, _ body: some Encodable) async throws -> String {
+    let sealed = try Crypto.sealMessage(try await key(convId), convId: convId, body)
+    guard sealed.count <= 64 * 1024 else { throw APIError(status: 0, message: "That message is too long to send.") }
+    return sealed
   }
 
   // One at a time, oldest first, so messages land in the order they were written.
@@ -371,7 +393,7 @@ final class Talk {
       let _: OK = try await api.call("DELETE", "/api/messages/\(id)/reaction")
       setReaction(convId, id, account.userId, nil)
     } else {
-      let body = try Crypto.sealMessage(try await key(convId), convId: convId, ReactionBody(from: account.userId, to: id, emoji: emoji))
+      let body = try await seal(convId, ReactionBody(from: account.userId, to: id, emoji: emoji))
       let _: OK = try await api.call("PUT", "/api/messages/\(id)/reaction", ["body": body])
       setReaction(convId, id, account.userId, body)
     }
@@ -382,7 +404,7 @@ final class Talk {
     guard var body = d.content else { return }
     body.text = text
     let convId = d.message.convId
-    let sealed = try Crypto.sealMessage(try await key(convId), convId: convId, body)
+    let sealed = try await seal(convId, body)
     struct Edited: Decodable { let message: Message }
     let r: Edited = try await api.call("PATCH", "/api/messages/\(d.message.id)", ["body": sealed])
     merge(convId, [decrypt(r.message)])
@@ -483,6 +505,7 @@ final class Talk {
 
   func user(_ id: String) -> User? { me?.users.first { $0.id == id } }
   func name(_ id: String) -> String { user(id)?.name ?? "Someone" }
+  func who(_ id: String) -> String { id == account.userId ? "You" : name(id) }
 
   func title(_ c: Conversation) -> String {
     c.title ?? name(c.members.first { $0 != account.userId } ?? account.userId)
@@ -516,17 +539,17 @@ final class Talk {
     body["muted"] = muted
     body["pinned"] = pinned
     let _: OK = try await api.call("PATCH", "/api/conversations/\(convId)/me", body)
-    guard var m = me, let i = m.conversations.firstIndex(where: { $0.id == convId }) else { return }
-    if let muted { m.conversations[i].muted = muted }
-    if let pinned { m.conversations[i].pinned = pinned }
-    m.conversations.sort(by: Self.listed)
-    me = m
+    updateConv(convId) {
+      if let muted { $0.muted = muted }
+      if let pinned { $0.pinned = pinned }
+    }
+    if pinned != nil { me?.conversations.sort(by: Self.listed) }
   }
 
+  // The server syncs everyone in the chat, us too, so none of these reload here.
   func rename(_ convId: String, _ title: String) async throws {
     let _: OK = try await api.call("PATCH", "/api/conversations/\(convId)", ["title": title])
     await announce(convId, "\(account.name) named the group “\(title)”")
-    try await load()
   }
 
   // Each person gets the chat key wrapped for them, as createConversation does.
@@ -538,27 +561,30 @@ final class Talk {
       let _: OK = try await api.call("POST", "/api/conversations/\(convId)/members", ["userId": uid, "wrappedKey": wrapped])
     }
     await announce(convId, "\(account.name) added \(ListFormatter.localizedString(byJoining: userIds.map(name)))")
-    try await load()
   }
 
   // Your own id leaves the group.
   func remove(_ convId: String, _ userId: String) async throws {
-    let leaving = userId == account.userId
-    if leaving { await announce(convId, "\(account.name) left") } // first: afterwards we can't send
+    guard userId != account.userId else { return try await leave(convId) }
     let _: OK = try await api.call("DELETE", "/api/conversations/\(convId)/members/\(userId)")
-    if !leaving { await announce(convId, "\(account.name) removed \(name(userId))") }
-    try await load()
+    await announce(convId, "\(account.name) removed \(name(userId))")
   }
 
-  // A group event line, sent straight over the socket (not the outbox) so "left" lands before we go.
-  // Best effort: offline, the change still happens, just without its line.
+  // A group event line, through the outbox like any message, so it keeps its order and retries.
   private func announce(_ convId: String, _ text: String) async {
+    try? await send(convId, text: text, system: true, quiet: true, seen: true)
+  }
+
+  // "left" goes straight over the socket, not the outbox: it must land before the DELETE, after which we can't send.
+  // Best effort: offline, we still leave, just without the line.
+  private func leave(_ convId: String) async throws {
     struct Ack: Decodable { let message: Message? }
     do {
-      let sealed = try Crypto.sealMessage(try await key(convId), convId: convId, MessageBody(from: account.userId, text: text, system: true))
+      let sealed = try await seal(convId, MessageBody(from: account.userId, text: "\(account.name) left", system: true))
       let r = try await socket.ack("send", ["convId": convId, "body": sealed, "quiet": true, "seen": true, "cid": UUID().uuidString.lowercased()])
       if let msg = try JSONDecoder().decode(Ack.self, from: r).message { merge(convId, [decrypt(msg)]) }
     } catch {}
+    let _: OK = try await api.call("DELETE", "/api/conversations/\(convId)/members/\(account.userId)")
   }
 
   func invite() async throws -> URL {

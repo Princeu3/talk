@@ -80,9 +80,6 @@ private struct Row: View {
   let conv: Conversation
 
   var body: some View {
-    let last = conv.lastMessage.flatMap { m in talk.messages[conv.id]?.last { $0.id == m.id } }
-    let mine = conv.lastMessage?.senderId == talk.account.userId
-    let typers = talk.typers(conv.id)
     HStack(spacing: 12) {
       Avatar(name: talk.title(conv), size: 52)
       VStack(alignment: .leading, spacing: 3) {
@@ -98,16 +95,9 @@ private struct Row: View {
           if let t = conv.lastMessageAt { Text(Format.shortTime(t)).font(.subheadline).foregroundStyle(Color.mut) }
         }
         HStack(alignment: .top) {
-          if !typers.isEmpty {
-            Text(Format.typing(typers.map(talk.name), group: conv.kind == "group"))
-              .font(.subheadline).foregroundStyle(Color.accent).lineLimit(2)
-          } else {
-            Text(last.map { Format.preview($0.content, mine: mine) } ?? " ")
-              .font(.subheadline).foregroundStyle(Color.mut).lineLimit(2)
-          }
-
+          LastLine(conv: conv)
           Spacer()
-          if let live = conv.call { JoinPill { calls.start(convId: conv.id, peer: nil, kind: live.kind) } }
+          if let live = conv.call { JoinPill { calls.start(convId: conv.id, kind: live.kind) } }
           if conv.unread > 0 {
             Text("\(conv.unread)").font(.caption.bold()).monospacedDigit()
               .padding(.horizontal, 7).frame(minWidth: 22, minHeight: 22)
@@ -118,6 +108,46 @@ private struct Row: View {
       }
     }
     .padding(.vertical, 4)
+  }
+}
+
+// A row's second line: who's typing, else the last message. Its own view, so a typing signal redraws only this.
+private struct LastLine: View {
+  @Environment(Talk.self) private var talk
+  let conv: Conversation
+
+  var body: some View {
+    let typers = talk.typers(conv.id)
+    if !typers.isEmpty {
+      Text(Format.typing(typers.map(talk.name), group: conv.kind == "group"))
+        .font(.subheadline).foregroundStyle(Color.accent).lineLimit(2)
+    } else {
+      let last = conv.lastMessage.flatMap { m in talk.messages[conv.id]?.last { $0.id == m.id } }
+      Text(last.map { Format.preview($0.content, mine: $0.message.senderId == talk.account.userId) } ?? " ")
+        .font(.subheadline).foregroundStyle(Color.mut).lineLimit(2)
+    }
+  }
+}
+
+// Someone to tick in a people picker (new chat, add people).
+struct PickRow: View {
+  let user: User
+  @Binding var picked: Set<String>
+
+  var body: some View {
+    let on = picked.contains(user.id)
+    Button {
+      if on { picked.remove(user.id) } else { picked.insert(user.id) }
+    } label: {
+      HStack(spacing: 12) {
+        Avatar(name: user.name, size: 40)
+        Text(user.name).foregroundStyle(Color.ink)
+        Spacer()
+        Image(systemName: on ? "checkmark.circle.fill" : "circle")
+          .foregroundStyle(on ? Color.accent : Color.mut).font(.title3)
+      }
+    }
+    .accessibilityAddTraits(on ? .isSelected : [])
   }
 }
 
@@ -138,20 +168,7 @@ struct NewChatView: View {
           Section("Group name") { TextField("Name the group", text: $title) }
         }
         Section(picked.count > 1 ? "\(picked.count) people" : "People") {
-          ForEach(people) { u in
-            Button {
-              if picked.contains(u.id) { picked.remove(u.id) } else { picked.insert(u.id) }
-            } label: {
-              HStack(spacing: 12) {
-                Avatar(name: u.name, size: 40)
-                Text(u.name).foregroundStyle(Color.ink)
-                Spacer()
-                Image(systemName: picked.contains(u.id) ? "checkmark.circle.fill" : "circle")
-                  .foregroundStyle(picked.contains(u.id) ? Color.accent : Color.mut).font(.title3)
-              }
-            }
-            .accessibilityAddTraits(picked.contains(u.id) ? .isSelected : [])
-          }
+          ForEach(people) { PickRow(user: $0, picked: $picked) }
         }
         if !error.isEmpty { Text(error).foregroundStyle(Color.danger) }
       }

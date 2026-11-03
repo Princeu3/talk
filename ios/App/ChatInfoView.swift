@@ -34,12 +34,14 @@ struct ChatInfoView: View {
               }
               .font(.subheadline.weight(.semibold))
             }
-            // A group (no peer) joins its live call or starts one.
-            HStack(spacing: 12) {
-              action("Voice call", "phone.fill") { calls.start(convId: convId, peer: peer, kind: "audio") }
-              action("Video call", "video.fill") { calls.start(convId: convId, peer: peer, kind: "video") }
+            // Not in a DM whose other account was deleted: nobody to call.
+            if peer != nil || conv.kind == "group" {
+              HStack(spacing: 12) {
+                action("Voice call", "phone.fill") { calls.start(convId: convId, kind: "audio") }
+                action("Video call", "video.fill") { calls.start(convId: convId, kind: "video") }
+              }
+              .padding(.top, 10)
             }
-            .padding(.top, 10)
           }
           .frame(maxWidth: .infinity)
           .listRowBackground(Color.clear)
@@ -58,11 +60,11 @@ struct ChatInfoView: View {
             // You first, then everyone else by name.
             ForEach([me] + conv.members.filter { $0 != me }.sorted { talk.name($0) < talk.name($1) }, id: \.self) { uid in
               if uid == me {
-                person(uid, "You")
+                person(uid)
               } else {
                 Button { member = Member(id: uid) } label: {
                   HStack {
-                    person(uid, talk.name(uid))
+                    person(uid)
                     Spacer()
                     Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(Color.mut)
                   }
@@ -115,10 +117,10 @@ struct ChatInfoView: View {
     }
   }
 
-  private func person(_ userId: String, _ name: String) -> some View {
+  private func person(_ userId: String) -> some View {
     HStack(spacing: 12) {
       Avatar(name: talk.name(userId), size: 36)
-      Text(name)
+      Text(talk.who(userId))
     }
   }
 
@@ -221,20 +223,7 @@ private struct AddPeopleView: View {
         if people.isEmpty {
           Text("Everyone on this server is already in the group.").foregroundStyle(Color.mut)
         }
-        ForEach(people) { u in
-          Button {
-            if picked.contains(u.id) { picked.remove(u.id) } else { picked.insert(u.id) }
-          } label: {
-            HStack(spacing: 12) {
-              Avatar(name: u.name, size: 40)
-              Text(u.name).foregroundStyle(Color.ink)
-              Spacer()
-              Image(systemName: picked.contains(u.id) ? "checkmark.circle.fill" : "circle")
-                .foregroundStyle(picked.contains(u.id) ? Color.accent : Color.mut).font(.title3)
-            }
-          }
-          .accessibilityAddTraits(picked.contains(u.id) ? .isSelected : [])
-        }
+        ForEach(people) { PickRow(user: $0, picked: $picked) }
         if !error.isEmpty { Text(error).foregroundStyle(Color.danger) }
       }
       .navigationTitle("Add people")

@@ -19,11 +19,16 @@ enum Format {
     return m < 60 ? "\(m) min" : "\(m / 60) hr \(m % 60) min"
   }
 
+  // "Voice call", "Group video call", ...
+  static func callNoun(_ kind: String?, group: Bool) -> String {
+    let noun = kind == "audio" ? "Voice call" : "Video call"
+    return group ? "Group \(noun.lowercased())" : noun
+  }
+
   // A missed call reads differently to the caller ("No answer") and the callee.
   static func call(_ c: CallLog, mine: Bool) -> (title: String, detail: String?, missed: Bool) {
     if c.room != nil { return ("Call", "Ended", false) }
-    var noun = c.kind == "audio" ? "Voice call" : "Video call"
-    if c.group == true { noun = "Group \(noun.lowercased())" }
+    let noun = callNoun(c.kind, group: c.group == true)
     if let ms = c.ms, ms > 0 { return (noun, talkTime(ms), false) }
     return mine ? (noun, "No answer", false) : ("Missed \(noun.lowercased())", nil, true)
   }
@@ -50,7 +55,7 @@ enum Format {
     guard group else { return "typing…" }
     switch names.count {
     case 1: return "\(names[0]) is typing…"
-    case 2: return "\(names[0]) and \(names[1]) are typing…"
+    case 2: return "\(ListFormatter.localizedString(byJoining: names)) are typing…"
     default: return "\(names.count) people are typing…"
     }
   }

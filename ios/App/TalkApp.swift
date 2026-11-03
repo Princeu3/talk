@@ -27,7 +27,7 @@ struct TalkApp: App {
         guard let talk, let intent = activity.interaction?.intent as? INStartCallIntent,
               let handle = intent.contacts?.first?.personHandle?.value,
               let conv = talk.me?.conversations.first(where: { $0.id == handle || ($0.kind == "dm" && $0.members.contains(handle)) }) else { return }
-        calls.start(convId: conv.id, peer: talk.peer(conv), kind: intent.callCapability == .videoCall ? "video" : "audio")
+        calls.start(convId: conv.id, kind: intent.callCapability == .videoCall ? "video" : "audio")
       }
     }
   }

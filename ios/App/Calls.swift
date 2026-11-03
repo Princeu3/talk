@@ -57,6 +57,20 @@ private final class Peer {
   }
 }
 
+// One of /api/ice's servers; `urls` is one string or a list, as in the browser.
+nonisolated private struct IceServer: Decodable, Sendable {
+  let urls: [String]
+  let username: String?
+  let credential: String?
+  init(from d: Decoder) throws {
+    let c = try d.container(keyedBy: CodingKeys.self)
+    urls = try (try? c.decode([String].self, forKey: .urls)) ?? [c.decode(String.self, forKey: .urls)]
+    username = try c.decodeIfPresent(String.self, forKey: .username)
+    credential = try c.decodeIfPresent(String.self, forKey: .credential)
+  }
+  enum CodingKeys: CodingKey { case urls, username, credential }
+}
+
 private final class Session {
   var id: String? // server call id; nil until call:start answers
   let uuid: UUID // CallKit's id
@@ -76,6 +90,8 @@ private final class Session {
   var camera: Bool
   var front = true
   var done = false
+  var ice: Task<[IceServer], Never>? // fetched once, for every peer connection
+  var checked: Task<Void, Never>? // incoming: the server's call state, which also says whether it's a group call
 
   init(id: String?, uuid: UUID, convId: String, peer: String, group: Bool, kind: String, outgoing: Bool, join: String? = nil) {
     self.id = id
@@ -142,10 +158,10 @@ final class Calls: NSObject {
     let s = talk.socket
     s.on("call:ring") { [weak self] d in
       guard let r = try? JSONDecoder().decode(CallRing.self, from: d) else { return }
-      self?.incoming(id: r.id, convId: r.convId, from: r.from, kind: r.kind)
+      self?.incoming(id: r.id, convId: r.convId, from: r.from, kind: r.kind, group: r.group == true)
     }
     s.on("call:accepted") { [weak self] d in
-      guard let self, let s = session, s.id == Self.id(d), s.peers.isEmpty else { return }
+      guard let self, case let (s, _)? = ours(d), s.peers.isEmpty else { return }
       stopRingback()
       patch { $0.phase = .connecting }
       provider.reportOutgoingCall(with: s.uuid, startedConnectingAt: nil)
@@ -153,21 +169,20 @@ final class Calls: NSObject {
     }
     // Group: someone joined after us, or joined again from another device; (re)connect to them.
     s.on("call:joined") { [weak self] d in
-      guard let self, let s = session, let o = Self.json(d), s.id == o["id"] as? String, let user = o["user"] as? String else { return }
+      guard let self, case let (s, o)? = ours(d), let user = o["user"] as? String else { return }
       addPeer(s, user, polite: isPolite(group: true, outgoing: s.outgoing, joinedAfterThem: false))
     }
     s.on("call:left") { [weak self] d in
-      guard let self, let s = session, let o = Self.json(d), s.id == o["id"] as? String, let user = o["user"] as? String else { return }
+      guard let self, case let (s, o)? = ours(d), let user = o["user"] as? String else { return }
       closePeer(s, user)
     }
     // DM signals come without `from`: they're from our one peer.
     s.on("call:signal") { [weak self] d in
-      guard let self, let s = session, let o = Self.json(d), s.id == o["id"] as? String, let data = o["data"] as? [String: Any],
-            let p = s.peers[o["from"] as? String ?? s.peer] else { return }
+      guard let self, case let (s, o)? = ours(d), let data = o["data"] as? [String: Any], let p = s.peers[o["from"] as? String ?? s.peer] else { return }
       if p.pc != nil { Task { await self.handle(s, p, data) } } else { p.queue.append(data) }
     }
     s.on("call:end") { [weak self] d in
-      guard let self, let s = session, let o = Self.json(d), s.id == o["id"] as? String else { return }
+      guard let self, case let (s, o)? = ours(d) else { return }
       remoteEnded(s, reason: o["reason"] as? String ?? "hangup")
     }
     // Our socket came back (phones drop it): tell the server which device we are again.
@@ -199,11 +214,11 @@ final class Calls: NSObject {
 
   // MARK: - actions from the UI
 
-  // A DM rings `peer`. A group (no peer) joins the call it has on, or starts one.
-  func start(convId: String, peer: String?, kind: String) {
-    guard let talk else { return }
-    let conv = talk.me?.conversations.first { $0.id == convId }
-    let live = peer == nil ? conv?.call : nil
+  // A DM rings the other person. A group joins the call it has on, or starts one.
+  func start(convId: String, kind: String) {
+    guard let talk, let conv = talk.me?.conversations.first(where: { $0.id == convId }) else { return }
+    let group = conv.kind == "group"
+    let live = group ? conv.call : nil
     if let s = session {
       // Already ringing for, or in, this chat's call: answer it, or show it.
       guard let live, s.id == live.id else { return }
@@ -211,10 +226,11 @@ final class Calls: NSObject {
       else { controller.request(CXTransaction(action: CXAnswerCallAction(call: s.uuid))) { _ in } }
       return
     }
-    guard peer != nil || conv != nil else { return }
+    // A DM whose other account was deleted has nobody to ring.
+    guard let peer = group ? live?.from ?? talk.account.userId : talk.peer(conv) else { return }
     Task {
       guard await mediaAllowed(video: kind == "video"), session == nil else { return }
-      place(convId: convId, peer: peer ?? live?.from ?? talk.account.userId, group: peer == nil ? conv?.title ?? "Group call" : nil, kind: kind, join: live?.id)
+      place(convId: convId, peer: peer, group: group ? conv.title ?? "Group call" : nil, kind: kind, join: live?.id)
     }
   }
 
@@ -292,12 +308,13 @@ final class Calls: NSObject {
 
   // MARK: - incoming
 
-  private func incoming(id: String, convId: String, from: String, kind: String) {
+  // `group` is nil from a VoIP push, which doesn't say: guess from the cache for CallKit's label
+  // (Names keeps group titles by chat id), and answer as the server's call state says.
+  private func incoming(id: String, convId: String, from: String, kind: String, group flag: Bool?) {
     // A call we're already in (joined from the chat) keeps its own CallKit id.
     let uuid = session?.id == id ? session!.uuid : UUID(uuidString: id) ?? UUID()
-    // Group titles are saved by chat id (Names), so a push into a closed app still knows a group.
     let conv = talk?.me?.conversations.first { $0.id == convId }
-    let group = conv.map { $0.kind == "group" } ?? (Names.of(convId) != nil)
+    let group = flag ?? conv.map { $0.kind == "group" } ?? (Names.of(convId) != nil)
     let title = group ? conv?.title ?? Names.of(convId) ?? "Group call" : nil
     let update = CXCallUpdate()
     update.remoteHandle = CXHandle(type: .generic, value: group ? convId : from)
@@ -320,10 +337,11 @@ final class Calls: NSObject {
       session = s
       current = CallView(convId: convId, peer: from, group: title, kind: kind, phase: .incoming, camera: s.camera)
       // A push can arrive after the caller gave up, or after another of our devices answered.
-      Task {
-        struct Ring: Decodable { let state: String }
+      s.checked = Task {
+        struct Ring: Decodable { let state: String; let group: Bool? }
         do {
           let r: Ring = try await talk!.api.call("GET", "/api/calls/\(id)")
+          if r.group == true { s.group = true } // the cache never mistakes a DM for a group, only the reverse
           if r.state != "ringing", session === s, !s.accepted { remoteEnded(s, reason: "elsewhere") }
         }
         catch let e as APIError where e.status == 404 { if session === s { remoteEnded(s, reason: "cancelled") } }
@@ -405,21 +423,11 @@ final class Calls: NSObject {
     ["type": RTCSessionDescription.string(for: d.type), "sdp": d.sdp]
   }
 
-  private func iceServers() async -> [RTCIceServer] {
-    struct Server: Decodable {
-      let urls: [String]
-      let username: String?
-      let credential: String?
-      init(from d: Decoder) throws {
-        let c = try d.container(keyedBy: CodingKeys.self)
-        urls = try (try? c.decode([String].self, forKey: .urls)) ?? [c.decode(String.self, forKey: .urls)]
-        username = try c.decodeIfPresent(String.self, forKey: .username)
-        credential = try c.decodeIfPresent(String.self, forKey: .credential)
-      }
-      enum CodingKeys: CodingKey { case urls, username, credential }
-    }
-    let list: [Server] = (try? await talk?.api.call("GET", "/api/ice")) ?? []
-    let servers = list.map { RTCIceServer(urlStrings: $0.urls, username: $0.username, credential: $0.credential) }
+  // One GET per call, shared by every peer connection in it.
+  private func iceServers(_ s: Session) async -> [RTCIceServer] {
+    let fetch = s.ice ?? Task { () -> [IceServer] in (try? await talk?.api.call("GET", "/api/ice")) ?? [] }
+    s.ice = fetch
+    let servers = await fetch.value.map { RTCIceServer(urlStrings: $0.urls, username: $0.username, credential: $0.credential) }
     return servers.isEmpty ? [RTCIceServer(urlStrings: ["stun:stun.cloudflare.com:3478"])] : servers
   }
 
@@ -448,7 +456,7 @@ final class Calls: NSObject {
   }
 
   private func connect(_ s: Session, _ p: Peer) async {
-    let config = RTCConfiguration.talk(await iceServers())
+    let config = RTCConfiguration.talk(await iceServers(s))
     guard !s.done, s.peers[p.user] === p else { return }
     let events = PeerEvents { [weak self] e in Task { @MainActor in self?.event(s, p, e) } }
     guard let pc = factory.peerConnection(with: config, constraints: RTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: nil), delegate: events) else {
@@ -602,7 +610,12 @@ final class Calls: NSObject {
   }
 
   private static func json(_ d: Data) -> [String: Any]? { (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] }
-  private static func id(_ d: Data) -> String? { json(d)?["id"] as? String }
+
+  // An event about the call we're in or ringing for: that session, and the event's fields.
+  private func ours(_ d: Data) -> (Session, [String: Any])? {
+    guard let s = session, let o = Self.json(d), s.id == o["id"] as? String else { return nil }
+    return (s, o)
+  }
 
   // The familiar US ringback (440 + 480 Hz, 2 s on, 4 s off), made here so there are no sound files to ship.
   private func playRingback() {
@@ -687,11 +700,12 @@ extension Calls: CXProviderDelegate {
     Task {
       // Answered from the lock screen: the socket may still be connecting.
       for _ in 0..<40 where !talk.socket.connected { try? await Task.sleep(for: .milliseconds(250)) }
-      // A group made while the app was away isn't cached, and a group is answered by joining.
-      if !s.group, talk.me?.conversations.contains(where: { $0.id == s.convId }) != true,
-         let c = (try? await talk.load())?.conversations.first(where: { $0.id == s.convId }), c.kind == "group" {
-        s.group = true
-        patch { $0.group = c.title ?? "Group call" }
+      // A group is answered by joining. The cache may have guessed a DM: a group made while the app was away.
+      await s.checked?.value
+      if s.group, current?.group == nil {
+        var c = talk.me?.conversations.first { $0.id == s.convId }
+        if c == nil { c = (try? await talk.load())?.conversations.first { $0.id == s.convId } }
+        patch { $0.group = c?.title ?? "Group call" }
       }
       let r = try? await talk.socket.ack(s.group ? "call:join" : "call:accept", ["id": id], timeout: 10)
       guard let o = r.flatMap(Self.json), o["id"] != nil else {
@@ -738,7 +752,7 @@ extension Calls: PKPushRegistryDelegate {
 
   func pushRegistry(_ registry: PKPushRegistry, didReceiveIncomingPushWith payload: PKPushPayload, for type: PKPushType, completion: @escaping () -> Void) {
     let p = payload.dictionaryPayload
-    incoming(id: p["callId"] as? String ?? UUID().uuidString, convId: p["convId"] as? String ?? "", from: p["from"] as? String ?? "", kind: p["kind"] as? String ?? "audio")
+    incoming(id: p["callId"] as? String ?? UUID().uuidString, convId: p["convId"] as? String ?? "", from: p["from"] as? String ?? "", kind: p["kind"] as? String ?? "audio", group: nil)
     completion()
   }
 }
