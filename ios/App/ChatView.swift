@@ -44,20 +44,7 @@ struct ChatView: View {
             ProgressView().padding().onAppear { Task { await talk.loadOlder(convId) } }
           }
           ForEach(Array(list.enumerated()), id: \.element.id) { i, m in
-            let prev = i > 0 ? list[i - 1] : nil
-            if prev.map({ !Calendar.current.isDate(date($0), inSameDayAs: date(m)) }) ?? true {
-              Text(Format.day(m.message.createdAt)).font(.caption.weight(.medium)).foregroundStyle(Color.mut).padding(.vertical, 12)
-            }
-            let gap = prev.map { breaks($0, m) } ?? true
-            MessageRow(convId: convId, m: m, group: conv?.kind == "group", first: gap, flashing: flash == m.id, onCall: callAgain, onZoom: { zoom = $0 }) {
-              act($0, on: m, proxy)
-            }
-              .padding(.top, gap ? 8 : 0)
-              .id(m.id)
-            if m.id == newest?.id {
-              Text(receipt(m)).font(.caption).foregroundStyle(Color.mut)
-                .frame(maxWidth: .infinity, alignment: .trailing).padding(.horizontal, 4).padding(.top, 2)
-            }
+            row(m, after: i > 0 ? list[i - 1] : nil, newest: m.id == newest?.id, proxy)
           }
           ForEach(queued) { p in PendingRow(convId: convId, p: p, onCall: callAgain, onZoom: { zoom = $0 }) }
           TypingRow(convId: convId, group: conv?.kind == "group")
@@ -354,8 +341,26 @@ struct ChatView: View {
 
   private func callAgain(_ kind: String) { calls.start(convId: convId, kind: kind) }
 
-  // A new run of bubbles: a pause of 5 minutes, another sender, or after an event line.
+  // One message: a day label when the day changes, the bubble, and the receipt under my newest.
   // Its own function: inline in the body, it was too slow for CI's compiler to type-check.
+  @ViewBuilder private func row(_ m: Decrypted, after prev: Decrypted?, newest: Bool, _ proxy: ScrollViewProxy) -> some View {
+    let newDay: Bool = prev.map { !Calendar.current.isDate(date($0), inSameDayAs: date(m)) } ?? true
+    let gap: Bool = prev.map { breaks($0, m) } ?? true
+    if newDay {
+      Text(Format.day(m.message.createdAt)).font(.caption.weight(.medium)).foregroundStyle(Color.mut).padding(.vertical, 12)
+    }
+    MessageRow(convId: convId, m: m, group: conv?.kind == "group", first: gap, flashing: flash == m.id, onCall: callAgain, onZoom: { zoom = $0 }) {
+      act($0, on: m, proxy)
+    }
+      .padding(.top, gap ? 8 : 0)
+      .id(m.id)
+    if newest {
+      Text(receipt(m)).font(.caption).foregroundStyle(Color.mut)
+        .frame(maxWidth: .infinity, alignment: .trailing).padding(.horizontal, 4).padding(.top, 2)
+    }
+  }
+
+  // A new run of bubbles: a pause of 5 minutes, another sender, or after an event line.
   private func breaks(_ a: Decrypted, _ b: Decrypted) -> Bool {
     b.message.createdAt - a.message.createdAt > 5 * 60_000 || a.message.senderId != b.message.senderId || a.system
   }
