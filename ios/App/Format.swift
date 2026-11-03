@@ -22,7 +22,8 @@ enum Format {
   // A missed call reads differently to the caller ("No answer") and the callee.
   static func call(_ c: CallLog, mine: Bool) -> (title: String, detail: String?, missed: Bool) {
     if c.room != nil { return ("Call", "Ended", false) }
-    let noun = c.kind == "audio" ? "Voice call" : "Video call"
+    var noun = c.kind == "audio" ? "Voice call" : "Video call"
+    if c.group == true { noun = "Group \(noun.lowercased())" }
     if let ms = c.ms, ms > 0 { return (noun, talkTime(ms), false) }
     return mine ? (noun, "No answer", false) : ("Missed \(noun.lowercased())", nil, true)
   }

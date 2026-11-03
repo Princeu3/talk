@@ -9,13 +9,15 @@ import WebRTC
 // Signaling is the same as the web (src/lib/useCall.ts and server/calls.ts):
 // perfect negotiation where the caller is impolite, signals relayed over our
 // socket, a watchdog that resends a lost offer, and ICE restarts when the
-// network changes.
+// network changes. A group call is a mesh: one peer connection per person,
+// each negotiated the same way, sharing our microphone and camera.
 
 enum Phase: Equatable { case incoming, calling, ringing, connecting, live, reconnecting, ended }
 
 struct CallView {
   let convId: String
-  let peer: String
+  let peer: String // DM: the other person; group: who started it
+  var group: String? // the group's title; nil in a DM
   let kind: String
   var phase: Phase
   var since: Date?
@@ -23,10 +25,36 @@ struct CallView {
   var muted = false
   var camera: Bool
   var front = true
-  var remoteMuted = false
-  var remoteCamera: Bool
   var local: RTCVideoTrack?
-  var remote: RTCVideoTrack?
+  var tiles: [Tile] = [] // everyone we're connecting or connected to, in join order
+  var remote: RTCVideoTrack? { tiles.first?.video }
+  var remoteMuted: Bool { tiles.first?.muted ?? false }
+  var remoteCamera: Bool { tiles.first?.camera ?? false }
+}
+
+struct Tile: Identifiable {
+  let id: String // user id
+  var video: RTCVideoTrack?
+  var muted = false
+  var camera: Bool
+}
+
+private final class Peer {
+  let user: String
+  let polite: Bool
+  var pc: RTCPeerConnection?
+  var events: PeerEvents?
+  var videoSender: RTCRtpSender?
+  var queue: [[String: Any]] = [] // signals that arrive before the peer connection exists
+  var makingOffer = false
+  var ignoreOffer = false
+  var lost: Task<Void, Never>?
+  var timers: [Task<Void, Never>] = []
+
+  init(user: String, polite: Bool) {
+    self.user = user
+    self.polite = polite
+  }
 }
 
 private final class Session {
@@ -34,33 +62,30 @@ private final class Session {
   let uuid: UUID // CallKit's id
   let convId: String
   let peer: String
+  var group: Bool
   let kind: String
   let outgoing: Bool
-  var pc: RTCPeerConnection?
-  var events: PeerEvents?
+  let join: String? // a group call already on, joined from the chat instead of started
+  var peers: [String: Peer] = [:] // by user id; a DM has at most one
   var audio: RTCAudioTrack?
   var video: RTCVideoTrack?
-  var videoSender: RTCRtpSender?
   var capturer: RTCCameraVideoCapturer?
-  var queue: [[String: Any]] = [] // signals that arrive before the peer connection exists
-  var makingOffer = false
-  var ignoreOffer = false
   var accepted = false
   var since: Date?
   var muted = false
   var camera: Bool
   var front = true
-  var lost: Task<Void, Never>?
-  var timers: [Task<Void, Never>] = []
   var done = false
 
-  init(id: String?, uuid: UUID, convId: String, peer: String, kind: String, outgoing: Bool) {
+  init(id: String?, uuid: UUID, convId: String, peer: String, group: Bool, kind: String, outgoing: Bool, join: String? = nil) {
     self.id = id
     self.uuid = uuid
     self.convId = convId
     self.peer = peer
+    self.group = group
     self.kind = kind
     self.outgoing = outgoing
+    self.join = join
     camera = kind == "video"
   }
 }
@@ -120,15 +145,26 @@ final class Calls: NSObject {
       self?.incoming(id: r.id, convId: r.convId, from: r.from, kind: r.kind)
     }
     s.on("call:accepted") { [weak self] d in
-      guard let self, let s = session, s.id == Self.id(d), s.pc == nil else { return }
+      guard let self, let s = session, s.id == Self.id(d), s.peers.isEmpty else { return }
       stopRingback()
       patch { $0.phase = .connecting }
       provider.reportOutgoingCall(with: s.uuid, startedConnectingAt: nil)
-      Task { await self.connect(s) }
+      addPeer(s, s.peer, polite: isPolite(group: false, outgoing: true, joinedAfterThem: false))
     }
+    // Group: someone joined after us, or joined again from another device; (re)connect to them.
+    s.on("call:joined") { [weak self] d in
+      guard let self, let s = session, let o = Self.json(d), s.id == o["id"] as? String, let user = o["user"] as? String else { return }
+      addPeer(s, user, polite: isPolite(group: true, outgoing: s.outgoing, joinedAfterThem: false))
+    }
+    s.on("call:left") { [weak self] d in
+      guard let self, let s = session, let o = Self.json(d), s.id == o["id"] as? String, let user = o["user"] as? String else { return }
+      closePeer(s, user)
+    }
+    // DM signals come without `from`: they're from our one peer.
     s.on("call:signal") { [weak self] d in
-      guard let self, let s = session, let o = Self.json(d), s.id == o["id"] as? String, let data = o["data"] as? [String: Any] else { return }
-      if s.pc != nil { Task { await self.handle(s, data) } } else { s.queue.append(data) }
+      guard let self, let s = session, let o = Self.json(d), s.id == o["id"] as? String, let data = o["data"] as? [String: Any],
+            let p = s.peers[o["from"] as? String ?? s.peer] else { return }
+      if p.pc != nil { Task { await self.handle(s, p, data) } } else { p.queue.append(data) }
     }
     s.on("call:end") { [weak self] d in
       guard let self, let s = session, let o = Self.json(d), s.id == o["id"] as? String else { return }
@@ -136,10 +172,15 @@ final class Calls: NSObject {
     }
     // Our socket came back (phones drop it): tell the server which device we are again.
     s.on("connect") { [weak self] _ in
-      guard let self, let s = session, let id = s.id, s.outgoing || s.pc != nil else { return }
+      guard let self, let s = session, let id = s.id, s.outgoing || !s.peers.isEmpty else { return }
       Task {
         let r = try? await talk.socket.ack("call:rejoin", ["id": id])
-        if let r, Self.json(r)?["error"] != nil, self.session === s { self.end(s, note: "Call ended", reason: .remoteEnded) }
+        guard let o = r.flatMap(Self.json), self.session === s else { return }
+        if o["error"] != nil { return self.end(s, note: "Call ended", reason: .remoteEnded) }
+        // Joins and leaves we missed while away. Anyone new joined after us and waits for our offer.
+        guard let peers = o["peers"] as? [String] else { return }
+        for u in s.peers.keys where !peers.contains(u) { self.closePeer(s, u) }
+        for u in peers where s.peers[u] == nil { self.addPeer(s, u, polite: isPolite(group: true, outgoing: s.outgoing, joinedAfterThem: false)) }
       }
     }
   }
@@ -152,17 +193,28 @@ final class Calls: NSObject {
   #if DEBUG
   // Screenshots only: the Simulator ends every CallKit call, so this shows a live call screen with no media.
   func demo(convId: String, peer: String) {
-    current = CallView(convId: convId, peer: peer, kind: "audio", phase: .live, since: Date().addingTimeInterval(-754), camera: false, remoteCamera: false)
+    current = CallView(convId: convId, peer: peer, kind: "audio", phase: .live, since: Date().addingTimeInterval(-754), camera: false)
   }
   #endif
 
   // MARK: - actions from the UI
 
-  func start(convId: String, peer: String, kind: String) {
-    guard session == nil, talk != nil else { return }
+  // A DM rings `peer`. A group (no peer) joins the call it has on, or starts one.
+  func start(convId: String, peer: String?, kind: String) {
+    guard let talk else { return }
+    let conv = talk.me?.conversations.first { $0.id == convId }
+    let live = peer == nil ? conv?.call : nil
+    if let s = session {
+      // Already ringing for, or in, this chat's call: answer it, or show it.
+      guard let live, s.id == live.id else { return }
+      if s.outgoing || s.accepted { minimized = false }
+      else { controller.request(CXTransaction(action: CXAnswerCallAction(call: s.uuid))) { _ in } }
+      return
+    }
+    guard peer != nil || conv != nil else { return }
     Task {
       guard await mediaAllowed(video: kind == "video"), session == nil else { return }
-      place(convId: convId, peer: peer, kind: kind)
+      place(convId: convId, peer: peer ?? live?.from ?? talk.account.userId, group: peer == nil ? conv?.title ?? "Group call" : nil, kind: kind, join: live?.id)
     }
   }
 
@@ -180,14 +232,15 @@ final class Calls: NSObject {
     return true
   }
 
-  private func place(convId: String, peer: String, kind: String) {
-    let s = Session(id: nil, uuid: UUID(), convId: convId, peer: peer, kind: kind, outgoing: true)
+  private func place(convId: String, peer: String, group: String?, kind: String, join: String?) {
+    // Joining: known up front, so a call:joined that beats our join ack still finds us.
+    let s = Session(id: join, uuid: UUID(), convId: convId, peer: peer, group: group != nil, kind: kind, outgoing: true, join: join)
     session = s
-    current = CallView(convId: convId, peer: peer, kind: kind, phase: .calling, camera: s.camera, remoteCamera: kind == "video")
+    current = CallView(convId: convId, peer: peer, group: group, kind: kind, phase: .calling, camera: s.camera)
     minimized = false
-    let action = CXStartCallAction(call: s.uuid, handle: CXHandle(type: .generic, value: peer))
+    let action = CXStartCallAction(call: s.uuid, handle: CXHandle(type: .generic, value: group != nil ? convId : peer))
     action.isVideo = kind == "video"
-    action.contactIdentifier = talk?.name(peer)
+    action.contactIdentifier = group ?? talk?.name(peer)
     controller.request(CXTransaction(action: action)) { [weak self] err in
       guard let err else { return }
       Task { @MainActor in self?.fail(s, "Couldn’t start the call. \(err.localizedDescription)") }
@@ -240,10 +293,15 @@ final class Calls: NSObject {
   // MARK: - incoming
 
   private func incoming(id: String, convId: String, from: String, kind: String) {
-    let uuid = UUID(uuidString: id) ?? UUID()
+    // A call we're already in (joined from the chat) keeps its own CallKit id.
+    let uuid = session?.id == id ? session!.uuid : UUID(uuidString: id) ?? UUID()
+    // Group titles are saved by chat id (Names), so a push into a closed app still knows a group.
+    let conv = talk?.me?.conversations.first { $0.id == convId }
+    let group = conv.map { $0.kind == "group" } ?? (Names.of(convId) != nil)
+    let title = group ? conv?.title ?? Names.of(convId) ?? "Group call" : nil
     let update = CXCallUpdate()
-    update.remoteHandle = CXHandle(type: .generic, value: from)
-    update.localizedCallerName = talk?.name(from) ?? Names.of(from) ?? "Talk"
+    update.remoteHandle = CXHandle(type: .generic, value: group ? convId : from)
+    update.localizedCallerName = title ?? talk?.name(from) ?? Names.of(from) ?? "Talk"
     update.hasVideo = kind == "video"
     update.supportsHolding = false
     update.supportsGrouping = false
@@ -252,17 +310,22 @@ final class Calls: NSObject {
 
     // Every VoIP push must reach CallKit, even a duplicate or one we can't take.
     guard session == nil || session?.id == id, talk != nil else {
-      provider.reportNewIncomingCall(with: UUID(), update: update) { _ in }
-      provider.reportCall(with: uuid, endedAt: nil, reason: .unanswered)
+      let junk = UUID()
+      provider.reportNewIncomingCall(with: junk, update: update) { _ in }
+      provider.reportCall(with: junk, endedAt: nil, reason: .unanswered)
       return
     }
     if session == nil {
-      let s = Session(id: id, uuid: uuid, convId: convId, peer: from, kind: kind, outgoing: false)
+      let s = Session(id: id, uuid: uuid, convId: convId, peer: from, group: group, kind: kind, outgoing: false)
       session = s
-      current = CallView(convId: convId, peer: from, kind: kind, phase: .incoming, camera: s.camera, remoteCamera: kind == "video")
-      // A push can arrive after the caller gave up.
+      current = CallView(convId: convId, peer: from, group: title, kind: kind, phase: .incoming, camera: s.camera)
+      // A push can arrive after the caller gave up, or after another of our devices answered.
       Task {
-        do { let _: CallRing = try await talk!.api.call("GET", "/api/calls/\(id)") }
+        struct Ring: Decodable { let state: String }
+        do {
+          let r: Ring = try await talk!.api.call("GET", "/api/calls/\(id)")
+          if r.state != "ringing", session === s, !s.accepted { remoteEnded(s, reason: "elsewhere") }
+        }
         catch let e as APIError where e.status == 404 { if session === s { remoteEnded(s, reason: "cancelled") } }
         catch {}
       }
@@ -311,17 +374,16 @@ final class Calls: NSObject {
     guard !s.done else { return }
     s.done = true
     stopRingback()
-    s.lost?.cancel()
-    s.timers.forEach { $0.cancel() }
+    for u in s.peers.keys { closePeer(s, u) }
     s.capturer?.stopCapture()
-    s.pc?.close()
-    if s.outgoing, s.id != nil, let talk {
+    // The one who started it logs it, joiners don't.
+    if s.outgoing, s.join == nil, s.id != nil, let talk {
       let ms = s.since.map { Date().timeIntervalSince($0) * 1000 } ?? 0
-      Task { try? await talk.send(s.convId, call: CallLog(kind: s.kind, ms: ms), quiet: true, seen: ms > 0) }
+      Task { try? await talk.send(s.convId, call: CallLog(kind: s.kind, ms: ms, group: s.group ? true : nil), quiet: true, seen: ms > 0) }
     }
     if session === s { session = nil }
     guard let note else { return current = nil }
-    patch { $0.phase = .ended; $0.note = note; $0.local = nil; $0.remote = nil }
+    patch { $0.phase = .ended; $0.note = note; $0.local = nil; $0.tiles = [] }
     Task {
       try? await Task.sleep(for: .seconds(1.6))
       if current?.phase == .ended { current = nil }
@@ -330,11 +392,14 @@ final class Calls: NSObject {
 
   // MARK: - WebRTC
 
-  private func sendSignal(_ s: Session, _ data: [String: Any]) {
-    if let id = s.id { talk?.socket.emit("call:signal", ["id": id, "data": data]) }
+  // A DM signal goes to the other side without `to`, as every app version expects.
+  private func sendSignal(_ s: Session, _ p: Peer, _ data: [String: Any]) {
+    guard let id = s.id else { return }
+    talk?.socket.emit("call:signal", s.group ? ["id": id, "to": p.user, "data": data] : ["id": id, "data": data])
   }
 
-  private func sendState(_ s: Session) { sendSignal(s, ["state": ["muted": s.muted, "camera": s.camera]]) }
+  private func sendState(_ s: Session) { s.peers.values.forEach { sendState(s, $0) } }
+  private func sendState(_ s: Session, _ p: Peer) { sendSignal(s, p, ["state": ["muted": s.muted, "camera": s.camera]]) }
 
   private func description(_ d: RTCSessionDescription) -> [String: Any] {
     ["type": RTCSessionDescription.string(for: d.type), "sdp": d.sdp]
@@ -358,36 +423,61 @@ final class Calls: NSObject {
     return servers.isEmpty ? [RTCIceServer(urlStrings: ["stun:stun.cloudflare.com:3478"])] : servers
   }
 
-  private func connect(_ s: Session) async {
-    let config = RTCConfiguration.talk(await iceServers())
+  // Starts connecting to one person, replacing any connection we had to them.
+  // Signals for them queue until their peer connection exists.
+  private func addPeer(_ s: Session, _ user: String, polite: Bool) {
     guard !s.done else { return }
-    let events = PeerEvents { [weak self] e in Task { @MainActor in self?.event(s, e) } }
+    closePeer(s, user)
+    let p = Peer(user: user, polite: polite)
+    s.peers[user] = p
+    stopRingback()
+    patch { v in
+      v.tiles.append(Tile(id: user, camera: s.kind == "video"))
+      if v.phase == .ringing { v.phase = .connecting }
+    }
+    Task { await connect(s, p) }
+  }
+
+  private func closePeer(_ s: Session, _ user: String) {
+    guard let p = s.peers.removeValue(forKey: user) else { return }
+    p.lost?.cancel()
+    p.timers.forEach { $0.cancel() }
+    p.pc?.close()
+    p.events = nil // its closure holds the peer and session
+    patch { $0.tiles.removeAll { $0.id == user } }
+  }
+
+  private func connect(_ s: Session, _ p: Peer) async {
+    let config = RTCConfiguration.talk(await iceServers())
+    guard !s.done, s.peers[p.user] === p else { return }
+    let events = PeerEvents { [weak self] e in Task { @MainActor in self?.event(s, p, e) } }
     guard let pc = factory.peerConnection(with: config, constraints: RTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: nil), delegate: events) else {
       return fail(s, "Couldn’t start the call.")
     }
-    s.pc = pc
-    s.events = events
-    lostAfter(s)
+    p.pc = pc
+    p.events = events
+    lostAfter(s, p)
 
-    let audio = factory.audioTrack(with: factory.audioSource(with: nil), trackId: "audio")
+    // One microphone and camera for everyone in the call.
+    let audio = s.audio ?? factory.audioTrack(with: factory.audioSource(with: nil), trackId: "audio")
     audio.isEnabled = !s.muted
     pc.add(audio, streamIds: ["talk"])
     s.audio = audio
-    if let v = s.video { s.videoSender = pc.add(v, streamIds: ["talk"]) }
+    if let v = s.video { p.videoSender = pc.add(v, streamIds: ["talk"]) }
     else if s.camera { addVideo(s); startCamera(s) }
     patch { $0.local = s.video }
 
     // An offer can be lost while the other side's socket reconnects; resend it until answered.
-    s.timers.append(Task { [weak self] in
+    p.timers.append(Task { [weak self] in
       for _ in 0..<6 {
         try? await Task.sleep(for: .seconds(3))
         guard let self, !Task.isCancelled, pc.connectionState != .connected, pc.signalingState != .closed else { return }
-        if pc.signalingState == .haveLocalOffer, let d = pc.localDescription { sendSignal(s, ["description": description(d)]) }
+        if pc.signalingState == .haveLocalOffer, let d = pc.localDescription { sendSignal(s, p, ["description": description(d)]) }
       }
     })
-    for d in s.queue { await handle(s, d) }
-    s.queue = []
-    sendState(s)
+    for d in p.queue { await handle(s, p, d) }
+    p.queue = []
+    sendState(s, p)
   }
 
   private func addVideo(_ s: Session) {
@@ -395,7 +485,7 @@ final class Calls: NSObject {
     s.capturer = RTCCameraVideoCapturer(delegate: source)
     let track = factory.videoTrack(with: source, trackId: "video")
     s.video = track
-    if let pc = s.pc { s.videoSender = pc.add(track, streamIds: ["talk"]) }
+    for p in s.peers.values { if let pc = p.pc { p.videoSender = pc.add(track, streamIds: ["talk"]) } }
   }
 
   private func startCamera(_ s: Session) {
@@ -412,80 +502,86 @@ final class Calls: NSObject {
     capturer.startCapture(with: device, format: format, fps: fps)
   }
 
-  private func handle(_ s: Session, _ d: [String: Any]) async {
-    guard let pc = s.pc else { return }
+  private func handle(_ s: Session, _ p: Peer, _ d: [String: Any]) async {
+    guard let pc = p.pc else { return }
     if let st = d["state"] as? [String: Any] {
-      patch { $0.remoteMuted = st["muted"] as? Bool ?? false; $0.remoteCamera = st["camera"] as? Bool ?? false }
+      patch(p.user) { $0.muted = st["muted"] as? Bool ?? false; $0.camera = st["camera"] as? Bool ?? false }
     }
     if let desc = d["description"] as? [String: Any], let type = desc["type"] as? String, let sdp = desc["sdp"] as? String {
-      // Perfect negotiation: on an offer collision the callee yields.
-      let collision = type == "offer" && (s.makingOffer || pc.signalingState != .stable)
-      s.ignoreOffer = s.outgoing && collision
-      if s.ignoreOffer { return }
+      // Perfect negotiation: on an offer collision the polite side yields.
+      let collision = type == "offer" && (p.makingOffer || pc.signalingState != .stable)
+      p.ignoreOffer = !p.polite && collision
+      if p.ignoreOffer { return }
       do {
         try await wait { pc.setRemoteDescription(RTCSessionDescription(type: RTCSessionDescription.type(for: type), sdp: sdp), completionHandler: $0) }
         if type == "offer" {
           try await wait { pc.setLocalDescriptionWithCompletionHandler($0) }
-          if let local = pc.localDescription { sendSignal(s, ["description": description(local)]) }
+          if let local = pc.localDescription { sendSignal(s, p, ["description": description(local)]) }
         }
       } catch { print("[call]", error) }
     } else if let c = d["candidate"] as? [String: Any], let sdp = c["candidate"] as? String {
       let cand = RTCIceCandidate(sdp: sdp, sdpMLineIndex: Int32(c["sdpMLineIndex"] as? Int ?? 0), sdpMid: c["sdpMid"] as? String)
       do { try await wait { pc.add(cand, completionHandler: $0) } }
-      catch { if !s.ignoreOffer { print("[call]", error) } }
+      catch { if !p.ignoreOffer { print("[call]", error) } }
     }
   }
 
-  private func event(_ s: Session, _ e: PeerEvent) {
-    guard let pc = s.pc, !s.done else { return }
+  private func event(_ s: Session, _ p: Peer, _ e: PeerEvent) {
+    guard let pc = p.pc, !s.done, s.peers[p.user] === p else { return }
     switch e {
     case .negotiate:
+      // In a group the polite side waits for the first offer, as the web does: after
+      // crossed offers, Chrome's rollback can stop gathering candidates.
+      if s.group, p.polite, pc.remoteDescription == nil { return }
       Task {
-        s.makingOffer = true
-        defer { s.makingOffer = false }
+        p.makingOffer = true
+        defer { p.makingOffer = false }
         do {
           try await wait { pc.setLocalDescriptionWithCompletionHandler($0) }
-          if let d = pc.localDescription { sendSignal(s, ["description": description(d)]) }
+          if let d = pc.localDescription { sendSignal(s, p, ["description": description(d)]) }
         } catch { print("[call]", error) }
       }
     case .candidate(let sdp, let mid, let index):
       var c: [String: Any] = ["candidate": sdp, "sdpMLineIndex": index]
       if let mid { c["sdpMid"] = mid }
-      sendSignal(s, ["candidate": c])
+      sendSignal(s, p, ["candidate": c])
     case .track(let box):
-      if let t = box.value as? RTCVideoTrack { patch { $0.remote = t } }
+      if let t = box.value as? RTCVideoTrack { patch(p.user) { $0.video = t } }
     case .state(let raw):
       switch RTCPeerConnectionState(rawValue: raw) {
       case .connected:
-        s.lost?.cancel()
-        s.lost = nil
+        p.lost?.cancel()
+        p.lost = nil
         if s.since == nil {
           s.since = Date()
           if s.outgoing { provider.reportOutgoingCall(with: s.uuid, connectedAt: s.since) }
         }
         patch { $0.phase = .live; $0.since = s.since }
       case .disconnected, .failed:
-        if s.since != nil { patch { $0.phase = .reconnecting } }
+        // Reconnecting only once nobody is reachable; in a group the others still talk.
+        if s.since != nil, !s.peers.values.contains(where: { $0.pc?.connectionState == .connected }) { patch { $0.phase = .reconnecting } }
         // Network change (wifi to cellular): find a new path instead of dropping the call.
         if raw == RTCPeerConnectionState.failed.rawValue { pc.restartIce() }
         else {
-          s.timers.append(Task {
+          p.timers.append(Task {
             try? await Task.sleep(for: .seconds(3))
             if pc.connectionState == .disconnected { pc.restartIce() }
           })
         }
-        lostAfter(s)
+        lostAfter(s, p)
       default: break
       }
     }
   }
 
-  private func lostAfter(_ s: Session) {
-    guard s.lost == nil else { return }
-    s.lost = Task { [weak self] in
+  // A DM ends when its connection is lost; a group goes on without whoever we can't reach.
+  private func lostAfter(_ s: Session, _ p: Peer) {
+    guard p.lost == nil else { return }
+    p.lost = Task { [weak self] in
       try? await Task.sleep(for: Self.lostAfter)
       guard let self, !Task.isCancelled, !s.done else { return }
-      fail(s, s.since != nil ? "Connection lost" : "Couldn’t connect")
+      if s.group { closePeer(s, p.user) }
+      if !s.group || s.peers.isEmpty { fail(s, s.since != nil ? "Connection lost" : "Couldn’t connect") }
     }
   }
 
@@ -499,6 +595,10 @@ final class Calls: NSObject {
     guard var v = current else { return }
     f(&v)
     current = v
+  }
+
+  private func patch(_ user: String, _ f: (inout Tile) -> Void) {
+    patch { v in if let i = v.tiles.firstIndex(where: { $0.id == user }) { f(&v.tiles[i]) } }
   }
 
   private static func json(_ d: Data) -> [String: Any]? { (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] }
@@ -553,7 +653,7 @@ extension Calls: CXProviderDelegate {
     // Your own camera fills the screen while it rings, like a mirror.
     if s.camera { addVideo(s); startCamera(s); patch { $0.local = s.video } }
     Task {
-      let r = try? await talk.socket.ack("call:start", ["convId": s.convId, "kind": s.kind], timeout: 10)
+      let r = try? await talk.socket.ack(s.join == nil ? "call:start" : "call:join", s.join.map { ["id": $0] } ?? ["convId": s.convId, "kind": s.kind], timeout: 10)
       let o = r.flatMap(Self.json)
       if s.done {
         if let id = o?["id"] as? String { talk.socket.emit("call:hangup", ["id": id]) }
@@ -566,7 +666,9 @@ extension Calls: CXProviderDelegate {
       s.id = id
       action.fulfill()
       provider.reportOutgoingCall(with: s.uuid, startedConnectingAt: nil)
-      patch { $0.phase = .ringing }
+      patch { if $0.phase == .calling { $0.phase = .ringing } }
+      // Joining a call that's on: connect to everyone in it, yielding to them (they were first).
+      for u in o?["peers"] as? [String] ?? [] { addPeer(s, u, polite: isPolite(group: true, outgoing: true, joinedAfterThem: true)) }
     }
   }
 
@@ -585,11 +687,18 @@ extension Calls: CXProviderDelegate {
     Task {
       // Answered from the lock screen: the socket may still be connecting.
       for _ in 0..<40 where !talk.socket.connected { try? await Task.sleep(for: .milliseconds(250)) }
-      let r = try? await talk.socket.ack("call:accept", ["id": id], timeout: 10)
+      // A group made while the app was away isn't cached, and a group is answered by joining.
+      if !s.group, talk.me?.conversations.contains(where: { $0.id == s.convId }) != true,
+         let c = (try? await talk.load())?.conversations.first(where: { $0.id == s.convId }), c.kind == "group" {
+        s.group = true
+        patch { $0.group = c.title ?? "Group call" }
+      }
+      let r = try? await talk.socket.ack(s.group ? "call:join" : "call:accept", ["id": id], timeout: 10)
       guard let o = r.flatMap(Self.json), o["id"] != nil else {
         return end(s, note: (r.flatMap(Self.json)?["error"] as? String) ?? "Couldn’t reach the server. Check your connection.", reason: .failed)
       }
-      await connect(s)
+      if !s.group { return addPeer(s, s.peer, polite: isPolite(group: false, outgoing: false, joinedAfterThem: false)) }
+      for u in o["peers"] as? [String] ?? [] { addPeer(s, u, polite: isPolite(group: true, outgoing: false, joinedAfterThem: true)) }
     }
   }
 
@@ -611,7 +720,7 @@ extension Calls: CXProviderDelegate {
   func provider(_ provider: CXProvider, didActivate audioSession: AVAudioSession) {
     RTCAudioSession.sharedInstance().audioSessionDidActivate(audioSession)
     RTCAudioSession.sharedInstance().isAudioEnabled = true
-    if let s = session, s.outgoing, s.pc == nil { playRingback() }
+    if let s = session, s.outgoing, s.peers.isEmpty { playRingback() }
   }
 
   func provider(_ provider: CXProvider, didDeactivate audioSession: AVAudioSession) {

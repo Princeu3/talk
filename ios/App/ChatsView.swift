@@ -64,6 +64,7 @@ struct ChatsView: View {
 
 private struct Row: View {
   @Environment(Talk.self) private var talk
+  @Environment(Calls.self) private var calls
   let conv: Conversation
 
   var body: some View {
@@ -81,6 +82,7 @@ private struct Row: View {
           Text(last.map { Format.preview($0.content, mine: mine) } ?? " ")
             .font(.subheadline).foregroundStyle(Color.mut).lineLimit(2)
           Spacer()
+          if let live = conv.call { JoinPill { calls.start(convId: conv.id, peer: nil, kind: live.kind) } }
           if conv.unread > 0 {
             Text("\(conv.unread)").font(.caption.bold()).monospacedDigit()
               .padding(.horizontal, 7).frame(minWidth: 22, minHeight: 22)

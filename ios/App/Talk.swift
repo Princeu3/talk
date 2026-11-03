@@ -62,6 +62,14 @@ final class Talk {
       Task { await self.receive(msg) }
     }
     socket.on("sync") { [weak self] _ in Task { try? await self?.load() } }
+    // A chat's live group call, or null once it's over.
+    socket.on("call:update") { [weak self] data in
+      struct Update: Decodable { let convId: String; let call: GroupCall? }
+      guard let self, let u = try? JSONDecoder().decode(Update.self, from: data), var m = me,
+            let i = m.conversations.firstIndex(where: { $0.id == u.convId }) else { return }
+      m.conversations[i].call = u.call
+      me = m
+    }
     // Reconnects (phones drop sockets constantly) refetch what we may have missed.
     socket.on("connect") { [weak self] _ in
       guard let self else { return }
@@ -106,7 +114,7 @@ final class Talk {
       me = m
       // Tell the server too, or the next push's badge counts what's on screen.
       if visible, let activeId { markRead(activeId) }
-      Names.save(m.users)
+      Names.save(m.users, m.conversations)
       for c in m.conversations { if let last = c.lastMessage { merge(c.id, [decrypt(last)]) } }
       save()
       return m
@@ -440,10 +448,12 @@ final class Talk {
   }
 }
 
-// Names by user id, for CallKit, which must show a caller the instant a push lands.
+// Names by user id, and group titles by chat id, for CallKit, which must show a caller the instant a push lands.
 enum Names {
-  static func save(_ users: [User]) {
-    UserDefaults.standard.set(Dictionary(users.map { ($0.id, $0.name) }) { $1 }, forKey: "names")
+  static func save(_ users: [User], _ convs: [Conversation]) {
+    var names = Dictionary(users.map { ($0.id, $0.name) }) { $1 }
+    for c in convs where c.kind == "group" { names[c.id] = c.title }
+    UserDefaults.standard.set(names, forKey: "names")
   }
   static func of(_ id: String) -> String? { (UserDefaults.standard.dictionary(forKey: "names") as? [String: String])?[id] }
 }

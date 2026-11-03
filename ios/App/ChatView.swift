@@ -59,6 +59,7 @@ struct ChatView: View {
     .scrollDismissesKeyboard(.interactively)
     .background(Color.bg)
     .safeAreaInset(edge: .bottom) { composer }
+    .safeAreaInset(edge: .top, spacing: 0) { if let live = conv?.call { CallBanner(convId: convId, call: live) } }
     .navigationTitle(conv.map(talk.title) ?? "")
     .navigationBarTitleDisplayMode(.inline)
     .toolbar { toolbar }
@@ -124,6 +125,11 @@ struct ChatView: View {
           }
           Button("Report", systemImage: "exclamationmark.bubble", role: .destructive) { reporting = true }
         }
+      }
+    } else if conv != nil {
+      ToolbarItemGroup(placement: .topBarTrailing) {
+        Button("Video call", systemImage: "video") { callAgain("video") }
+        Button("Voice call", systemImage: "phone") { callAgain("audio") }
       }
     }
   }
@@ -276,8 +282,9 @@ struct ChatView: View {
     }
   }
 
+  // No peer: a group, which joins its live call or starts one.
   private func callAgain(_ kind: String) {
-    if let peer { calls.start(convId: convId, peer: peer, kind: kind) }
+    calls.start(convId: convId, peer: peer, kind: kind)
   }
 
   private func report(quoting: Bool) {
@@ -301,6 +308,27 @@ struct ChatView: View {
 private struct Zoomed: Identifiable {
   let image: UIImage
   var id: ObjectIdentifier { ObjectIdentifier(image) }
+}
+
+// A group call on now, under the header: join it, or go back to it.
+private struct CallBanner: View {
+  @Environment(Calls.self) private var calls
+  let convId: String
+  let call: GroupCall
+
+  var body: some View {
+    let inIt = calls.current.map { $0.convId == convId && $0.phase != .incoming && $0.phase != .ended } ?? false
+    let n = call.peers.count
+    HStack(spacing: 10) {
+      Image(systemName: call.kind == "video" ? "video.fill" : "phone.fill").foregroundStyle(Color.acceptCall)
+      Text("Group \(call.kind == "video" ? "video" : "voice") call · \(n) \(n == 1 ? "person" : "people")")
+        .font(.subheadline).lineLimit(1)
+      Spacer()
+      JoinPill(label: inIt ? "Return to call" : "Join") { calls.start(convId: convId, peer: nil, kind: call.kind) }
+    }
+    .padding(.horizontal, 12).padding(.vertical, 8)
+    .background(.bar)
+  }
 }
 
 // An unsent message: sending, or failed with retry and delete.
@@ -356,7 +384,8 @@ private struct MessageRow: View {
         }
         .font(.footnote).foregroundStyle(s.missed ? Color.danger : Color.mut)
         if call.room == nil {
-          Button(mine ? "Call again" : "Call back") { onCall(call.kind ?? "audio") }
+          let live = talk.me?.conversations.first { $0.id == convId }?.call != nil
+          Button(call.group == true ? (live ? "Join" : "Call") : mine ? "Call again" : "Call back") { onCall(call.kind ?? "audio") }
             .font(.footnote.weight(.semibold)).buttonStyle(.bordered).buttonBorderShape(.capsule).tint(Color.accent)
         }
       }
