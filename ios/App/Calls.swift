@@ -177,7 +177,7 @@ final class Calls: NSObject {
         let r = try? await talk.socket.ack("call:rejoin", ["id": id])
         guard let o = r.flatMap(Self.json), self.session === s else { return }
         if o["error"] != nil { return self.end(s, note: "Call ended", reason: .remoteEnded) }
-        // Joins and leaves we missed while away. Anyone new joined after us.
+        // Joins and leaves we missed while away. Anyone new joined after us and waits for our offer.
         guard let peers = o["peers"] as? [String] else { return }
         for u in s.peers.keys where !peers.contains(u) { self.closePeer(s, u) }
         for u in peers where s.peers[u] == nil { self.addPeer(s, u, polite: isPolite(group: true, outgoing: s.outgoing, joinedAfterThem: false)) }
@@ -530,6 +530,9 @@ final class Calls: NSObject {
     guard let pc = p.pc, !s.done, s.peers[p.user] === p else { return }
     switch e {
     case .negotiate:
+      // In a group the polite side waits for the first offer, as the web does: after
+      // crossed offers, Chrome's rollback can stop gathering candidates.
+      if s.group, p.polite, pc.remoteDescription == nil { return }
       Task {
         p.makingOffer = true
         defer { p.makingOffer = false }

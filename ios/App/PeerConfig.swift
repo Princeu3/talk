@@ -17,6 +17,7 @@ extension RTCConfiguration {
 // Perfect negotiation needs exactly one polite side per pair. In a DM that's the
 // callee; in a group, whoever joined later (server/calls.ts makes the joiner polite):
 // we yield to the people a join ack lists, never to those who join after us.
+// A polite group peer also sends no offer of its own until it has theirs.
 nonisolated func isPolite(group: Bool, outgoing: Bool, joinedAfterThem: Bool) -> Bool {
   group ? joinedAfterThem : !outgoing
 }
