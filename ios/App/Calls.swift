@@ -207,8 +207,9 @@ final class Calls: NSObject {
 
   #if DEBUG
   // Screenshots only: the Simulator ends every CallKit call, so this shows a live call screen with no media.
-  func demo(convId: String, peer: String) {
-    current = CallView(convId: convId, peer: peer, kind: "audio", phase: .live, since: Date().addingTimeInterval(-754), camera: false)
+  func demo(convId: String, peer: String, group: String? = nil, tiles: [String] = []) {
+    current = CallView(convId: convId, peer: peer, group: group, kind: "audio", phase: .live, since: Date().addingTimeInterval(-754), camera: false,
+                       tiles: tiles.map { Tile(id: $0, camera: false) })
   }
   #endif
 

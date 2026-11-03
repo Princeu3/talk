@@ -79,12 +79,16 @@ private struct Main: View {
         Button("OK", role: .cancel) {}
       }
       #if DEBUG
-      // `-demoCall <name>` launch argument: show a call with that person, for App Store screenshots.
+      // `-demoCall <name>` launch argument: show a call with that person, or in the group of that title, for App Store screenshots.
       .task(id: talk.me == nil) {
-        guard let name = UserDefaults.standard.string(forKey: "demoCall"), let me = talk.me,
-              let u = me.users.first(where: { $0.name == name }),
-              let c = me.conversations.first(where: { $0.kind == "dm" && $0.members.contains(u.id) }) else { return }
-        calls.demo(convId: c.id, peer: u.id)
+        guard let name = UserDefaults.standard.string(forKey: "demoCall"), let me = talk.me else { return }
+        let mine = talk.account.userId
+        if let g = me.conversations.first(where: { $0.kind == "group" && $0.title == name }) {
+          calls.demo(convId: g.id, peer: mine, group: name, tiles: g.members.filter { $0 != mine })
+        } else if let u = me.users.first(where: { $0.name == name }),
+                  let c = me.conversations.first(where: { $0.kind == "dm" && $0.members.contains(u.id) }) {
+          calls.demo(convId: c.id, peer: u.id)
+        }
       }
       #endif
   }

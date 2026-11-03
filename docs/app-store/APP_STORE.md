@@ -46,43 +46,37 @@ If the name is taken when you create the record, use `Talk Circle: Private Calls
 | Apple silicon Macs | Off for 1.0 (CallKit and PushKit behave differently there; turn on once tested) |
 | Apple Vision Pro | Off |
 
-## Version 1.0 page
+## Version page (1.1)
 
 **Promotional text** (170, can change any time without review):
 
 ```
-Messages, photos, voice notes and calls that only you and your people can read. Invite-only and end-to-end encrypted, on a server you can run yourself.
+Encrypted messages and calls for your circle, on a server you or a friend runs. The app and server are open source on GitHub: github.com/Princeu3/talk
 ```
 
 **Description** (4000):
 
 ```
-Talk is a private messenger for a small circle: family, close friends, a team of a few people. Everything you send is encrypted on your phone before it leaves it.
+Talk is a private messenger for family, friends and small teams. Connect to a Talk server using an invite link from its operator.
 
 MESSAGES
-• Text, photos, files and voice messages
-• One-to-one chats and groups
-• Read state and unread counts
+Send text, photos, files and voice messages in one-to-one chats and groups. Reply, react, edit what you sent, and see when your messages are read. Messages are encrypted on your device before they leave it.
+
+SEARCH AND SHARED MEDIA
+Search all your chats. Search runs on your phone, so the server never sees what you look for. Links show a preview made on your device, and each chat keeps its photos, videos, links and files in one place.
 
 CALLS
-• Voice and video calls between two people
-• Calls ring like phone calls, on the lock screen and in Recents
-• Calls go directly between phones when they can, and through an encrypted relay when a network blocks that
+Make voice and video calls, one to one or with up to 8 people in a group, and ring more people in while a call is on. Incoming calls integrate with the iPhone lock screen through CallKit.
 
-PRIVATE BY DESIGN
-• End-to-end encrypted: the server stores only ciphertext
-• No phone number and no email: you sign in with a name and a passphrase that never leaves your device
-• Safety codes let you check that nobody swapped a key
-• Notifications are decrypted on your phone; push servers see only ids
-• No ads, no tracking, no analytics
+YOUR CIRCLE
+Sign in with a name and a passphrase. Compare safety codes with your contacts, block people, report messages and delete your account from Settings.
 
-YOUR OWN SERVER
-Talk connects to a Talk server. Someone in your circle runs one (it deploys to Railway in a few minutes, and the code is open source), then sends invite links. Open the link, choose a name and a passphrase, and you're in.
+YOUR SERVER
+Talk is an open-source client for self-hosted Talk servers. You need a server address and an existing account or an invite link to get started. No phone number or email address is required for your Talk account. The server is open source too, so anyone can run their own.
 
-SAFETY
-Block anyone, report a message or a person, and delete your account from Settings at any time.
+Keep your passphrase safe: it cannot be reset to recover your encrypted message history.
 
-Talk needs an invite link from someone who runs a Talk server.
+Based on the open-source Talk project: https://github.com/Princeu3/talk
 ```
 
 **Keywords** (100 bytes, comma separated, no spaces after commas, no words already in the name or subtitle):
@@ -95,7 +89,7 @@ messenger,e2ee,secure,voice,video,family,friends,self-hosted,invite,group,voip,o
 | --- | --- |
 | Support URL | `https://push.princeuniverse.dev/support` |
 | Marketing URL | `https://github.com/Princeu3/talk` |
-| Version | 1.0 |
+| Version | 1.1 |
 | Copyright | `2026 Talk` |
 | Routing app coverage file | None |
 | Version release | Manually release this version |
@@ -109,16 +103,17 @@ Required set: **iPhone 6.3" (Dynamic Island, medium), 1206 × 2622 portrait**, P
 
 Upload in this order from `docs/app-store/screenshots/`:
 
-| File | Shows | Caption on the image |
+| File | Shows | Headline on the image |
 | --- | --- | --- |
-| `01-chats.png` | Chat list | Your people, nobody else |
-| `02-chat.png` | A conversation with a photo and a voice message | Messages only you can read |
-| `03-call.png` | In-call screen | Calls that ring like a phone |
-| `04-group.png` | A group chat | Groups for the whole circle |
-| `05-safety.png` | Settings with safety codes | Check that nobody swapped a key |
-| `06-join.png` | Join with an invite link | Join with one invite link |
+| `01-chats.png` | Chat list with search | Private chats for your people |
+| `02-chat.png` | A chat with a photo, a link preview, a voice message and a read receipt | Messages only you can read |
+| `03-call.png` | A group call, with Add people | Group calls, add anyone |
+| `04-search.png` | Search results across chats | Find any message |
+| `05-media.png` | A group's shared media | Every photo, link and file |
+| `06-safety.png` | Settings with safety codes | Check nobody swapped a key |
+| `07-server.png` | Sign in with an invite link or server | Your server. Open code. (names github.com/Princeu3/talk) |
 
-Each shows the real app. Captions sit above the screenshot on the palette background, which App Review allows (guideline 2.3.3: show the app in use).
+Each shows the real app (a Debug build on the iPhone 18 Pro Simulator against a local server with demo people; `-demoCall "<group title>"` shows a group call). A one-line subline sits under each headline, over a paper-cut background from Codex image generation in the palette; the photos in the chats are generated too, and the link card's image is a public-domain National Park Service photo. App Review allows this (guideline 2.3.3: show the app in use).
 
 App preview video: optional; skip for 1.0.
 
