@@ -77,6 +77,8 @@ function once(url: URL, max: number, stopAtHead: boolean) {
           res.destroy()
         }
       })
+      // A reset or the timeout mid-body errors the response; unhandled, that would take the server down.
+      res.on('error', reject)
       res.on('close', () => resolve({ url, type: String(res.headers['content-type'] ?? ''), body: Buffer.concat(chunks).subarray(0, max), full }))
     })
     req.on('error', reject)
