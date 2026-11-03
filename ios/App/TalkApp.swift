@@ -22,12 +22,12 @@ struct TalkApp: App {
       .environment(calls)
       .onAppear { if let talk { start(talk) } }
       .onChange(of: phase, initial: true) { _, p in talk?.setActive(p == .active) }
-      // Calling back from Recents or Siri.
+      // Calling back from Recents or Siri. A group call's handle is the chat id.
       .onContinueUserActivity("INStartCallIntent") { activity in
         guard let talk, let intent = activity.interaction?.intent as? INStartCallIntent,
-              let peer = intent.contacts?.first?.personHandle?.value,
-              let conv = talk.me?.conversations.first(where: { $0.kind == "dm" && $0.members.contains(peer) }) else { return }
-        calls.start(convId: conv.id, peer: peer, kind: intent.callCapability == .videoCall ? "video" : "audio")
+              let handle = intent.contacts?.first?.personHandle?.value,
+              let conv = talk.me?.conversations.first(where: { $0.id == handle || ($0.kind == "dm" && $0.members.contains(handle)) }) else { return }
+        calls.start(convId: conv.id, peer: talk.peer(conv), kind: intent.callCapability == .videoCall ? "video" : "audio")
       }
     }
   }
