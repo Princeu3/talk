@@ -390,14 +390,16 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
     }
   }, [link, card, dropped])
 
-  // Opened at a message (search, shared media): scroll to it once it's rendered.
+  // Opened at a message (search, shared media): scroll to it once it's rendered, and after the chat's
+  // first page is in, or that page lands above it and pushes it out of view.
   const { focus, setFocus } = talk
+  const loaded = talk.hasOlder[convId] !== undefined
   useEffect(() => {
-    if (focus?.convId !== convId || !document.getElementById(`m-${focus.id}`)) return
+    if (focus?.convId !== convId || !loaded || !document.getElementById(`m-${focus.id}`)) return
     stick.current = false
     jump(focus.id)
     setFocus(null)
-  }, [focus, setFocus, convId, list.length])
+  }, [focus, setFocus, convId, loaded, list.length])
 
   // The body fields that make a message a reply to `r`.
   const quote = (r: Decrypted | null) =>
