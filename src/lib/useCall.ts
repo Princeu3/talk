@@ -135,6 +135,22 @@ function tone(kind: 'ring' | 'back') {
   }
 }
 
+// A mesh sends each person their own copy of our video, so each copy shrinks as a group call grows
+// (docs/chat-features.md, "Group call video"). Rows: up to this many others, maxBitrate, scaleResolutionDownBy, maxFramerate.
+const CAPS = [[1, 1_500_000, 1, 30], [2, 900_000, 1, 30], [3, 600_000, 1.5, 30], [5, 400_000, 2, 24], [7, 250_000, 2.5, 15]] as const
+// Applied to every video sender without renegotiating; 1:1 calls keep the browser's defaults.
+function cap(s: Session) {
+  if (!s.group) return
+  const [, maxBitrate, scaleResolutionDownBy, maxFramerate] = CAPS.find(([n]) => s.peers.size <= n) ?? CAPS[CAPS.length - 1]
+  for (const p of s.peers.values()) {
+    if (!p.video) continue
+    const params = p.video.getParameters()
+    if (!params.encodings?.length) continue // not negotiated yet; capped again once connected
+    Object.assign(params.encodings[0], { maxBitrate, scaleResolutionDownBy, maxFramerate })
+    p.video.setParameters(params).catch(() => {})
+  }
+}
+
 const newPeer = (user: string, polite: boolean, kind: CallKind): Peer =>
   ({ user, polite, muted: false, camera: kind === 'video', queue: [], makingOffer: false, ignoreOffer: false })
 const tiles = (s: Session): Remote[] => [...s.peers.values()].map(({ user, stream, muted, camera }) => ({ user, stream, muted, camera }))
@@ -192,6 +208,7 @@ export function useCall(onLog: (convId: string, kind: CallKind, ms: number, grou
     clearTimeout(p.lost)
     p.pc?.close()
     s.peers.delete(user)
+    cap(s)
     show(s)
   }
   // Connect to someone in the group call, replacing any connection we had to them.
@@ -199,6 +216,7 @@ export function useCall(onLog: (convId: string, kind: CallKind, ms: number, grou
     drop(s, user)
     const p = newPeer(user, polite, s.kind)
     s.peers.set(user, p)
+    cap(s)
     show(s)
     void connect(s, p)
     return p
@@ -274,6 +292,7 @@ export function useCall(onLog: (convId: string, kind: CallKind, ms: number, grou
       if (st === 'connected') {
         clearTimeout(p.lost)
         p.lost = undefined
+        cap(s)
         s.since ??= Date.now()
         patch({ phase: 'live', since: s.since })
       } else if (st === 'disconnected' || st === 'failed') {
@@ -391,6 +410,7 @@ export function useCall(onLog: (convId: string, kind: CallKind, ms: number, grou
       if (p.video) await p.video.replaceTrack(t)
       else if (t && p.pc) p.video = p.pc.addTrack(t, s.local)
     }
+    cap(s)
     s.camera = !!t
     patch({ camera: s.camera, facing: s.facing, local: new MediaStream(s.local.getTracks()) })
     sendState(s)
