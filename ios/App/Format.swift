@@ -43,4 +43,20 @@ enum Format {
   }
 
   static func size(_ n: Int) -> String { ByteCountFormatter.string(fromByteCount: Int64(n), countStyle: .file) }
+
+  // "typing…" in a DM; a group names up to two people, then counts.
+  static func typing(_ names: [String], group: Bool) -> String {
+    guard group else { return "typing…" }
+    switch names.count {
+    case 1: return "\(names[0]) is typing…"
+    case 2: return "\(names[0]) and \(names[1]) are typing…"
+    default: return "\(names.count) people are typing…"
+    }
+  }
+
+  // What a reply quotes: the message's preview text, at most 200 characters.
+  static func reply(_ m: Decrypted, mine: Bool) -> Reply {
+    Reply(id: m.message.id, from: m.message.senderId, preview: String(preview(m.content, mine: mine).prefix(200)))
+  }
+
 }

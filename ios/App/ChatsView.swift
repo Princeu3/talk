@@ -30,6 +30,18 @@ struct ChatsView: View {
           NavigationLink(value: c.id) { Row(conv: c) }
             .listRowBackground(Color.bg)
             .listRowSeparator(c.id == talk.me?.conversations.first?.id ? .hidden : .automatic, edges: .top)
+            .swipeActions(edge: .leading) {
+              Button(c.pinned == true ? "Unpin" : "Pin", systemImage: c.pinned == true ? "pin.slash" : "pin") {
+                Task { try? await talk.setMine(c.id, pinned: c.pinned != true) }
+              }
+              .tint(Color.swipe)
+            }
+            .swipeActions(edge: .trailing) {
+              Button(c.muted == true ? "Unmute" : "Mute", systemImage: c.muted == true ? "bell" : "bell.slash") {
+                Task { try? await talk.setMine(c.id, muted: c.muted != true) }
+              }
+              .tint(Color.swipe)
+            }
         }
       }
       .listStyle(.plain)
@@ -69,17 +81,30 @@ private struct Row: View {
   var body: some View {
     let last = conv.lastMessage.flatMap { m in talk.messages[conv.id]?.last { $0.id == m.id } }
     let mine = conv.lastMessage?.senderId == talk.account.userId
+    let typers = talk.typers(conv.id)
     HStack(spacing: 12) {
       Avatar(name: talk.title(conv), size: 52)
       VStack(alignment: .leading, spacing: 3) {
         HStack(alignment: .firstTextBaseline) {
           Text(talk.title(conv)).font(.headline).lineLimit(1)
+          if conv.muted == true {
+            Image(systemName: "bell.slash.fill").font(.caption).foregroundStyle(Color.mut).accessibilityLabel("Muted")
+          }
           Spacer()
+          if conv.pinned == true {
+            Image(systemName: "pin.fill").font(.caption).foregroundStyle(Color.mut).accessibilityLabel("Pinned")
+          }
           if let t = conv.lastMessageAt { Text(Format.shortTime(t)).font(.subheadline).foregroundStyle(Color.mut) }
         }
         HStack(alignment: .top) {
-          Text(last.map { Format.preview($0.content, mine: mine) } ?? " ")
-            .font(.subheadline).foregroundStyle(Color.mut).lineLimit(2)
+          if !typers.isEmpty {
+            Text(Format.typing(typers.map(talk.name), group: conv.kind == "group"))
+              .font(.subheadline).foregroundStyle(Color.accent).lineLimit(2)
+          } else {
+            Text(last.map { Format.preview($0.content, mine: mine) } ?? " ")
+              .font(.subheadline).foregroundStyle(Color.mut).lineLimit(2)
+          }
+
           Spacer()
           if conv.unread > 0 {
             Text("\(conv.unread)").font(.caption.bold()).monospacedDigit()
