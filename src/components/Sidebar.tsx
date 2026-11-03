@@ -1,6 +1,6 @@
 import type { Talk } from '../lib/useTalk.ts'
-import { convName, preview, shortTime, userName } from '../lib/format.ts'
-import { Compose, Lock, Settings } from './icons.tsx'
+import { convName, preview, shortTime, typingLabel, userName } from '../lib/format.ts'
+import { BellOff, Compose, Lock, Pin, Settings } from './icons.tsx'
 
 // Olive to soft white, so every avatar sits inside the app palette in both themes.
 const SHADES = ['#2e3d28', '#4f6340', '#7e9466', '#a9b887', '#cdd6b8', '#e8e9df']
@@ -63,7 +63,8 @@ export default function Sidebar({ talk, onNew, onSettings }: { talk: Talk; onNew
             const last = talk.messages[conv.id]?.at(-1)
             const active = conv.id === talk.activeId
             const text = preview(last?.content, last?.senderId === me.user.id)
-            const who = !last ? '' : last.senderId === me.user.id ? 'You: ' : conv.kind === 'group' ? `${userName(me, last.senderId)}: ` : ''
+            const who = !last || last.content?.system ? '' : last.senderId === me.user.id ? 'You: ' : conv.kind === 'group' ? `${userName(me, last.senderId)}: ` : ''
+            const typers = talk.typers[conv.id] ?? []
             return (
               <li key={conv.id}>
                 <button
@@ -82,8 +83,10 @@ export default function Sidebar({ talk, onNew, onSettings }: { talk: Talk; onNew
                       )}
                     </div>
                     <div className="mt-0.5 flex items-center justify-between gap-2">
-                      <span className={`line-clamp-2 text-sm leading-snug ${conv.unread ? 'text-ink' : 'text-mut'}`}>
-                        {last && !last.content ? (
+                      <span className={`line-clamp-2 text-sm leading-snug ${typers.length ? 'text-accent' : conv.unread ? 'text-ink' : 'text-mut'}`}>
+                        {typers.length ? (
+                          typingLabel(me, conv, typers)
+                        ) : last && !last.content ? (
                           <span className="inline-flex items-center gap-1"><Lock size={12} /> Encrypted message</span>
                         ) : text ? (
                           who + text
@@ -93,6 +96,12 @@ export default function Sidebar({ talk, onNew, onSettings }: { talk: Talk; onNew
                           'No messages yet'
                         )}
                       </span>
+                      {(conv.muted || conv.pinned) && (
+                        <span className="ml-auto flex shrink-0 items-center gap-1.5 text-mut">
+                          {conv.muted && <span title="Muted"><span className="sr-only">Muted</span><BellOff size={14} /></span>}
+                          {conv.pinned && <span title="Pinned"><span className="sr-only">Pinned</span><Pin size={14} /></span>}
+                        </span>
+                      )}
                       {conv.unread > 0 && (
                         <span className="flex h-5 min-w-5 shrink-0 items-center justify-center rounded-full bg-fill px-1.5 text-xs font-semibold tabular-nums text-on-fill">
                           <span className="sr-only">Unread: </span>

@@ -5,6 +5,15 @@ export const userName = (me: Me, id: string) => me.users.find((u) => u.id === id
 export const convName = (me: Me, conv: Conversation) =>
   conv.title ?? userName(me, conv.members.find((m) => m !== me.user.id) ?? me.user.id)
 
+export const names = (list: string[]) => new Intl.ListFormat('en', { type: 'conjunction' }).format(list)
+
+// "typing…" in a DM; who, in a group (two names at most).
+export function typingLabel(me: Me, conv: Conversation, ids: string[]) {
+  if (conv.kind === 'dm') return 'typing…'
+  if (ids.length > 2) return `${ids.length} people are typing…`
+  return `${names(ids.map((id) => userName(me, id)))} ${ids.length > 1 ? 'are' : 'is'} typing…`
+}
+
 export const initials = (name: string) =>
   name.split(/\s+/).slice(0, 2).map((w) => w[0]?.toUpperCase()).join('')
 
