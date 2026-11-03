@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, ApiError, socket } from './api.ts'
 import * as c from './crypto.ts'
-import type { Conversation, FileRef, Me, Message, MessageBody, Voice } from '../../shared/types.ts'
+import type { Conversation, FileRef, GroupCall, Me, Message, MessageBody, Voice } from '../../shared/types.ts'
 
 export interface Decrypted extends Message {
   content: MessageBody | null // null: could not decrypt
@@ -154,6 +154,8 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
       setMe((m) => m && { ...m, conversations: bump(m.conversations, msg, !mine && !seen) })
     }
     const onSync = () => void load().catch(() => {})
+    const onCall = ({ convId, call }: { convId: string; call: GroupCall | null }) =>
+      setMe((m) => m && { ...m, conversations: m.conversations.map((x) => (x.id === convId ? { ...x, call: call ?? undefined } : x)) })
     // Reconnects (phones drop sockets constantly) refetch what we may have missed.
     const onConnect = () => {
       socket.emit('active', !document.hidden)
@@ -167,6 +169,7 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
 
     socket.on('message', onMessage)
     socket.on('sync', onSync)
+    socket.on('call:update', onCall)
     socket.on('connect', onConnect)
     socket.on('connect_error', onError)
     document.addEventListener('visibilitychange', onVisibility)
@@ -174,6 +177,7 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
     return () => {
       socket.off('message', onMessage)
       socket.off('sync', onSync)
+      socket.off('call:update', onCall)
       socket.off('connect', onConnect)
       socket.off('connect_error', onError)
       document.removeEventListener('visibilitychange', onVisibility)

@@ -1,27 +1,36 @@
-// One live 1:1 call: ringing, the WebRTC connection and both sides' media.
-// Signaling rides our socket (server/calls.ts); audio and video go peer to
-// peer, or through Cloudflare TURN when a direct path can't be found.
+// One live call: ringing, a WebRTC connection to each other person and
+// everyone's media. A DM call has one peer; a group call is a mesh, with a
+// connection to everyone in it. Signaling rides our socket (server/calls.ts);
+// audio and video go peer to peer, or through Cloudflare TURN when a direct
+// path can't be found.
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, socket } from './api.ts'
-import type { CallEnd, CallKind, CallRing } from '../../shared/types.ts'
+import type { CallEnd, CallKind, CallRing, GroupCall } from '../../shared/types.ts'
 
 export type Phase = 'incoming' | 'calling' | 'ringing' | 'connecting' | 'live' | 'reconnecting' | 'ended'
 type Facing = 'user' | 'environment'
 
+// Someone else in the call, as the screen shows them.
+export interface Remote {
+  user: string
+  stream?: MediaStream
+  muted: boolean
+  camera: boolean
+}
+
 export interface CallView {
   convId: string
-  peer: string // the other person's user id
+  group: boolean
+  peer: string // DM: the other person; group: who started it ('' when we did)
   kind: CallKind
   phase: Phase
   since?: number // when media first connected
   note?: string // why it ended
   local?: MediaStream
-  remote?: MediaStream
+  peers: Remote[] // a DM's other person from the start; in a group, whoever we connect to
   muted: boolean
   camera: boolean
   facing: Facing
-  remoteMuted: boolean
-  remoteCamera: boolean
 }
 
 interface Signal {
@@ -30,27 +39,35 @@ interface Signal {
   state?: { muted: boolean; camera: boolean }
 }
 
-interface Session {
-  id: string | null
-  convId: string
-  kind: CallKind
-  outgoing: boolean // the caller is the impolite peer in perfect negotiation
-  ice: Promise<RTCIceServer[]>
-  local: MediaStream
+// Our connection to one other person.
+interface Peer extends Remote {
+  polite: boolean // yields on an offer collision: the DM callee, the group joiner
   pc?: RTCPeerConnection
   video?: RTCRtpSender
   queue: Signal[] // signals that arrive before our peer connection exists
   makingOffer: boolean
   ignoreOffer: boolean
+  lost?: ReturnType<typeof setTimeout>
+}
+
+interface Session {
+  id: string | null
+  convId: string
+  kind: CallKind
+  group: boolean
+  outgoing: boolean // we started it, so we post the log
+  ice: Promise<RTCIceServer[]>
+  local: MediaStream
+  peers: Map<string, Peer> // by user id
   accepting: boolean
+  joined: boolean // the server acked our start, accept or join
   since?: number
   muted: boolean
   camera: boolean
   facing: Facing
-  lost?: ReturnType<typeof setTimeout>
   timers: ReturnType<typeof setTimeout>[]
   stopTone?: () => void
-  wake?: WakeLockSentinel
+  wake?: Promise<WakeLockSentinel | undefined>
   done: boolean
 }
 
@@ -118,24 +135,34 @@ function tone(kind: 'ring' | 'back') {
   }
 }
 
-export function useCall(onLog: (convId: string, kind: CallKind, ms: number) => void) {
+const newPeer = (user: string, polite: boolean, kind: CallKind): Peer =>
+  ({ user, polite, muted: false, camera: kind === 'video', queue: [], makingOffer: false, ignoreOffer: false })
+const tiles = (s: Session): Remote[] => [...s.peers.values()].map(({ user, stream, muted, camera }) => ({ user, stream, muted, camera }))
+const only = (s: Session) => [...s.peers.values()][0] // a DM's one peer
+
+export function useCall(onLog: (convId: string, kind: CallKind, ms: number, group: boolean) => void, isGroup: (convId: string) => boolean) {
   const [call, setCall] = useState<CallView | null>(null)
   const ref = useRef<Session | null>(null)
   const logRef = useRef(onLog)
   logRef.current = onLog
+  const groupRef = useRef(isGroup)
+  groupRef.current = isGroup
   const patch = (p: Partial<CallView>) => setCall((v) => v && { ...v, ...p })
+  const show = (s: Session) => ref.current === s && patch({ peers: tiles(s) })
 
-  const session = (convId: string, kind: CallKind, outgoing: boolean, id: string | null = null): Session => ({
-    id, convId, kind, outgoing, ice: fetchIce(), local: new MediaStream(), queue: [], makingOffer: false, ignoreOffer: false,
-    accepting: false, muted: false, camera: kind === 'video', facing: 'user', timers: [], done: false,
+  // `peer` is a DM's other person (the caller is the impolite side); a group's peers come and go.
+  const session = (convId: string, kind: CallKind, outgoing: boolean, id: string | null, peer?: string): Session => ({
+    id, convId, kind, group: !peer, outgoing, ice: fetchIce(), local: new MediaStream(), accepting: false, joined: false,
+    peers: new Map(peer ? [[peer, newPeer(peer, !outgoing, kind)]] : []), muted: false, camera: kind === 'video', facing: 'user', timers: [], done: false,
   })
   const view = (s: Session, peer: string, phase: Phase): CallView => ({
-    convId: s.convId, peer, kind: s.kind, phase, muted: false, camera: s.camera, facing: 'user',
-    remoteMuted: false, remoteCamera: s.kind === 'video',
+    convId: s.convId, group: s.group, peer, kind: s.kind, phase, peers: tiles(s), muted: false, camera: s.camera, facing: 'user',
   })
 
-  const signal = (s: Session, data: Signal) => s.id && socket.emit('call:signal', { id: s.id, data })
-  const sendState = (s: Session) => signal(s, { state: { muted: s.muted, camera: s.camera } })
+  // DM signals go to the other side's device; group signals name who they're for.
+  const signal = (s: Session, p: Peer, data: Signal) => s.id && socket.emit('call:signal', { id: s.id, data, ...(s.group && { to: p.user }) })
+  const state = (s: Session): Signal => ({ state: { muted: s.muted, camera: s.camera } })
+  const sendState = (s: Session) => s.peers.forEach((p) => signal(s, p, state(s)))
 
   const finish = useCallback((note?: string) => {
     const s = ref.current
@@ -143,12 +170,11 @@ export function useCall(onLog: (convId: string, kind: CallKind, ms: number) => v
     s.done = true
     ref.current = null
     s.stopTone?.()
-    clearTimeout(s.lost)
     s.timers.forEach(clearInterval)
-    s.pc?.close()
+    s.peers.forEach((p) => (clearTimeout(p.lost), p.pc?.close()))
     s.local.getTracks().forEach((t) => t.stop())
-    s.wake?.release().catch(() => {})
-    if (s.outgoing && s.id) logRef.current(s.convId, s.kind, s.since ? Date.now() - s.since : 0)
+    void s.wake?.then((w) => w?.release().catch(() => {}))
+    if (s.outgoing && s.id) logRef.current(s.convId, s.kind, s.since ? Date.now() - s.since : 0, s.group)
     if (!note) return setCall(null)
     setCall((v) => v && { ...v, phase: 'ended', note })
     setTimeout(() => setCall((v) => (v?.phase === 'ended' ? null : v)), 1600)
@@ -161,30 +187,55 @@ export function useCall(onLog: (convId: string, kind: CallKind, ms: number) => v
     finish(s.outgoing || s.since ? 'Call ended' : undefined)
   }, [finish])
 
-  const lostAfter = (s: Session) => {
-    s.lost ??= setTimeout(() => {
+  // Someone left the group call, or we couldn't reach them: close just that connection.
+  const drop = (s: Session, user: string) => {
+    const p = s.peers.get(user)
+    if (!p) return
+    clearTimeout(p.lost)
+    p.pc?.close()
+    s.peers.delete(user)
+    show(s)
+  }
+  // Connect to someone in the group call, replacing any connection we had to them.
+  const add = (s: Session, user: string, polite: boolean) => {
+    drop(s, user)
+    const p = newPeer(user, polite, s.kind)
+    s.peers.set(user, p)
+    show(s)
+    void connect(s, p)
+    return p
+  }
+
+  const lostAfter = (s: Session, p: Peer) => {
+    p.lost ??= setTimeout(() => {
+      // In a group, one connection that won't come back costs that person, not the call.
+      if (s.group && s.peers.size > 1) return drop(s, p.user)
       if (s.id) socket.emit('call:hangup', { id: s.id })
       if (ref.current === s) finish(s.since ? 'Connection lost' : "Couldn't connect")
     }, LOST_MS)
   }
 
-  const handle = async (s: Session, d: Signal) => {
-    const pc = s.pc!
-    if (d.state) patch({ remoteMuted: d.state.muted, remoteCamera: d.state.camera })
+  const handle = async (s: Session, p: Peer, d: Signal) => {
+    const pc = p.pc!
+    if (d.state) {
+      p.muted = d.state.muted
+      p.camera = d.state.camera
+      show(s)
+    }
     try {
       if (d.description) {
-        // Perfect negotiation: on an offer collision the callee yields.
-        const collision = d.description.type === 'offer' && (s.makingOffer || pc.signalingState !== 'stable')
-        s.ignoreOffer = s.outgoing && collision
-        if (s.ignoreOffer) return
+        // Perfect negotiation: on an offer collision the polite side yields.
+        const collision = d.description.type === 'offer' && (p.makingOffer || pc.signalingState !== 'stable')
+        p.ignoreOffer = !p.polite && collision
+        if (p.ignoreOffer) return
         await pc.setRemoteDescription(d.description)
         if (d.description.type === 'offer') {
           await pc.setLocalDescription()
-          signal(s, { description: pc.localDescription!.toJSON() })
+          signal(s, p, { description: pc.localDescription!.toJSON() })
         }
       } else if (d.candidate) {
         await pc.addIceCandidate(d.candidate).catch((e) => {
-          if (!s.ignoreOffer) throw e
+          if (!p.ignoreOffer) throw e
         })
       }
     } catch (e) {
@@ -192,45 +243,48 @@ export function useCall(onLog: (convId: string, kind: CallKind, ms: number) => v
     }
   }
 
-  const connect = async (s: Session) => {
+  const connect = async (s: Session, p: Peer) => {
     const pc = new RTCPeerConnection({ iceServers: await s.ice })
-    if (s.done) return pc.close()
-    s.pc = pc
-    lostAfter(s)
+    if (s.done || s.peers.get(p.user) !== p) return pc.close()
+    p.pc = pc
+    lostAfter(s, p)
     for (const t of s.local.getTracks()) {
       const sender = pc.addTrack(t, s.local)
-      if (t.kind === 'video') s.video = sender
+      if (t.kind === 'video') p.video = sender
     }
-    const remote = new MediaStream()
     pc.ontrack = ({ track }) => {
-      remote.addTrack(track)
-      patch({ remote: new MediaStream(remote.getTracks()) })
+      p.stream = new MediaStream([...(p.stream?.getTracks() ?? []), track])
+      show(s)
     }
     pc.onnegotiationneeded = async () => {
+      // In a group the polite side waits for the first offer: after two offers
+      // cross, Chrome's rollback can leave a connection gathering no candidates.
+      if (s.group && p.polite && !pc.remoteDescription) return
       try {
-        s.makingOffer = true
+        p.makingOffer = true
         await pc.setLocalDescription()
-        signal(s, { description: pc.localDescription!.toJSON() })
+        signal(s, p, { description: pc.localDescription!.toJSON() })
       } catch (e) {
         console.error('[call]', e)
       } finally {
-        s.makingOffer = false
+        p.makingOffer = false
       }
     }
-    pc.onicecandidate = ({ candidate }) => candidate && signal(s, { candidate: candidate.toJSON() })
+    pc.onicecandidate = ({ candidate }) => candidate && signal(s, p, { candidate: candidate.toJSON() })
     pc.onconnectionstatechange = () => {
       const st = pc.connectionState
       if (st === 'connected') {
-        clearTimeout(s.lost)
-        s.lost = undefined
+        clearTimeout(p.lost)
+        p.lost = undefined
         s.since ??= Date.now()
         patch({ phase: 'live', since: s.since })
       } else if (st === 'disconnected' || st === 'failed') {
-        if (s.since) patch({ phase: 'reconnecting' })
+        // A group call is only reconnecting once nobody is connected.
+        if (s.since && ![...s.peers.values()].some((x) => x.pc?.connectionState === 'connected')) patch({ phase: 'reconnecting' })
         // Network change (wifi to cellular): find a new path instead of dropping the call.
         if (st === 'failed') pc.restartIce()
         else s.timers.push(setTimeout(() => pc.connectionState === 'disconnected' && pc.restartIce(), 3000))
-        lostAfter(s)
+        lostAfter(s, p)
       }
     }
     // An offer can be lost while the other side's socket reconnects; resend it
@@ -238,20 +292,21 @@ export function useCall(onLog: (convId: string, kind: CallKind, ms: number) => v
     let tries = 0
     const dog = setInterval(() => {
       if (pc.connectionState === 'connected' || pc.signalingState === 'closed' || ++tries > 6) return clearInterval(dog)
-      if (pc.signalingState === 'have-local-offer' && pc.localDescription) signal(s, { description: pc.localDescription.toJSON() })
+      if (pc.signalingState === 'have-local-offer' && pc.localDescription) signal(s, p, { description: pc.localDescription.toJSON() })
     }, 3000)
     s.timers.push(dog)
-    navigator.wakeLock?.request('screen').then((w) => (s.wake = w), () => {})
-    for (const d of s.queue.splice(0)) await handle(s, d)
-    sendState(s)
+    s.wake ??= navigator.wakeLock?.request('screen').catch(() => undefined)
+    for (const d of p.queue.splice(0)) await handle(s, p, d)
+    signal(s, p, state(s))
   }
 
+  // No peer: a group call.
   const start = useCallback(
-    async (convId: string, peer: string, kind: CallKind) => {
+    async (convId: string, kind: CallKind, peer?: string) => {
       if (ref.current) return
-      const s = session(convId, kind, true)
+      const s = session(convId, kind, true, null, peer)
       ref.current = s
-      setCall(view(s, peer, 'calling'))
+      setCall(view(s, peer ?? '', 'calling'))
       try {
         s.local = await getMedia(kind === 'video')
       } catch (e) {
@@ -266,12 +321,14 @@ export function useCall(onLog: (convId: string, kind: CallKind, ms: number) => v
       if (s.done) return void (r.id && socket.emit('call:hangup', { id: r.id }))
       if (!r.id) return finish(r.error)
       s.id = r.id
+      s.joined = true
       patch({ phase: 'ringing' })
       s.stopTone = tone('back')
     },
     [finish],
   )
 
+  // Answers a DM ring, or joins a group call (rung or from the chat).
   const accept = useCallback(async () => {
     const s = ref.current
     if (!s || s.outgoing || s.accepting) return
@@ -286,13 +343,27 @@ export function useCall(onLog: (convId: string, kind: CallKind, ms: number) => v
     }
     if (s.done) return s.local.getTracks().forEach((t) => t.stop())
     patch({ local: s.local })
-    const r: { id?: string; error?: string } = await socket
+    const r: { id?: string; peers?: string[]; error?: string } = await socket
       .timeout(10_000)
-      .emitWithAck('call:accept', { id: s.id })
+      .emitWithAck(s.group ? 'call:join' : 'call:accept', { id: s.id })
       .catch(() => ({ error: "Couldn't reach the server. Check your connection." }))
+    if (s.done) return
     if (!r.id) return finish(r.error)
-    void connect(s)
+    s.joined = true
+    // The joiner is the polite side to everyone already in.
+    if (s.group) r.peers!.forEach((u) => add(s, u, true))
+    else void connect(s, only(s))
   }, [finish])
+
+  const join = useCallback(
+    (convId: string, c: GroupCall) => {
+      if (ref.current) return
+      ref.current = session(convId, c.kind, false, c.id)
+      setCall(view(ref.current, c.from, 'connecting'))
+      void accept()
+    },
+    [accept],
+  )
 
   const toggleMute = useCallback(() => {
     const s = ref.current
@@ -304,7 +375,7 @@ export function useCall(onLog: (convId: string, kind: CallKind, ms: number) => v
   }, [])
 
   // Off stops the camera (its light goes out); on starts it again. Turning it
-  // on in a voice call adds video, which renegotiates the connection.
+  // on in a voice call adds video, which renegotiates each connection.
   const toggleCamera = useCallback(async () => {
     const s = ref.current
     if (!s) return
@@ -312,14 +383,16 @@ export function useCall(onLog: (convId: string, kind: CallKind, ms: number) => v
     if (cur) {
       cur.stop()
       s.local.removeTrack(cur)
-      await s.video?.replaceTrack(null)
+      for (const p of s.peers.values()) await p.video?.replaceTrack(null)
       s.camera = false
     } else {
       const t = await getCamera(s.facing).catch(() => null)
       if (!t || s.done) return t?.stop()
       s.local.addTrack(t)
-      if (s.video) await s.video.replaceTrack(t)
-      else if (s.pc) s.video = s.pc.addTrack(t, s.local)
+      for (const p of s.peers.values()) {
+        if (p.video) await p.video.replaceTrack(t)
+        else if (p.pc) p.video = p.pc.addTrack(t, s.local)
+      }
       s.camera = true
     }
     patch({ camera: s.camera, local: new MediaStream(s.local.getTracks()) })
@@ -337,50 +410,73 @@ export function useCall(onLog: (convId: string, kind: CallKind, ms: number) => v
     const t = await getCamera(want).catch(() => getCamera(s.facing)).catch(() => null)
     if (!t || s.done) {
       t?.stop()
-      await s.video?.replaceTrack(null)
+      for (const p of s.peers.values()) await p.video?.replaceTrack(null)
       s.camera = false
       patch({ camera: false, local: new MediaStream(s.local.getTracks()) })
       return sendState(s)
     }
     s.facing = t.getSettings().facingMode === 'environment' ? 'environment' : 'user'
     s.local.addTrack(t)
-    await s.video?.replaceTrack(t)
+    for (const p of s.peers.values()) await p.video?.replaceTrack(t)
     patch({ facing: s.facing, local: new MediaStream(s.local.getTracks()) })
   }, [])
 
   useEffect(() => {
     const onRing = (r: CallRing) => {
       if (ref.current) return // the server won't ring someone in a call; this is a replay
-      const s = session(r.convId, r.kind, false, r.id)
+      const s = session(r.convId, r.kind, false, r.id, groupRef.current(r.convId) ? undefined : r.from)
       ref.current = s
       s.stopTone = tone('ring')
       setCall(view(s, r.from, 'incoming'))
     }
     const onAccepted = ({ id }: { id: string }) => {
       const s = ref.current
-      if (s?.id !== id || s.pc) return
+      if (s?.id !== id || s.group || only(s).pc) return
       s.stopTone?.()
       patch({ phase: 'connecting' })
-      void connect(s)
+      void connect(s, only(s))
     }
-    const onSignal = ({ id, data }: { id: string; data: Signal }) => {
+    const onSignal = ({ id, from, data }: { id: string; from?: string; data: Signal }) => {
       const s = ref.current
       if (s?.id !== id) return
-      if (s.pc) void handle(s, data)
-      else s.queue.push(data)
+      let p = s.group ? s.peers.get(from!) : only(s)
+      // An offer from someone we dropped or never heard join (our socket was away): take it.
+      if (!p && s.joined && data.description?.type === 'offer') p = add(s, from!, true)
+      if (!p) return
+      if (p.pc) void handle(s, p, data)
+      else p.queue.push(data)
+    }
+    const onJoined = ({ id, user }: { id: string; user: string }) => {
+      const s = ref.current
+      if (s?.id !== id) return
+      s.stopTone?.()
+      if (!s.since) patch({ phase: 'connecting' })
+      add(s, user, false)
+    }
+    const onLeft = ({ id, user }: { id: string; user: string }) => {
+      const s = ref.current
+      if (s?.id === id) drop(s, user)
     }
     const onEnd = ({ id, reason }: { id: string; reason: CallEnd }) => {
       const s = ref.current
       if (s?.id === id) finish(endNote(reason, s.outgoing))
     }
-    // Our socket came back (phones drop it): tell the server which device we are again.
+    // Our socket came back (phones drop it): tell the server which device we are
+    // again, and in a group catch up on who left or joined meanwhile.
     const onConnect = () => {
       const s = ref.current
-      if (!s?.id || (!s.outgoing && !s.pc)) return
+      if (!s?.joined) return
       socket
         .timeout(10_000)
         .emitWithAck('call:rejoin', { id: s.id })
-        .then((r: { error?: string }) => r.error && ref.current === s && finish('Call ended'), () => {})
+        .then((r: { error?: string; peers?: string[] }) => {
+          if (ref.current !== s) return
+          if (r.error) return finish('Call ended')
+          if (!s.group) return
+          for (const u of s.peers.keys()) if (!r.peers!.includes(u)) drop(s, u)
+          // They joined while we were away and wait, as the polite side, for our offer.
+          for (const u of r.peers!) if (!s.peers.has(u)) add(s, u, false)
+        }, () => {})
     }
     const onLeave = () => {
       const s = ref.current
@@ -389,6 +485,8 @@ export function useCall(onLog: (convId: string, kind: CallKind, ms: number) => v
     socket.on('call:ring', onRing)
     socket.on('call:accepted', onAccepted)
     socket.on('call:signal', onSignal)
+    socket.on('call:joined', onJoined)
+    socket.on('call:left', onLeft)
     socket.on('call:end', onEnd)
     socket.on('connect', onConnect)
     addEventListener('pagehide', onLeave)
@@ -396,6 +494,8 @@ export function useCall(onLog: (convId: string, kind: CallKind, ms: number) => v
       socket.off('call:ring', onRing)
       socket.off('call:accepted', onAccepted)
       socket.off('call:signal', onSignal)
+      socket.off('call:joined', onJoined)
+      socket.off('call:left', onLeft)
       socket.off('call:end', onEnd)
       socket.off('connect', onConnect)
       removeEventListener('pagehide', onLeave)
@@ -405,7 +505,7 @@ export function useCall(onLog: (convId: string, kind: CallKind, ms: number) => v
     // connect and handle only read refs and stable setters
   }, [finish])
 
-  return { call, start, accept, hangup, toggleMute, toggleCamera, flip }
+  return { call, start, join, accept, hangup, toggleMute, toggleCamera, flip }
 }
 
 export type Calls = ReturnType<typeof useCall>
