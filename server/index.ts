@@ -5,14 +5,15 @@ import { writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Server } from 'socket.io'
-import { db, BLOB_DIR, setting, blocks, isMember, memberIds } from './db.ts'
+import { db, BLOB_DIR, setting, isMember, memberIds, mutedIds, audience, dmRefusal } from './db.ts'
 import { authMatches, hashAuth, setSession, clearSession, userFromCookie, requireUser, throttled, recordFail } from './auth.ts'
 import { vapidPublicKey, saveSubscription, notifyIfAway } from './push.ts'
-import { callHandlers, callState } from './calls.ts'
-import type { Conversation, Me, Message, SendPayload, User } from '../shared/types.ts'
+import { callHandlers, callState, groupCall } from './calls.ts'
+import type { Conversation, Me, Message, Reaction, SendPayload, User } from '../shared/types.ts'
 
 const PORT = Number(process.env.PORT ?? 3000)
 const MAX_FILE = 50 * 1024 * 1024
+const EDIT_MS = 15 * 60_000
 const SETUP_CODE = setting('SETUP_CODE', () => randomBytes(12).toString('base64url'))
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
@@ -26,6 +27,16 @@ const userCount = () => (db.prepare('select count(*) as n from users').get() as 
 const userExists = (id: string) => !!db.prepare('select 1 from users where id = ? and deleted_at is null').get(id)
 // Hides messages from people `?` blocked, in groups (DMs refuse them at send).
 const NOT_BLOCKED = 'sender_id not in (select blocked_id from blocks where user_id = ?)'
+const MESSAGE = 'id, conv_id as convId, sender_id as senderId, body, created_at as createdAt, edited_at as editedAt'
+const reactionsOf = db.prepare(
+  'select user_id as userId, body from reactions where message_id = ? and user_id not in (select blocked_id from blocks where user_id = ?)',
+)
+// A message as `viewer` gets it: editedAt and reactions only when there are some.
+function shaped(row: Message, viewer: string): Message {
+  const { editedAt, ...m } = row
+  const reactions = reactionsOf.all(m.id, viewer) as unknown as Reaction[]
+  return { ...m, ...(editedAt != null && { editedAt }), ...(reactions.length ? { reactions } : {}) }
+}
 
 const app = express()
 const server = createServer(app)
@@ -95,22 +106,29 @@ app.get('/api/me', (req, res) => {
   const blocked = (db.prepare('select blocked_id as id from blocks where user_id = ?').all(req.userId) as { id: string }[]).map((r) => r.id)
   const rows = db
     .prepare(
-      `select c.id, c.kind, c.title, m.wrapped_key as wrappedKey, m.wrapped_by as wrappedBy,
+      `select c.id, c.kind, c.title, m.wrapped_key as wrappedKey, m.wrapped_by as wrappedBy, m.muted, m.pinned,
          (select max(created_at) from messages where conv_id = c.id) as lastMessageAt,
          (select count(*) from messages where conv_id = c.id and id > m.last_read and sender_id != m.user_id and not seen and ${NOT_BLOCKED}) as unread
        from conversations c join members m on m.conv_id = c.id and m.user_id = ?
-       order by coalesce(lastMessageAt, c.created_at) desc`,
+       order by m.pinned desc, coalesce(lastMessageAt, c.created_at) desc`,
     )
-    .all(req.userId, req.userId) as unknown as Omit<Conversation, 'members' | 'lastMessage'>[]
-  const last = db.prepare(
-    `select id, conv_id as convId, sender_id as senderId, body, created_at as createdAt
-     from messages where conv_id = ? and ${NOT_BLOCKED} order by id desc limit 1`,
-  )
-  const conversations = rows.map((c) => ({
-    ...c,
-    members: memberIds(c.id),
-    lastMessage: (last.get(c.id, req.userId) as unknown as Message | undefined) ?? null,
-  }))
+    .all(req.userId, req.userId) as unknown as (Omit<Conversation, 'members' | 'lastMessage' | 'muted' | 'pinned'> & { muted: number; pinned: number })[]
+  const last = db.prepare(`select ${MESSAGE} from messages where conv_id = ? and ${NOT_BLOCKED} order by id desc limit 1`)
+  const reads = db.prepare('select user_id as id, last_read as upTo from members where conv_id = ?')
+  const conversations = rows.map(({ muted, pinned, ...c }) => {
+    const r = reads.all(c.id) as { id: string; upTo: number }[]
+    const lastMessage = last.get(c.id, req.userId) as unknown as Message | undefined
+    const call = groupCall(c.id)
+    return {
+      ...c,
+      members: r.map((x) => x.id),
+      reads: Object.fromEntries(r.map((x) => [x.id, x.upTo])),
+      lastMessage: lastMessage ? shaped(lastMessage, req.userId) : null,
+      ...(muted && { muted: true }),
+      ...(pinned && { pinned: true }),
+      ...(call && { call }),
+    }
+  })
   res.json({ user, users, conversations, blocked, vapidPublicKey } satisfies Me)
 })
 
@@ -125,6 +143,7 @@ app.delete('/api/me', (req, res) => {
   db.exec('begin')
   try {
     for (const sql of [
+      'delete from reactions where user_id = ?',
       'delete from messages where sender_id = ?',
       'delete from members where user_id = ?',
       'delete from invites where created_by = ?',
@@ -164,10 +183,11 @@ app.post('/api/push', (req, res) => {
 // iPhone push tokens (hex, from APNs). One phone has an alert token and a
 // VoIP token; a token moves to whoever signs in on that phone last.
 app.post('/api/devices', (req, res) => {
-  const { token, kind, env } = req.body ?? {}
-  if (typeof token !== 'string' || !/^[0-9a-f]{64,200}$/.test(token) || (kind !== 'alert' && kind !== 'voip') || (env !== 'sandbox' && env !== 'production'))
+  const { token, kind, env, v = 1 } = req.body ?? {}
+  if (typeof token !== 'string' || !/^[0-9a-f]{64,200}$/.test(token) || (kind !== 'alert' && kind !== 'voip') || (env !== 'sandbox' && env !== 'production') ||
+      !Number.isSafeInteger(v) || v < 1)
     return void res.status(400).json({ error: 'bad request' })
-  db.prepare('insert or replace into devices (token, user_id, kind, env, created_at) values (?, ?, ?, ?, ?)').run(token, req.userId, kind, env, Date.now())
+  db.prepare('insert or replace into devices (token, user_id, kind, env, created_at, v) values (?, ?, ?, ?, ?, ?)').run(token, req.userId, kind, env, Date.now(), v)
   res.json({ ok: true })
 })
 
@@ -290,23 +310,113 @@ app.post('/api/conversations/:id/members', (req, res) => {
   res.json({ ok: true })
 })
 
+// Leave a group (your own id) or remove someone from it. Any member may, as in
+// iMessage. shortcut: the group key isn't rotated, so a removed person who kept
+// it could read what the server would send them; the server just stops sending.
+app.delete('/api/conversations/:id/members/:userId', (req, res) => {
+  const { id: convId, userId } = req.params
+  const conv = db.prepare('select kind from conversations where id = ?').get(convId) as { kind: string } | undefined
+  if (!conv || !isMember(convId, req.userId)) return void res.status(404).json({ error: 'not found' })
+  if (conv.kind !== 'group' || !isMember(convId, userId)) return void res.status(400).json({ error: 'bad request' })
+  const before = memberIds(convId)
+  db.prepare('delete from members where conv_id = ? and user_id = ?').run(convId, userId)
+  sync(before)
+  res.json({ ok: true })
+})
+
+app.patch('/api/conversations/:id', (req, res) => {
+  const convId = req.params.id
+  const conv = db.prepare('select kind from conversations where id = ?').get(convId) as { kind: string } | undefined
+  if (!conv || !isMember(convId, req.userId)) return void res.status(404).json({ error: 'not found' })
+  if (conv.kind !== 'group' || !isName(req.body?.title)) return void res.status(400).json({ error: 'bad request' })
+  db.prepare('update conversations set title = ? where id = ?').run(req.body.title, convId)
+  sync(memberIds(convId))
+  res.json({ ok: true })
+})
+
+// My own settings for a chat.
+app.patch('/api/conversations/:id/me', (req, res) => {
+  const { muted, pinned } = req.body ?? {}
+  if (!isMember(req.params.id, req.userId)) return void res.status(404).json({ error: 'not found' })
+  if ((muted !== undefined && typeof muted !== 'boolean') || (pinned !== undefined && typeof pinned !== 'boolean'))
+    return void res.status(400).json({ error: 'bad request' })
+  db.prepare('update members set muted = coalesce(?, muted), pinned = coalesce(?, pinned) where conv_id = ? and user_id = ?').run(
+    muted === undefined ? null : Number(muted), pinned === undefined ? null : Number(pinned), req.params.id, req.userId,
+  )
+  sync([req.userId])
+  res.json({ ok: true })
+})
+
 app.get('/api/conversations/:id/messages', (req, res) => {
   const convId = req.params.id
   if (!isMember(convId, req.userId)) return void res.status(404).json({ error: 'not found' })
   const before = Number(req.query.before) || Number.MAX_SAFE_INTEGER
   const rows = db
-    .prepare(
-      `select id, conv_id as convId, sender_id as senderId, body, created_at as createdAt
-        from messages where conv_id = ? and id < ? and ${NOT_BLOCKED} order by id desc limit 50`,
-    )
+    .prepare(`select ${MESSAGE} from messages where conv_id = ? and id < ? and ${NOT_BLOCKED} order by id desc limit 50`)
     .all(convId, before, req.userId) as unknown as Message[]
-  res.json(rows.reverse())
+  res.json(rows.reverse().map((m) => shaped(m, req.userId)))
 })
 
+// Also the read receipt: the chat's other members hear how far I've read.
 app.post('/api/conversations/:id/read', (req, res) => {
+  const convId = req.params.id
   const upTo = Number(req.body?.upTo)
   if (!Number.isSafeInteger(upTo)) return void res.status(400).json({ error: 'bad request' })
-  db.prepare('update members set last_read = max(last_read, ?) where conv_id = ? and user_id = ?').run(upTo, req.params.id, req.userId)
+  if (!isMember(convId, req.userId)) return void res.status(404).json({ error: 'not found' })
+  db.prepare('update members set last_read = max(last_read, ?) where conv_id = ? and user_id = ?').run(upTo, convId, req.userId)
+  const { last_read } = db.prepare('select last_read from members where conv_id = ? and user_id = ?').get(convId, req.userId) as { last_read: number }
+  io.to(audience(convId, req.userId).map((u) => `user:${u}`)).emit('read', { convId, userId: req.userId, upTo: last_read })
+  res.json({ ok: true })
+})
+
+// --- message actions: edit, unsend, react ---
+
+// A message I can act on: in a chat I'm in; `own` also needs me to have sent it.
+function target(req: express.Request, own: boolean) {
+  const m = db.prepare(`select ${MESSAGE} from messages where id = ?`).get(Number(req.params.id)) as unknown as Message | undefined
+  return m && isMember(m.convId, req.userId) && (!own || m.senderId === req.userId) ? m : undefined
+}
+
+app.patch('/api/messages/:id', (req, res) => {
+  const m = target(req, true)
+  if (!m) return void res.status(404).json({ error: 'not found' })
+  if (!isSealed(req.body?.body, 64 * 1024)) return void res.status(400).json({ error: 'bad request' })
+  if (Date.now() - m.createdAt > EDIT_MS) return void res.status(403).json({ error: 'Messages can be edited for 15 minutes after sending.' })
+  const editedAt = Date.now()
+  db.prepare('update messages set body = ?, edited_at = ? where id = ?').run(req.body.body, editedAt, m.id)
+  const message = shaped({ ...m, body: req.body.body, editedAt }, req.userId)
+  io.to(audience(m.convId, req.userId).map((u) => `user:${u}`)).emit('edit', message)
+  res.json({ message })
+})
+
+// Unsend: gone for everyone, reactions too. Older apps simply stop seeing it.
+// shortcut: attachment blobs stay on disk (sealed, unlisted); sweep orphans if storage matters.
+app.delete('/api/messages/:id', (req, res) => {
+  const m = target(req, true)
+  if (!m) return void res.status(404).json({ error: 'not found' })
+  db.prepare('delete from messages where id = ?').run(m.id)
+  const to = memberIds(m.convId).map((u) => `user:${u}`)
+  io.to(to).emit('unsend', { id: m.id, convId: m.convId })
+  io.to(to).emit('sync') // previews and unread counts
+  res.json({ ok: true })
+})
+
+app.put('/api/messages/:id/reaction', (req, res) => {
+  const m = target(req, false)
+  if (!m) return void res.status(404).json({ error: 'not found' })
+  if (!isSealed(req.body?.body, 1024)) return void res.status(400).json({ error: 'bad request' })
+  const refused = dmRefusal(m.convId, req.userId)
+  if (refused) return void res.status(403).json({ error: refused })
+  db.prepare('insert or replace into reactions (message_id, user_id, body) values (?, ?, ?)').run(m.id, req.userId, req.body.body)
+  io.to(audience(m.convId, req.userId).map((u) => `user:${u}`)).emit('reaction', { messageId: m.id, convId: m.convId, userId: req.userId, body: req.body.body })
+  res.json({ ok: true })
+})
+
+app.delete('/api/messages/:id/reaction', (req, res) => {
+  const m = target(req, false)
+  if (!m) return void res.status(404).json({ error: 'not found' })
+  db.prepare('delete from reactions where message_id = ? and user_id = ?').run(m.id, req.userId)
+  io.to(audience(m.convId, req.userId).map((u) => `user:${u}`)).emit('reaction', { messageId: m.id, convId: m.convId, userId: req.userId, body: null })
   res.json({ ok: true })
 })
 
@@ -343,6 +453,8 @@ io.use((socket, next) => {
   if (!id || !userExists(id)) return next(new Error('signed out'))
   socket.data.userId = id
   socket.data.active = true
+  // The app's protocol version: 2 and up know group calls and the events above.
+  socket.data.v = Number(socket.handshake.query.v) || 1
   next()
 })
 
@@ -351,6 +463,7 @@ const calls = callHandlers(io)
 io.on('connection', (socket) => {
   const me = socket.data.userId as string
   socket.join(`user:${me}`)
+  if (socket.data.v >= 2) socket.join(`v2:${me}`)
 
   // Client reports page visibility; a user with no visible tab gets a push.
   socket.on('active', (v: unknown) => void (socket.data.active = !!v))
@@ -365,24 +478,29 @@ io.on('connection', (socket) => {
       .prepare('select id, conv_id as convId, sender_id as senderId, body, created_at as createdAt from messages where sender_id = ? and cid = ?')
       .get(me, p.cid) as unknown as Message | undefined
     if (sent) return ack({ message: sent })
-    const members = memberIds(p.convId)
-    const dm = (db.prepare('select kind from conversations where id = ?').get(p.convId) as { kind: string }).kind === 'dm'
-    const other = dm ? members.find((u) => u !== me) : undefined
-    if (other && blocks(me, other)) return ack({ error: 'Unblock this person to message them.' })
-    if (other && blocks(other, me)) return ack({ error: 'This person isn’t taking messages from you.' })
+    const refused = dmRefusal(p.convId, me)
+    if (refused) return ack({ error: refused })
     const createdAt = Date.now()
     const { lastInsertRowid } = db
       .prepare('insert into messages (conv_id, sender_id, body, created_at, seen, cid) values (?, ?, ?, ?, ?, ?)')
       .run(p.convId, me, p.body, createdAt, p.seen === true ? 1 : 0, p.cid ?? null)
     const message: Message = { id: Number(lastInsertRowid), convId: p.convId, senderId: me, body: p.body, createdAt }
-    const to = members.filter((u) => !blocks(u, me))
+    const to = audience(p.convId, me)
     io.to(to.map((u) => `user:${u}`)).emit('message', message)
     ack({ message })
 
     if (p.quiet) return
     const sender = (db.prepare('select name from users where id = ?').get(me) as { name: string }).name
-    for (const u of to) if (u !== me)
+    const muted = mutedIds(p.convId)
+    for (const u of to) if (u !== me && !muted.has(u))
       notifyIfAway(io, u, { title: sender, body: 'New message', convId: p.convId }, { apns: { type: 'message', convId: p.convId, messageId: message.id } })
+  })
+
+  // "I'm typing" for the chat's other members, never stored. Clients send it at
+  // most every few seconds while typing and drop it after 6 s without one.
+  socket.on('typing', (p: { convId?: unknown }) => {
+    if (typeof p?.convId !== 'string' || !isMember(p.convId, me) || dmRefusal(p.convId, me)) return
+    io.to(audience(p.convId, me).filter((u) => u !== me).map((u) => `user:${u}`)).emit('typing', { convId: p.convId, userId: me })
   })
 
   calls(socket)

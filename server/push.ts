@@ -60,11 +60,12 @@ export async function notify(userId: string, payload: Payload, ttl = 3600) {
 }
 
 // Calls go to VoIP tokens (they ring through CallKit), the rest to alert tokens.
-export async function apns(userId: string, data: Apns) {
+// `v`: only phones whose app knows this push (a group call rings v2 and up).
+export async function apns(userId: string, data: Apns, v = 1) {
   if (!RELAY) return
   const devices = db
-    .prepare('select token, env from devices where user_id = ? and kind = ?')
-    .all(userId, data.type === 'call' ? 'voip' : 'alert') as { token: string; env: string }[]
+    .prepare('select token, env from devices where user_id = ? and kind = ? and v >= ?')
+    .all(userId, data.type === 'call' ? 'voip' : 'alert', v) as { token: string; env: string }[]
   await Promise.all(
     devices.map(async ({ token, env }) => {
       try {

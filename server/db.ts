@@ -83,7 +83,24 @@ db.exec(`
     note text,
     created_at integer not null
   );
+  -- One per person per message; the emoji is sealed like a message body.
+  create table if not exists reactions (
+    message_id integer not null references messages(id) on delete cascade,
+    user_id text not null references users(id),
+    body text not null,
+    primary key (message_id, user_id)
+  );
 `)
+
+const addColumn = (table: string, column: string, def: string) => {
+  if (!(db.prepare(`pragma table_info(${table})`).all() as { name: string }[]).some((c) => c.name === column))
+    db.exec(`alter table ${table} add column ${column} ${def}`)
+}
+addColumn('messages', 'edited_at', 'integer')
+addColumn('members', 'muted', 'integer not null default 0')
+addColumn('members', 'pinned', 'integer not null default 0')
+// The app's protocol version on that phone: 2 and up know group calls.
+addColumn('devices', 'v', 'integer not null default 1')
 
 // Deleted accounts stay as a row with only the public key, so conversation
 // keys they sealed for others can still be opened.
@@ -122,3 +139,17 @@ export const blocks = (owner: string, other: string) =>
 
 export const memberIds = (convId: string) =>
   (db.prepare('select user_id from members where conv_id = ?').all(convId) as { user_id: string }[]).map((r) => r.user_id)
+
+export const mutedIds = (convId: string) =>
+  new Set((db.prepare('select user_id from members where conv_id = ? and muted').all(convId) as { user_id: string }[]).map((r) => r.user_id))
+
+// Members who get what `from` does in this chat: everyone but those who blocked them.
+export const audience = (convId: string, from: string) => memberIds(convId).filter((u) => !blocks(u, from))
+
+// In a DM, a block either way stops messages, reactions and calls.
+export function dmRefusal(convId: string, me: string): string | undefined {
+  if ((db.prepare('select kind from conversations where id = ?').get(convId) as { kind: string }).kind !== 'dm') return
+  const other = memberIds(convId).find((u) => u !== me)
+  if (other && blocks(me, other)) return 'Unblock this person to message them.'
+  if (other && blocks(other, me)) return 'This person isn’t taking messages from you.'
+}
