@@ -100,11 +100,22 @@ struct Vectors: Decodable {
   #expect(!String(decoding: try JSONEncoder().encode(old), as: UTF8.self).contains("preview"))
 }
 
-@Test func linksAreWebOnlyAndCardsFollowThem() {
+@Test func linksAreWebOnlyAndCardsFollowThem() throws {
   #expect(LinkPreview.links(in: "a https://a.org/x b mailto:z@y.org c ftp://f.org www.b.org").map(\.absoluteString) == ["https://a.org/x", "http://www.b.org"])
   let card = LinkPreview(url: "https://a.org/x")
   #expect(card.fits("now https://a.org/x"))
   #expect(!card.fits("now https://a.org/y"))
+  #expect(card.fits("now a.org/x")) // scheme optional, as on the web
+  #expect(LinkPreview(url: "HTTP://a.org/x").fits("see a.org/x"))
+  #expect(LinkPreview(url: "HTTPS://a.org").isWeb)
+  #expect(!LinkPreview(url: "javascript:alert(1)").isWeb)
+  // A card keeps the link as typed: the detector's URL is percent-encoded or punycoded, which the text lacks.
+  for text in ["lies https://de.wikipedia.org/wiki/Bücher", "bei https://bücher.de jetzt"] {
+    let typed = try #require(LinkPreview.first(in: text)?.typed)
+    #expect(text.contains(typed))
+    #expect(LinkPreview(url: typed).fits(text))
+  }
+  #expect(LinkPreview.first(in: "see www.b.org/x now")?.typed == "http://www.b.org/x")
 }
 
 @Test func thumbnailsFitTheWireLimit() throws {
@@ -132,6 +143,9 @@ struct Vectors: Decodable {
   #expect(Search.hit(MessageBody(from: "a", text: "look", preview: LinkPreview(url: "https://a.org", title: "Trail map")), "trail") == "Trail map")
   #expect(Search.hit(MessageBody(from: "a", text: "Alice added Bob", system: true), "alice") == nil)
   #expect(Search.hit(MessageBody(from: "a", call: CallLog(kind: "audio", ms: 0)), "call") == nil)
+  // The folded text search narrows with: the same case and accent rules, nothing from event lines.
+  #expect(Search.text(text).contains(Search.fold("CAFÉ ZOË")))
+  #expect(Search.text(MessageBody(from: "a", text: "Alice added Bob", system: true)).isEmpty)
 
   let s = Search.snippet("a long opening sentence that runs on before the word banana shows up", "BANANA")
   #expect(String(s.characters) == "…on before the word banana shows up") // trimmed to a whole word

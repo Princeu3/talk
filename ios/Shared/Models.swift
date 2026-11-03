@@ -81,15 +81,36 @@ nonisolated struct LinkPreview: Codable, Hashable, Sendable {
 }
 
 nonisolated extension LinkPreview {
-  private static let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
+  static let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) // also links bubble text
 
-  // The http(s) links in some text, in order.
-  static func links(in s: String) -> [URL] {
-    (detector?.matches(in: s, range: NSRange(s.startIndex..., in: s)) ?? []).compactMap(\.url).filter { ["http", "https"].contains($0.scheme?.lowercased()) }
+  // The http(s) links in some text, in order, each with where it sits in the text.
+  private static func found(in s: String) -> [(range: Range<String.Index>, url: URL)] {
+    (detector?.matches(in: s, range: NSRange(s.startIndex..., in: s)) ?? []).compactMap { m in
+      guard let url = m.url, ["http", "https"].contains(url.scheme?.lowercased()), let r = Range(m.range, in: s) else { return nil }
+      return (r, url)
+    }
   }
 
-  // Its link is still in the text, so the card still belongs with it.
-  func fits(_ text: String) -> Bool { Self.links(in: text).contains { $0.absoluteString == url } }
+  static func links(in s: String) -> [URL] { found(in: s).map(\.url) }
+
+  // The text's first link: as typed, for a card's url (with `http://` when typed without a scheme), and the
+  // detector's URL to fetch. That URL may be percent-encoded or punycoded, which the text doesn't contain.
+  static func first(in s: String) -> (typed: String, url: URL)? {
+    guard let (r, url) = found(in: s).first else { return nil }
+    let t = String(s[r])
+    return (bare(t).startIndex == t.startIndex ? "http://" + t : t, url)
+  }
+
+  // A link without its leading http:// or https://, any case.
+  private static func bare(_ link: String) -> Substring {
+    link[(link.range(of: "^https?://", options: [.regularExpression, .caseInsensitive])?.upperBound ?? link.startIndex)...]
+  }
+
+  // The card stays only while the text holds its link, scheme optional (the web's rule too).
+  func fits(_ text: String) -> Bool { text.contains(Self.bare(url)) }
+
+  // The sender picks the link, so a received card keeps it only if it's http(s).
+  var isWeb: Bool { ["http", "https"].contains(URL(string: url)?.scheme?.lowercased()) }
 
   // The card's image as JPEG: longest side ≤ 320 px, ≤ 24 KB, smaller and rougher until it fits, else none.
   static func thumb(_ img: UIImage) -> String? {
@@ -118,6 +139,15 @@ nonisolated extension LinkPreview {
 // Chat search (docs/chat-features.md): ignores case and accents; covers text, file names and link titles,
 // never event lines or call logs.
 nonisolated enum Search {
+  // What search looks through, folded once per message: its text, file names and link title. A plain
+  // `contains` of the folded query narrows the field; `hit` then finds the line.
+  static func text(_ b: MessageBody) -> String {
+    guard b.system != true, b.call == nil else { return "" }
+    return fold(([b.text, b.preview?.title].compactMap { $0 } + (b.files ?? []).map(\.name)).joined(separator: "\n"))
+  }
+
+  static func fold(_ s: String) -> String { s.folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: nil) }
+
   // The line that matched: one of the text's lines, a file name, or the link's title.
   static func hit(_ b: MessageBody, _ q: String) -> String? {
     guard b.system != true, b.call == nil else { return nil }

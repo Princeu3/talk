@@ -278,7 +278,18 @@ private struct LinkItem: Identifiable {
   var id: String { "\(m.id) \(url.absoluteString)" }
 }
 
-private func when(_ m: Decrypted) -> String { Date(timeIntervalSince1970: m.message.createdAt / 1000).formatted(date: .abbreviated, time: .omitted) }
+// Links found in each message's text, kept by id and edit: the detector is slow over a long history.
+private final class LinkCache {
+  private var byId: [Int: (at: Double?, urls: [URL])] = [:]
+
+  // Only texts that look linked go through the detector.
+  func links(_ m: Decrypted, _ text: String) -> [URL] {
+    if let c = byId[m.id], c.at == m.message.editedAt { return c.urls }
+    let urls = text.contains("http") || text.contains("www.") ? LinkPreview.links(in: text) : []
+    byId[m.id] = (m.message.editedAt, urls)
+    return urls
+  }
+}
 
 // Media, links and docs: what the chat's history holds, newest first, filling in as older pages arrive.
 private struct SharedMedia: View {
@@ -286,12 +297,13 @@ private struct SharedMedia: View {
   let convId: String
   @State private var tab = Tab.media
   @State private var zoom: UIImage?
+  @State private var cache = LinkCache()
 
   enum Tab: String, CaseIterable { case media = "Media", links = "Links", docs = "Docs" }
 
   var body: some View {
     let _ = talk.progress // pages arriving re-read the history
-    let list = Array(talk.history(convId).reversed())
+    let list = talk.history(convId)
     let done = talk.complete.contains(convId)
     Group {
       switch tab {
@@ -324,15 +336,15 @@ private struct SharedMedia: View {
     return out
   }
 
-  // A message's card, else the links in its text. The detector is slow over a long history, so only texts that look linked.
+  // A message's card, else the links in its text.
   private func links(_ list: [Decrypted]) -> [LinkItem] {
     var out: [LinkItem] = []
     for m in list {
       guard let c = m.content, !m.system else { continue }
-      if let p = c.preview, let url = p.web {
+      if let p = c.preview, let url = URL(string: p.url) {
         out.append(LinkItem(m: m, url: url, title: p.title, site: p.label))
-      } else if let t = c.text, t.contains("http") || t.contains("www.") {
-        for url in LinkPreview.links(in: t) { out.append(LinkItem(m: m, url: url, title: nil, site: url.host() ?? "")) }
+      } else if let t = c.text {
+        for url in cache.links(m, t) { out.append(LinkItem(m: m, url: url, title: nil, site: Format.host(url) ?? "")) }
       }
     }
     return out
@@ -387,10 +399,10 @@ private struct MediaCell: View {
     } else {
       Button(action: open) { square }
         .accessibilityLabel("Open \(file.name)")
-        // Through the chat's decrypting loader and its cache; big ones wait for a tap, as in the chat.
+        // Shrunk without keeping the photo in memory; big ones wait for a tap, as in the chat.
         .task(id: file.id) {
-          guard !big, let data = try? await talk.file(convId, file) else { return }
-          thumb = await Self.small(data)
+          guard !big else { return }
+          thumb = try? await talk.thumb(convId, file)
         }
     }
   }
@@ -410,18 +422,11 @@ private struct MediaCell: View {
   private func open() {
     Task {
       if big {
-        if let url = try? await talk.save(convId, file), let img = await Attachment.downsample(url) { onZoom(img) }
+        if let url = try? await talk.save(convId, file), let img = await Attachment.downsample(CGImageSourceCreateWithURL(url as CFURL, nil)) { onZoom(img) }
       } else if let data = try? await talk.file(convId, file), let img = UIImage(data: data) {
         onZoom(img)
       }
     }
-  }
-
-  // A grid square needs a few hundred pixels, not a whole 48 MP photo.
-  @concurrent nonisolated private static func small(_ data: Data) async -> UIImage? {
-    let opts = [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceCreateThumbnailWithTransform: true, kCGImageSourceThumbnailMaxPixelSize: 360] as CFDictionary
-    guard let src = CGImageSourceCreateWithData(data as CFData, nil), let img = CGImageSourceCreateThumbnailAtIndex(src, 0, opts) else { return nil }
-    return UIImage(cgImage: img)
   }
 }
 
@@ -447,7 +452,7 @@ private struct LinkList: View {
         Button { openURL(i.url) } label: {
           VStack(alignment: .leading, spacing: 2) {
             Text(i.title ?? i.url.absoluteString).foregroundStyle(Color.ink).lineLimit(2)
-            Text("\(i.site) · \(when(i.m))").font(.caption).foregroundStyle(Color.mut).lineLimit(1)
+            Text("\(i.site) · \(Format.shortTime(i.m.message.createdAt))").font(.caption).foregroundStyle(Color.mut).lineLimit(1)
           }
         }
         .listRowBackground(Color.bg)
@@ -469,7 +474,7 @@ private struct DocList: View {
       ForEach(items) { i in
         VStack(alignment: .leading, spacing: 4) {
           Attachment(convId: convId, file: i.file, mine: false) { _ in }
-          Text(when(i.m)).font(.caption).foregroundStyle(Color.mut)
+          Text(Format.shortTime(i.m.message.createdAt)).font(.caption).foregroundStyle(Color.mut)
         }
         .listRowBackground(Color.bg)
       }

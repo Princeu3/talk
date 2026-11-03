@@ -48,6 +48,9 @@ enum Format {
     return files.count == 1 ? first.name : "\(files.count) files"
   }
 
+  // A link's host without "www.", as cards and shared links show it.
+  static func host(_ url: URL) -> String? { url.host().map { $0.hasPrefix("www.") ? String($0.dropFirst(4)) : $0 } }
+
   static func size(_ n: Int) -> String { ByteCountFormatter.string(fromByteCount: Int64(n), countStyle: .file) }
 
   // "typing…" in a DM; a group names up to two people, then counts.
