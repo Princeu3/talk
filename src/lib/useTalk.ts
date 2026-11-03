@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, ApiError, socket } from './api.ts'
 import * as c from './crypto.ts'
 import { names, userName } from './format.ts'
-import type { Conversation, FileRef, GroupCall, Me, Message, MessageBody, Reaction, ReactionBody, Voice } from '../../shared/types.ts'
+import type { Conversation, FileRef, GroupCall, LinkPreview, Me, Message, MessageBody, Reaction, ReactionBody, Voice } from '../../shared/types.ts'
 
 export interface Decrypted extends Message {
   content: MessageBody | null // null: could not decrypt
@@ -46,6 +46,35 @@ async function openReaction(key: CryptoKey, convId: string, messageId: number, r
     return b.from === r.userId && b.to === messageId && typeof b.emoji === 'string' && b.emoji.length <= 16 ? b.emoji : null
   } catch {
     return null
+  }
+}
+
+// A link's card for the composer. The server reads the page (the web can't fetch other sites);
+// `url` stays the link as typed, so anyone can tell whether it's still in the text.
+export async function unfurl(link: string): Promise<LinkPreview> {
+  const r = await api<LinkPreview & { imageType?: string }>('POST', '/api/unfurl', { url: link })
+  const image = r.image && (await shrink(r.image, r.imageType).catch(() => undefined))
+  return { url: link, title: r.title, description: r.description, site: r.site, image }
+}
+
+// The wire's thumbnail: JPEG, longest side ≤ 320 px, ≤ 24 KB. Steps quality, then size, down until it fits; else none.
+async function shrink(b64: string, type?: string) {
+  const bmp = await createImageBitmap(new Blob([Uint8Array.from(atob(b64), (ch) => ch.charCodeAt(0))], { type }))
+  try {
+    for (let side = 320; side >= 80; side = Math.round(side * 0.75)) {
+      const k = Math.min(1, side / Math.max(bmp.width, bmp.height))
+      const canvas = new OffscreenCanvas(Math.max(1, Math.round(bmp.width * k)), Math.max(1, Math.round(bmp.height * k)))
+      const ctx = canvas.getContext('2d')!
+      ctx.fillStyle = '#fff' // JPEG has no transparency; a logo's clear parts would turn black
+      ctx.fillRect(0, 0, canvas.width, canvas.height)
+      ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height)
+      for (const quality of [0.8, 0.6, 0.4]) {
+        const jpeg = new Uint8Array(await (await canvas.convertToBlob({ type: 'image/jpeg', quality })).arrayBuffer())
+        if (jpeg.length <= 24 * 1024) return btoa(String.fromCharCode(...jpeg))
+      }
+    }
+  } finally {
+    bmp.close()
   }
 }
 
@@ -384,7 +413,7 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
   }
   const discard = (p: Pending) => patch(p, null)
 
-  const sendWithFiles = async (convId: string, text: string, files: File[], voice?: Voice, extra?: Pick<MessageBody, 'reply' | 'forwarded'>) => {
+  const sendWithFiles = async (convId: string, text: string, files: File[], voice?: Voice, extra?: Pick<MessageBody, 'reply' | 'forwarded' | 'preview'>) => {
     const { key } = await keyFor(convId)
     const refs: FileRef[] = []
     for (const f of files) {
@@ -459,9 +488,10 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
     update(m.convId, m.id, (x) => ({ ...x, reacts: withReaction(x.reacts, myId, off ? null : emoji) }))
   }
 
-  // New text, everything else (reply, files, forwarded) kept.
+  // New text, everything else (reply, files, forwarded) kept; a link card only while its link is still in the text.
   const edit = async (m: Decrypted, text: string) => {
-    const body = await seal(m.convId, { ...m.content, text, from: meRef.current!.user.id })
+    const card = m.content?.preview
+    const body = await seal(m.convId, { ...m.content, text, preview: card && text.includes(card.url) ? card : undefined, from: meRef.current!.user.id })
     const { message } = await api<{ message: Message }>('PATCH', `/api/messages/${m.id}`, { body })
     await applyEdit(message)
   }
@@ -473,12 +503,12 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
 
   // Files are decrypted here and sealed again with the other chat's key.
   const forward = async (m: Decrypted, convId: string) => {
-    const { text, files } = m.content!
-    if (!files?.length) return send(convId, { text, forwarded: true })
+    const { text, files, preview } = m.content!
+    if (!files?.length) return send(convId, { text, preview, forwarded: true })
     const plain = await Promise.all(
       files.map(async (f) => new File([await (await fetch(await fileUrl(m.convId, f))).blob()], f.name, { type: f.type })),
     )
-    await sendWithFiles(convId, text ?? '', plain, files[0].voice, { forwarded: true })
+    await sendWithFiles(convId, text ?? '', plain, files[0].voice, { forwarded: true, preview })
   }
 
   const typing = (convId: string) => {

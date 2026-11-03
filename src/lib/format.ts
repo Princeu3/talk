@@ -90,6 +90,8 @@ export function snippet(text: string, q: string): [string, string, string] | nul
   return [(from > line ? '…' : '') + text.slice(from, s), text.slice(s, e), text.slice(e, stop < 0 ? undefined : stop)]
 }
 
+export const URL_RE = /(https?:\/\/[^\s<]+[^\s<.,:;"')\]!?])/g
+
 export const host = (url: string) => {
   try {
     return new URL(url).hostname.replace(/^www\./, '')

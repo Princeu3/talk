@@ -3,18 +3,18 @@ import {
   type ClipboardEvent, type CSSProperties, type FormEvent, type KeyboardEvent, type MouseEvent, type PointerEvent, type ReactNode,
 } from 'react'
 import type { Talk, Decrypted } from '../lib/useTalk.ts'
-import type { CallKind, FileRef, Voice } from '../../shared/types.ts'
-import { callNoun, callSummary, convName, dayLabel, fileSize, preview, typingLabel, userName, who } from '../lib/format.ts'
+import { unfurl } from '../lib/useTalk.ts'
+import type { CallKind, FileRef, LinkPreview, Voice } from '../../shared/types.ts'
+import { callNoun, callSummary, convName, dayLabel, fileSize, host, preview, typingLabel, URL_RE, userName, who } from '../lib/format.ts'
 import { canRecord, startRecording, type Recording } from '../lib/voice.ts'
 import { Avatar } from './Sidebar.tsx'
-import { Back, Check, Clip, Close, Copy, FileIcon, Flag, Forward, Lock, Mic, More, Pencil, Phone, Reply, Send, Trash, Video } from './icons.tsx'
+import { Back, Check, Clip, Close, Copy, FileIcon, Flag, Forward, LinkIcon, Lock, Mic, More, Pencil, Phone, Reply, Send, Trash, Video } from './icons.tsx'
 import { iconButton } from './Sidebar.tsx'
 import { VoicePlayer, VoiceRecorder } from './Voice.tsx'
 import { Confirm, ForwardSheet, Report, Sheet, useEscape } from './Sheets.tsx'
 import ChatInfo from './ChatInfo.tsx'
 
 const AUTO_LOAD = 25 * 1024 * 1024
-const URL_RE = /(https?:\/\/[^\s<]+[^\s<.,:;"')\]!?])/g
 const RUN_GAP = 5 * 60_000
 const EDIT_MS = 15 * 60_000 // the server's window
 const EMOJI = ['👍', '❤️', '😂', '😮', '😢', '🙏']
@@ -79,6 +79,20 @@ function Linkified({ text }: { text: string }) {
         ),
       )}
     </>
+  )
+}
+
+// A link's card, sealed in the message by the sender's device; only http(s) links open.
+function LinkCard({ p }: { p: LinkPreview }) {
+  if (!/^https?:\/\//i.test(p.url)) return null
+  return (
+    <a href={p.url} target="_blank" rel="noopener noreferrer" className="block w-72 max-w-full overflow-hidden whitespace-normal rounded-xl bg-ink/8">
+      {p.image && <img src={`data:image/jpeg;base64,${p.image}`} alt="" className="max-h-44 w-full object-cover" />}
+      <span className="block px-3 py-2">
+        {(p.title || p.description) && <span className="line-clamp-2 text-sm font-semibold">{p.title || p.description}</span>}
+        <span className="block truncate text-xs text-ink/80">{p.site || host(p.url)}</span>
+      </span>
+    </a>
   )
 }
 
@@ -201,6 +215,7 @@ function Bubble({ m, mine, first, last, talk, onCall, onZoom, onJump }: {
       )}
       {c.files?.map((f) => <Attachment key={f.id} talk={talk} convId={m.convId} file={f} onZoom={onZoom} />)}
       {c.text && <span><Linkified text={c.text} /></span>}
+      {c.preview && <LinkCard p={c.preview} />}
       {m.forged && <span className={`text-xs ${mine ? '' : 'text-danger'}`}>Warning: the sender could not be verified</span>}
     </div>
   )
@@ -311,6 +326,8 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
   const [menu, setMenu] = useState<{ m: Decrypted; at: DOMRect } | null>(null)
   const [act, setAct] = useState<{ kind: 'delete' | 'forward' | 'report' | 'reactions'; m: Decrypted } | null>(null)
   const [info, setInfo] = useState(false)
+  const [card, setCard] = useState<LinkPreview | null>(null) // the composer's link card, for card.url
+  const [dropped, setDropped] = useState<string[]>([]) // links whose card was dismissed
   const recRef = useRef<Recording | null>(null)
   recRef.current = rec
   const starting = useRef(false)
@@ -350,8 +367,23 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
     setMenu(null)
     setAct(null)
     setInfo(false)
+    setCard(null)
+    setDropped([])
     return () => recRef.current?.cancel()
   }, [convId])
+
+  // The first link typed gets a card once typing pauses. Failures (a link the server won't read, the rate limit) mean no card.
+  const link = editing ? undefined : text.match(URL_RE)?.[0]
+  const shown = card && card.url === link && !dropped.includes(link) ? card : null
+  useEffect(() => {
+    if (!link || card?.url === link || dropped.includes(link)) return
+    let live = true
+    const t = setTimeout(() => unfurl(link).then((p) => live && setCard(p), () => {}), 500)
+    return () => {
+      live = false
+      clearTimeout(t)
+    }
+  }, [link, card, dropped])
 
   // Opened at a message (search, shared media): scroll to it once it's rendered.
   const { focus, setFocus } = talk
@@ -444,14 +476,15 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
     if ((!t && !files.length) || busy) return
     setBusy(true)
     setError('')
-    const sending = { t: text, f: files, r: reply }
+    // A card goes along only if it's ready by now: sending never waits for one.
+    const sending = { t: text, f: files, r: reply, extra: { ...quote(reply), preview: shown ?? undefined } }
     setText('')
     setFiles([])
     setReply(null)
     stick.current = true
     try {
-      if (sending.f.length) await talk.sendWithFiles(convId, t, sending.f, undefined, quote(sending.r))
-      else await talk.send(convId, { text: t, ...quote(sending.r) })
+      if (sending.f.length) await talk.sendWithFiles(convId, t, sending.f, undefined, sending.extra)
+      else await talk.send(convId, { text: t, ...sending.extra })
     } catch (err) {
       setText(sending.t)
       setFiles(sending.f)
@@ -727,6 +760,22 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
               <p className="truncate text-sm text-mut">{preview((editing ?? reply)!.content, (editing ?? reply)!.senderId === me.user.id)}</p>
             </div>
             <button type="button" onClick={cancelCompose} aria-label={editing ? 'Cancel editing' : 'Cancel reply'} className={`${iconButton} text-mut`}>
+              <Close size={18} />
+            </button>
+          </div>
+        )}
+        {shown && (
+          <div className="flex items-center gap-3 pb-2 pl-3">
+            {shown.image ? (
+              <img src={`data:image/jpeg;base64,${shown.image}`} alt="" className="h-11 w-11 shrink-0 rounded-lg object-cover" />
+            ) : (
+              <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-raised text-mut"><LinkIcon size={18} /></span>
+            )}
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-sm font-semibold">{shown.title || shown.description}</p>
+              <p className="truncate text-sm text-mut">{shown.site || host(shown.url)}</p>
+            </div>
+            <button type="button" onClick={() => setDropped((d) => [...d, shown.url])} aria-label="Remove link preview" className={`${iconButton} text-mut`}>
               <Close size={18} />
             </button>
           </div>
