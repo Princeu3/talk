@@ -54,6 +54,13 @@ final class Talk {
   @ObservationIgnored private var forgotten = false // signed out: a late delivery mustn't write the cache back
   @ObservationIgnored private var typedAt: [String: Date] = [:] // my last typing signal per chat
   @ObservationIgnored private var heard = 0 // messages received, so a reload can tell it raced one
+  // shortcut: each chat's whole history, decrypted in memory for the session and scanned on every search;
+  // upgrade to an FTS5 index once a device's history makes the first search slow.
+  @ObservationIgnored private var archive: [String: [Decrypted]] = [:] // pages fetched for search and shared media, oldest first
+  @ObservationIgnored private var archiving: [String: Task<Void, Never>] = [:]
+  @ObservationIgnored private var bumping = false
+  private(set) var complete = Set<String>() // chats archived back to their first message
+  private(set) var progress = 0 // bumped as pages arrive, at most every 0.4 s, so views re-run without redrawing per page
   private static let page = 50
   static let emoji = ["👍", "❤️", "😂", "😮", "😢", "🙏"]
 
@@ -89,8 +96,7 @@ final class Talk {
         d.message.reactions = old.message.reactions
         d.reactions = old.reactions
       }
-      merge(msg.convId, [d])
-      save()
+      replace(d)
     }
     // A `sync` follows, for previews and unread counts.
     socket.on("unsend") { [weak self] data in
@@ -146,7 +152,7 @@ final class Talk {
   // MARK: - loading
 
   @discardableResult
-  func load() async throws -> Me {
+  func load(retried: Bool = false) async throws -> Me {
     let before = heard
     var m: Me
     do { m = try await api.call("GET", "/api/me") } catch let e as APIError where e.status == 401 {
@@ -154,7 +160,11 @@ final class Talk {
       throw e
     }
     // A message landed mid-fetch (a rename's sync, then its line): this answer may predate it and undo its bump.
-    if heard != before { return try await load() }
+    // Asked once more, not forever: a busy chat could otherwise keep this fetching.
+    if heard != before, !retried { return try await load(retried: true) }
+    // Left or removed: that chat's archive goes. A block or unblock changes what the server sends: all of it goes.
+    let kept = Set(m.conversations.map(\.id)), held = Set(archive.keys).union(archiving.keys)
+    dropArchive(m.blocked != me?.blocked ? held : held.subtracting(kept))
     m.conversations = m.conversations.map { c in
       var c = c
       if visible && c.id == activeId { c.unread = 0 }
@@ -273,6 +283,14 @@ final class Talk {
 
   private func drop(_ convId: String, _ id: Int) {
     messages[convId]?.removeAll { $0.id == id }
+    archive[convId]?.removeAll { $0.id == id }
+    save()
+  }
+
+  // An edited message, in the chat and in the archive.
+  private func replace(_ d: Decrypted) {
+    merge(d.message.convId, [d])
+    if let i = archive[d.message.convId]?.firstIndex(where: { $0.id == d.id }) { archive[d.message.convId]?[i] = d }
     save()
   }
 
@@ -288,6 +306,97 @@ final class Talk {
     guard var m = me, let i = m.conversations.firstIndex(where: { $0.id == id }) else { return }
     f(&m.conversations[i])
     me = m
+  }
+
+  // MARK: - history archive (search, shared media)
+
+  // A chat's messages, oldest first: the archive with the open chat's around it. Never a blocked person's.
+  func history(_ convId: String) -> [Decrypted] {
+    let old = archive[convId] ?? [], now = messages[convId] ?? []
+    let lo = old.first?.id ?? .max, hi = old.last?.id ?? 0
+    let all = now.filter { $0.id < lo } + old + now.filter { $0.id > hi }
+    let blocked = Set(me?.blocked ?? [])
+    return blocked.isEmpty ? all : all.filter { !blocked.contains($0.message.senderId) }
+  }
+
+  // Pages one chat back to its first message, 500 at a time, once per session. The first page is the newest,
+  // not the oldest we hold: the offline cache can skip messages that came while the app was closed.
+  func backfill(_ convId: String) async {
+    if complete.contains(convId) { return }
+    if let t = archiving[convId] { return await t.value }
+    let t = Task {
+      do {
+        _ = try await rawKey(convId)
+        while true {
+          let before = archive[convId]?.first.map { "&before=\($0.id)" } ?? ""
+          let page: [Message] = try await api.call("GET", "/api/conversations/\(convId)/messages?limit=500\(before)")
+          if Task.isCancelled { return } // dropped meanwhile (left the chat, a block)
+          archive[convId] = page.map(decrypt) + (archive[convId] ?? [])
+          if page.count < 500 { complete.insert(convId) }
+          bump()
+          if page.count < 500 { break }
+        }
+      } catch {} // offline: the next search picks up from the oldest page we have
+      if !Task.isCancelled { archiving[convId] = nil }
+    }
+    archiving[convId] = t
+    await t.value
+  }
+
+  // Every chat, in list order, three at a time.
+  func backfillAll() async {
+    let ids = (me?.conversations ?? []).map(\.id).filter { !complete.contains($0) }
+    await withTaskGroup(of: Void.self) { g in
+      for (i, id) in ids.enumerated() {
+        if i >= 3 { _ = await g.next() }
+        if Task.isCancelled { break }
+        g.addTask { await self.backfill(id) }
+      }
+    }
+  }
+
+  private func bump() {
+    guard !bumping else { return }
+    bumping = true
+    Task {
+      try? await Task.sleep(for: .milliseconds(400))
+      bumping = false
+      progress += 1
+    }
+  }
+
+  private func dropArchive(_ ids: Set<String>) {
+    for id in ids {
+      archiving.removeValue(forKey: id)?.cancel()
+      archive[id] = nil
+      if complete.contains(id) { complete.remove(id) }
+    }
+  }
+
+  // Opens a chat at an archived message: the archive from it to the newest joins the chat, so the thread can scroll there.
+  func reveal(_ convId: String, _ id: Int) {
+    let have = Set((messages[convId] ?? []).map(\.id))
+    let slice = (archive[convId] ?? []).filter { $0.id >= id && !have.contains($0.id) }
+    if !slice.isEmpty { merge(convId, slice) }
+  }
+
+  struct Found: Identifiable {
+    let convId: String
+    let m: Decrypted
+    let line: String // the text line, file name or link title that matched
+    var id: Int { m.id }
+  }
+
+  // Messages matching a query of 2+ characters, newest first, at most 200.
+  func search(_ q: String) -> [Found] {
+    guard q.count >= 2 else { return [] }
+    var out: [Found] = []
+    for c in me?.conversations ?? [] {
+      for d in history(c.id) {
+        if let b = d.content, let line = Search.hit(b, q) { out.append(Found(convId: c.id, m: d, line: line)) }
+      }
+    }
+    return Array(out.sorted { $0.id > $1.id }.prefix(200))
   }
 
   // MARK: - offline cache
@@ -344,8 +453,9 @@ final class Talk {
 
   // Sealed, saved, then sent; returns once queued. A failure shows on the pending row.
   func send(_ convId: String, text: String? = nil, files refs: [FileRef]? = nil, call: CallLog? = nil, reply: Reply? = nil, forwarded: Bool? = nil,
-            system: Bool? = nil, quiet: Bool = false, seen: Bool = false) async throws {
-    let sealed = try await seal(convId, MessageBody(from: account.userId, text: text, files: refs, call: call, reply: reply, forwarded: forwarded, system: system))
+            preview: LinkPreview? = nil, system: Bool? = nil, quiet: Bool = false, seen: Bool = false) async throws {
+    let body = MessageBody(from: account.userId, text: text, files: refs, call: call, reply: reply, forwarded: forwarded, system: system, preview: preview)
+    let sealed = try await seal(convId, body)
     let p = Pending(cid: UUID().uuidString.lowercased(), convId: convId, body: sealed, createdAt: Date().timeIntervalSince1970 * 1000, quiet: quiet, seen: seen, sending: socket.connected)
     pending.append(p)
     save(now: true)
@@ -403,12 +513,12 @@ final class Talk {
   func edit(_ d: Decrypted, text: String) async throws {
     guard var body = d.content else { return }
     body.text = text
+    if body.preview?.fits(text) == false { body.preview = nil } // the card stays while its link does
     let convId = d.message.convId
     let sealed = try await seal(convId, body)
     struct Edited: Decodable { let message: Message }
     let r: Edited = try await api.call("PATCH", "/api/messages/\(d.message.id)", ["body": sealed])
-    merge(convId, [decrypt(r.message)])
-    save()
+    replace(decrypt(r.message))
   }
 
   func unsend(_ d: Decrypted) async throws {
@@ -425,7 +535,7 @@ final class Talk {
       let data = f.size > Self.inMemory && f.voice == nil ? try Data(contentsOf: try await save(from, f)) : try await file(from, f)
       refs.append(try await upload(convId, data, name: f.name, type: f.type, voice: f.voice))
     }
-    try await send(convId, text: c.text, files: refs.isEmpty ? nil : refs, forwarded: true)
+    try await send(convId, text: c.text, files: refs.isEmpty ? nil : refs, forwarded: true, preview: c.preview)
   }
 
   // At most every 3 s; the others drop it 6 s after the last one.

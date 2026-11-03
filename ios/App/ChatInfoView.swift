@@ -1,4 +1,6 @@
+import ImageIO
 import SwiftUI
+import UniformTypeIdentifiers
 
 // Pushed from a chat's header: who's in it, its settings, and the people actions.
 struct ChatInfoView: View {
@@ -46,6 +48,8 @@ struct ChatInfoView: View {
           .frame(maxWidth: .infinity)
           .listRowBackground(Color.clear)
         }
+
+        mediaRow
 
         if let peer, let u = talk.user(peer) {
           Section {
@@ -114,6 +118,12 @@ struct ChatInfoView: View {
       } message: { Text($0) }
       .sheet(isPresented: $adding) { AddPeopleView(conv: conv) }
       .sheet(item: $member) { MemberSheet(convId: convId, userId: $0.id) }
+    }
+  }
+
+  private var mediaRow: some View {
+    Section {
+      NavigationLink { SharedMedia(convId: convId) } label: { Label("Media, links and docs", systemImage: "photo.on.rectangle") }
     }
   }
 
@@ -252,4 +262,219 @@ private struct AddPeopleView: View {
 
   // In name order, so the "added" line reads the same everywhere.
   private func people(_ ids: Set<String>) -> [String] { ids.sorted { talk.name($0) < talk.name($1) } }
+}
+
+private struct FileItem: Identifiable {
+  let m: Decrypted
+  let file: FileRef
+  var id: String { file.id }
+}
+
+private struct LinkItem: Identifiable {
+  let m: Decrypted
+  let url: URL
+  let title: String?
+  let site: String
+  var id: String { "\(m.id) \(url.absoluteString)" }
+}
+
+private func when(_ m: Decrypted) -> String { Date(timeIntervalSince1970: m.message.createdAt / 1000).formatted(date: .abbreviated, time: .omitted) }
+
+// Media, links and docs: what the chat's history holds, newest first, filling in as older pages arrive.
+private struct SharedMedia: View {
+  @Environment(Talk.self) private var talk
+  let convId: String
+  @State private var tab = Tab.media
+  @State private var zoom: UIImage?
+
+  enum Tab: String, CaseIterable { case media = "Media", links = "Links", docs = "Docs" }
+
+  var body: some View {
+    let _ = talk.progress // pages arriving re-read the history
+    let list = Array(talk.history(convId).reversed())
+    let done = talk.complete.contains(convId)
+    Group {
+      switch tab {
+      case .media: MediaGrid(convId: convId, items: files(list, media: true), done: done) { zoom = $0 }
+      case .links: LinkList(items: links(list), done: done)
+      case .docs: DocList(convId: convId, items: files(list, media: false), done: done)
+      }
+    }
+    .background(Color.bg)
+    .navigationTitle("Media, links and docs")
+    .navigationBarTitleDisplayMode(.inline)
+    .toolbar {
+      ToolbarItem(placement: .principal) {
+        Picker("Show", selection: $tab) { ForEach(Tab.allCases, id: \.self) { Text($0.rawValue) } }
+          .pickerStyle(.segmented).frame(width: 260)
+      }
+    }
+    .photoViewer($zoom)
+    .task { await talk.backfill(convId) }
+  }
+
+  // Photos and videos, or every other file; never voice messages.
+  private func files(_ list: [Decrypted], media: Bool) -> [FileItem] {
+    var out: [FileItem] = []
+    for m in list {
+      for f in m.content?.files ?? [] where f.voice == nil && (f.type.hasPrefix("image/") || f.type.hasPrefix("video/")) == media {
+        out.append(FileItem(m: m, file: f))
+      }
+    }
+    return out
+  }
+
+  // A message's card, else the links in its text. The detector is slow over a long history, so only texts that look linked.
+  private func links(_ list: [Decrypted]) -> [LinkItem] {
+    var out: [LinkItem] = []
+    for m in list {
+      guard let c = m.content, !m.system else { continue }
+      if let p = c.preview, let url = p.web {
+        out.append(LinkItem(m: m, url: url, title: p.title, site: p.label))
+      } else if let t = c.text, t.contains("http") || t.contains("www.") {
+        for url in LinkPreview.links(in: t) { out.append(LinkItem(m: m, url: url, title: nil, site: url.host() ?? "")) }
+      }
+    }
+    return out
+  }
+}
+
+// Under a tab: a spinner while older pages arrive, then a note if nothing turned up.
+private struct Pages: View {
+  let done: Bool
+  let empty: Bool
+  let none: String
+
+  var body: some View {
+    if !done {
+      ProgressView().frame(maxWidth: .infinity).padding()
+    } else if empty {
+      Text(none).foregroundStyle(Color.mut).frame(maxWidth: .infinity).padding(.vertical, 40)
+    }
+  }
+}
+
+private struct MediaGrid: View {
+  let convId: String
+  let items: [FileItem]
+  let done: Bool
+  let onZoom: (UIImage) -> Void
+
+  var body: some View {
+    ScrollView {
+      LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 2), count: 3), spacing: 2) {
+        ForEach(items) { MediaCell(convId: convId, file: $0.file, onZoom: onZoom) }
+      }
+      Pages(done: done, empty: items.isEmpty, none: "No photos or videos")
+    }
+  }
+}
+
+// A photo opens in the viewer; a video goes to the share sheet, as in the chat (which has no player).
+private struct MediaCell: View {
+  @Environment(Talk.self) private var talk
+  let convId: String
+  let file: FileRef
+  let onZoom: (UIImage) -> Void
+  @State private var thumb: UIImage?
+
+  private var video: Bool { file.type.hasPrefix("video/") }
+  private var big: Bool { file.size > Talk.inMemory }
+
+  var body: some View {
+    if video {
+      ShareLink(item: SealedVideo(talk: talk, convId: convId, file: file), preview: SharePreview(file.name)) { square }
+    } else {
+      Button(action: open) { square }
+        .accessibilityLabel("Open \(file.name)")
+        // Through the chat's decrypting loader and its cache; big ones wait for a tap, as in the chat.
+        .task(id: file.id) {
+          guard !big, let data = try? await talk.file(convId, file) else { return }
+          thumb = await Self.small(data)
+        }
+    }
+  }
+
+  private var square: some View {
+    Color.raised.aspectRatio(1, contentMode: .fit)
+      .overlay {
+        if let thumb {
+          Image(uiImage: thumb).resizable().scaledToFill()
+        } else {
+          Image(systemName: video ? "play.fill" : "photo").font(.title2).foregroundStyle(Color.mut)
+        }
+      }
+      .clipped()
+  }
+
+  private func open() {
+    Task {
+      if big {
+        if let url = try? await talk.save(convId, file), let img = await Attachment.downsample(url) { onZoom(img) }
+      } else if let data = try? await talk.file(convId, file), let img = UIImage(data: data) {
+        onZoom(img)
+      }
+    }
+  }
+
+  // A grid square needs a few hundred pixels, not a whole 48 MP photo.
+  @concurrent nonisolated private static func small(_ data: Data) async -> UIImage? {
+    let opts = [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceCreateThumbnailWithTransform: true, kCGImageSourceThumbnailMaxPixelSize: 360] as CFDictionary
+    guard let src = CGImageSourceCreateWithData(data as CFData, nil), let img = CGImageSourceCreateThumbnailAtIndex(src, 0, opts) else { return nil }
+    return UIImage(cgImage: img)
+  }
+}
+
+// A video, decrypted only when the share sheet asks for it.
+private struct SealedVideo: Transferable {
+  let talk: Talk
+  let convId: String
+  let file: FileRef
+
+  static var transferRepresentation: some TransferRepresentation {
+    FileRepresentation(exportedContentType: .movie) { v in SentTransferredFile(try await v.talk.save(v.convId, v.file)) }
+  }
+}
+
+private struct LinkList: View {
+  @Environment(\.openURL) private var openURL
+  let items: [LinkItem]
+  let done: Bool
+
+  var body: some View {
+    List {
+      ForEach(items) { i in
+        Button { openURL(i.url) } label: {
+          VStack(alignment: .leading, spacing: 2) {
+            Text(i.title ?? i.url.absoluteString).foregroundStyle(Color.ink).lineLimit(2)
+            Text("\(i.site) · \(when(i.m))").font(.caption).foregroundStyle(Color.mut).lineLimit(1)
+          }
+        }
+        .listRowBackground(Color.bg)
+      }
+      Pages(done: done, empty: items.isEmpty, none: "No links").listRowBackground(Color.bg).listRowSeparator(.hidden)
+    }
+    .listStyle(.plain)
+  }
+}
+
+// Each file as the chat shows it (tap to download a big one, then share), with its date.
+private struct DocList: View {
+  let convId: String
+  let items: [FileItem]
+  let done: Bool
+
+  var body: some View {
+    List {
+      ForEach(items) { i in
+        VStack(alignment: .leading, spacing: 4) {
+          Attachment(convId: convId, file: i.file, mine: false) { _ in }
+          Text(when(i.m)).font(.caption).foregroundStyle(Color.mut)
+        }
+        .listRowBackground(Color.bg)
+      }
+      Pages(done: done, empty: items.isEmpty, none: "No documents").listRowBackground(Color.bg).listRowSeparator(.hidden)
+    }
+    .listStyle(.plain)
+  }
 }

@@ -8,6 +8,7 @@ struct CallScreen: View {
   @Environment(Calls.self) private var calls
   let call: CallView
   @State private var chrome = true
+  @State private var adding = false
 
   var body: some View {
     // A group shows its title, or the one other person's name once it's down to two.
@@ -47,7 +48,7 @@ struct CallScreen: View {
             Label("End-to-end encrypted", systemImage: "lock.fill").font(.caption).opacity(0.7)
           }
           Spacer()
-          Color.clear.frame(width: 44, height: 44)
+          addButton
         }
         .padding(.horizontal, 8)
 
@@ -82,6 +83,7 @@ struct CallScreen: View {
       .animation(.easeInOut(duration: 0.3), value: chrome)
     }
     .foregroundStyle(.white)
+    .sheet(isPresented: $adding) { RingSheet(convId: call.convId) } // after the white text, so the sheet keeps the app's colors
     .contentShape(.rect)
     .onTapGesture { chrome.toggle() }
     .task(id: chrome) {
@@ -93,6 +95,16 @@ struct CallScreen: View {
   }
 
   private var status: String { CallBar.status(call) }
+
+  // A group call we're in can ring more of the chat.
+  @ViewBuilder private var addButton: some View {
+    if call.group != nil, call.phase != .incoming, call.phase != .ended {
+      Button("Add people", systemImage: "person.badge.plus") { adding = true }
+        .labelStyle(.iconOnly).font(.title2).frame(width: 44, height: 44)
+    } else {
+      Color.clear.frame(width: 44, height: 44)
+    }
+  }
 
   private func round(_ label: String, _ icon: String, pressed: Bool = false, tone: Color = .white.opacity(0.15), action: @escaping () -> Void) -> some View {
     Button(label, systemImage: icon, action: action)
@@ -196,18 +208,67 @@ private struct TileGrid: View {
   }
 }
 
-// The green Join on a chat with a group call on (chat list, chat banner).
+// Join on a chat with a group call on (chat list, chat banner), as on the web.
 struct JoinPill: View {
   var label = "Join"
+  let kind: String
   let action: () -> Void
 
   var body: some View {
     Button(action: action) {
-      Text(label).font(.subheadline.weight(.semibold))
+      Label(label, systemImage: kind == "video" ? "video.fill" : "phone.fill").font(.subheadline.weight(.semibold))
         .padding(.horizontal, 14).padding(.vertical, 6)
-        .background(Color.acceptCall, in: .capsule).foregroundStyle(.white)
+        .background(Color.fill, in: .capsule).foregroundStyle(Color.onFill)
     }
     .buttonStyle(.borderless)
+  }
+}
+
+// Add people: the chat's members who aren't in the call, each rung with a tap.
+private struct RingSheet: View {
+  @Environment(Talk.self) private var talk
+  @Environment(Calls.self) private var calls
+  @Environment(\.dismiss) private var dismiss
+  let convId: String
+  @State private var error: String?
+
+  var body: some View {
+    let live = talk.me?.conversations.first { $0.id == convId }?.call
+    NavigationStack {
+      List {
+        let people = outside(live)
+        if people.isEmpty { Text("Everyone in this chat is in the call.").foregroundStyle(Color.mut) }
+        ForEach(people, id: \.self) { row($0, ringing: live?.ringing?.contains($0) == true) }
+        if let error { Text(error).foregroundStyle(Color.danger) }
+      }
+      .navigationTitle("Add people")
+      .navigationBarTitleDisplayMode(.inline)
+      .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+    }
+    .tint(Color.accent)
+    .presentationDetents([.medium, .large])
+    .presentationBackground(Color.bg) // over the black call screen, the default glass turns grey
+  }
+
+  // In the chat, not in the call, by name.
+  private func outside(_ live: GroupCall?) -> [String] {
+    let conv = talk.me?.conversations.first { $0.id == convId }
+    return (conv?.members ?? []).filter { $0 != talk.account.userId && live?.peers.contains($0) != true && talk.user($0)?.deleted != true }
+      .sorted { talk.name($0) < talk.name($1) }
+  }
+
+  private func row(_ userId: String, ringing: Bool) -> some View {
+    HStack(spacing: 12) {
+      Avatar(name: talk.name(userId), size: 40)
+      Text(talk.name(userId)).foregroundStyle(Color.ink)
+      Spacer()
+      if ringing {
+        Text("Ringing…").font(.subheadline).foregroundStyle(Color.mut)
+      } else {
+        Button("Ring") { Task { error = await calls.ring(userId) } }
+          .buttonStyle(.borderedProminent).buttonBorderShape(.capsule).tint(Color.fill).foregroundStyle(Color.onFill)
+      }
+    }
   }
 }
 
