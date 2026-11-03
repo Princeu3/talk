@@ -26,7 +26,8 @@ final class Socket {
     var c = URLComponents(url: account.server, resolvingAgainstBaseURL: false)!
     c.scheme = c.scheme == "http" ? "ws" : "wss"
     c.path = "/socket.io/"
-    c.queryItems = [.init(name: "EIO", value: "4"), .init(name: "transport", value: "websocket")]
+    // v=2: this app knows group calls and the chat events that came with them (server/index.ts).
+    c.queryItems = [.init(name: "EIO", value: "4"), .init(name: "transport", value: "websocket"), .init(name: "v", value: "2")]
     url = c.url!
     cookie = account.cookie
     // Network back (out of a tunnel, wifi joined): reconnect now, not at the next backoff.

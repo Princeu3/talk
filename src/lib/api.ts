@@ -22,4 +22,5 @@ export async function api<T>(method: string, url: string, body?: unknown): Promi
 }
 
 // Connects only after sign-in; the session cookie authenticates the handshake.
-export const socket = io({ autoConnect: false, transports: ['websocket'] })
+// v=2: this app knows group calls and the chat events that came with them (server/index.ts).
+export const socket = io({ autoConnect: false, transports: ['websocket'], query: { v: '2' } })

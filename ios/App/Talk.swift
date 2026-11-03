@@ -417,7 +417,8 @@ final class Talk {
     let env = "production"
     #endif
     UserDefaults.standard.set(hex, forKey: "token.\(kind)")
-    Task { let _: OK? = try? await api.call("POST", "/api/devices", ["token": hex, "kind": kind, "env": env]) }
+    // v: 2 knows group calls, so the server rings this phone for them.
+    Task { let _: OK? = try? await api.call("POST", "/api/devices", ["token": hex, "kind": kind, "env": env, "v": 2]) }
   }
 
   func signOut() async {

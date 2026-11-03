@@ -20,6 +20,18 @@ nonisolated struct Conversation: Codable, Identifiable, Hashable, Sendable {
   var lastMessageAt: Double?
   var lastMessage: Message?
   var unread: Int
+  var reads: [String: Int]? // each member's last read message id, for read receipts
+  var muted: Bool? // mine: no pushes for messages or group call rings
+  var pinned: Bool? // mine: listed first
+  var call: GroupCall? // a group call on now
+}
+
+// A live group call, as the chat's members see it. `peers` are the user ids in it.
+nonisolated struct GroupCall: Codable, Hashable, Sendable {
+  let id: String
+  let kind: String // "audio" | "video"
+  let from: String // who started it
+  let peers: [String]
 }
 
 nonisolated struct Message: Codable, Identifiable, Hashable, Sendable {
@@ -28,6 +40,20 @@ nonisolated struct Message: Codable, Identifiable, Hashable, Sendable {
   let senderId: String
   let body: String
   let createdAt: Double
+  var editedAt: Double?
+  var reactions: [Reaction]?
+}
+
+nonisolated struct Reaction: Codable, Hashable, Sendable {
+  let userId: String
+  let body: String // sealed ReactionBody
+}
+
+// Plaintext inside Reaction.body. `from` and `to` must match the row, or the app ignores it.
+nonisolated struct ReactionBody: Codable, Hashable, Sendable {
+  let from: String
+  let to: Int // message id
+  let emoji: String
 }
 
 // Plaintext inside Message.body.
@@ -36,6 +62,16 @@ nonisolated struct MessageBody: Codable, Hashable, Sendable {
   var text: String?
   var files: [FileRef]?
   var call: CallLog?
+  var reply: Reply?
+  var forwarded: Bool?
+  var system: Bool? // a group event ("Alice added Bob"); `text` holds it, so older apps show it as a message
+}
+
+// Quoted in a reply, so it shows even when the original isn't loaded or was unsent.
+nonisolated struct Reply: Codable, Hashable, Sendable {
+  let id: Int
+  let from: String // user id of the quoted message's sender
+  let preview: String // its text, or "Photo", "Voice message", ...; at most 200 chars
 }
 
 nonisolated struct FileRef: Codable, Hashable, Sendable {
@@ -101,6 +137,7 @@ nonisolated struct CallLog: Codable, Hashable, Sendable {
   var kind: String? // "audio" | "video"
   var ms: Double? // talk time; 0 means nobody answered
   var room: String? // an old meetup call
+  var group: Bool?
 }
 
 nonisolated struct Me: Codable, Sendable {
