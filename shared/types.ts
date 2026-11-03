@@ -18,6 +18,18 @@ export interface Conversation {
   lastMessageAt: number | null
   lastMessage: Message | null // newest message, still sealed; feeds the chat list preview
   unread: number
+  reads?: Record<string, number> // each member's last read message id, for read receipts
+  muted?: boolean // mine: no pushes for messages or group call rings
+  pinned?: boolean // mine: listed first
+  call?: GroupCall // a group call on now
+}
+
+// A live group call, as the chat's members see it. `peers` are the user ids in it.
+export interface GroupCall {
+  id: string
+  kind: CallKind
+  from: string // who started it
+  peers: string[]
 }
 
 export interface Message {
@@ -26,6 +38,20 @@ export interface Message {
   senderId: string
   body: string // sealed JSON (see MessageBody), base64url
   createdAt: number
+  editedAt?: number
+  reactions?: Reaction[]
+}
+
+export interface Reaction {
+  userId: string
+  body: string // sealed ReactionBody
+}
+
+// Plaintext inside Reaction.body. `from` and `to` must match the row, or the client ignores it.
+export interface ReactionBody {
+  from: string
+  to: number // message id
+  emoji: string
 }
 
 // Plaintext inside Message.body after decryption.
@@ -34,6 +60,16 @@ export interface MessageBody {
   text?: string
   files?: FileRef[]
   call?: CallLog
+  reply?: Reply
+  forwarded?: boolean
+  system?: boolean // a group event ("Alice added Bob"); `text` holds it, so older apps show it as a message
+}
+
+// Quoted in a reply, so it shows even when the original isn't loaded or was unsent.
+export interface Reply {
+  id: number
+  from: string // user id of the quoted message's sender
+  preview: string // its text, or "Photo", "Voice message", ...; at most 200 chars
 }
 
 export type CallKind = 'audio' | 'video'
@@ -44,6 +80,7 @@ export interface CallLog {
   kind?: CallKind
   ms?: number // talk time; 0 means nobody answered
   room?: string
+  group?: boolean
 }
 
 // Live call signaling. Nothing here is stored: once a call ends, it's gone.
@@ -52,6 +89,7 @@ export interface CallRing {
   convId: string
   from: string
   kind: CallKind
+  group?: true // set on group rings; older apps never get those
 }
 
 export type CallEnd = 'hangup' | 'declined' | 'cancelled' | 'missed' | 'elsewhere' | 'lost'

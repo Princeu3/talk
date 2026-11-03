@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import type { Calls, CallView } from '../lib/useCall.ts'
+import type { Calls, CallView, Remote } from '../lib/useCall.ts'
 import { clock } from '../lib/voice.ts'
+import { callNoun } from '../lib/format.ts'
 import { Avatar } from './Sidebar.tsx'
 import { ChevronDown, Lock, Mic, MicOff, Phone, SwitchCamera, Video, VideoOff } from './icons.tsx'
 
@@ -11,9 +12,9 @@ const ACCEPT = 'bg-[#30a46c] text-white'
 
 export function status(c: CallView) {
   switch (c.phase) {
-    case 'incoming': return c.kind === 'video' ? 'Video call' : 'Voice call'
-    case 'calling': return 'Calling…'
-    case 'ringing': return 'Ringing…'
+    case 'incoming': return callNoun(c.kind, c.group)
+    case 'calling': return c.group ? 'Waiting for others…' : 'Calling…'
+    case 'ringing': return c.group ? 'Waiting for others…' : 'Ringing…'
     case 'connecting': return 'Connecting…'
     case 'reconnecting': return 'Reconnecting…'
     case 'live': return clock((Date.now() - c.since!) / 1000)
@@ -40,11 +41,32 @@ function useStream<T extends HTMLMediaElement>(stream?: MediaStream) {
 
 const EndIcon = () => <span className="rotate-[135deg]"><Phone size={26} /></span>
 
-// Remote sound plays here, outside the call screen, so it keeps going while the
-// screen is minimized to the bar.
-export function CallAudio({ stream }: { stream?: MediaStream }) {
+function Sound({ stream }: { stream?: MediaStream }) {
   const ref = useStream<HTMLAudioElement>(stream)
   return <audio ref={ref} autoPlay />
+}
+
+// Remote sound plays here, outside the call screen, so it keeps going while the
+// screen is minimized to the bar. One element per person, since not every
+// browser mixes several audio tracks in one stream.
+export function CallAudio({ peers }: { peers: Remote[] }) {
+  return peers.map((p) => <Sound key={p.user} stream={p.stream} />)
+}
+
+// One person in a group call: their video, or their avatar with the camera off.
+function Tile({ peer, name }: { peer: Remote; name: string }) {
+  const ref = useStream<HTMLVideoElement>(peer.stream)
+  const video = peer.camera && !!peer.stream?.getVideoTracks().length
+  return (
+    <div className="relative flex min-h-0 items-center justify-center overflow-hidden rounded-2xl bg-white/10">
+      <video ref={ref} autoPlay playsInline muted className={video ? 'absolute inset-0 h-full w-full object-cover' : 'hidden'} />
+      {!video && <Avatar name={name} size={72} />}
+      <span className="absolute inset-x-0 bottom-0 flex items-center gap-1.5 bg-linear-to-t from-black/50 px-3 pb-2 pt-4 text-sm font-medium">
+        {peer.muted && <MicOff size={14} />}
+        <span className="truncate">{name}</span>
+      </span>
+    </div>
+  )
 }
 
 function Round({ label, caption, tone = 'bg-white/15 text-white hover:bg-white/25', pressed, onClick, children }: {
@@ -74,16 +96,27 @@ function Round({ label, caption, tone = 'bg-white/15 text-white hover:bg-white/2
   )
 }
 
-export function CallScreen({ call, name, calls, onMinimize }: { call: CallView; name: string; calls: Calls; onMinimize: () => void }) {
+export function CallScreen({ call, name, nameOf, calls, onMinimize }: {
+  call: CallView
+  name: string // the person, or the group
+  nameOf: (userId: string) => string
+  calls: Calls
+  onMinimize: () => void
+}) {
   useSecondTick(call.phase === 'live')
-  const remoteRef = useStream<HTMLVideoElement>(call.remote)
-  const localRef = useStream<HTMLVideoElement>(call.local)
+  // One other person fills the screen (a DM, or a group of two); more get a grid.
+  const peer = call.peers.at(0)
+  const n = call.peers.length
   const ended = call.phase === 'ended'
+  const grid = n > 1 && !ended
+  const remoteRef = useStream<HTMLVideoElement>(peer?.stream)
+  const localRef = useStream<HTMLVideoElement>(call.local)
   const incoming = call.phase === 'incoming'
-  const showRemote = !ended && call.remoteCamera && !!call.remote?.getVideoTracks().length
+  const showRemote = !ended && !grid && !!peer?.camera && !!peer.stream?.getVideoTracks().length
   const showLocal = !ended && call.camera && !!call.local?.getVideoTracks().length
   // Before the other side picks up, your own camera fills the screen, like a mirror.
-  const localFull = showLocal && !showRemote && !call.since
+  const localFull = showLocal && !showRemote && !grid && !call.since
+  const line = incoming && call.group ? `${nameOf(call.peer)} · ${status(call)}` : status(call)
 
   const [cams, setCams] = useState(1)
   useEffect(() => {
@@ -110,6 +143,14 @@ export function CallScreen({ call, name, calls, onMinimize }: { call: CallView; 
         className={`${!showLocal ? 'hidden' : localFull ? 'absolute inset-0 h-full w-full object-cover opacity-60' : 'absolute right-3 top-[calc(max(0.75rem,env(safe-area-inset-top))+3.75rem)] z-10 aspect-[3/4] w-[28vw] max-w-40 rounded-2xl object-cover'} ${call.facing === 'user' ? '-scale-x-100' : ''}`}
       />
 
+      {grid && (
+        <div
+          className={`absolute inset-0 grid gap-1.5 px-1.5 pb-[calc(max(0.75rem,env(safe-area-inset-bottom))+6.5rem)] pt-[calc(max(0.75rem,env(safe-area-inset-top))+3.25rem)] ${n === 2 ? 'grid-rows-2 md:grid-cols-2 md:grid-rows-1' : n <= 4 ? 'grid-cols-2 grid-rows-2' : 'auto-rows-[32%] grid-cols-2 overflow-y-auto'}`}
+        >
+          {call.peers.map((p) => <Tile key={p.user} peer={p} name={nameOf(p.user)} />)}
+        </div>
+      )}
+
       <div className={`pt-safe relative z-20 flex items-center px-2 ${fade}`}>
         {incoming || ended ? (
           <span className="w-11" />
@@ -119,10 +160,10 @@ export function CallScreen({ call, name, calls, onMinimize }: { call: CallView; 
           </button>
         )}
         <div className="min-w-0 flex-1 text-center">
-          {showRemote ? (
+          {showRemote || grid ? (
             <>
               <div className="truncate font-semibold">{name}</div>
-              <div className="text-sm tabular-nums text-white/80">{call.remoteMuted ? `Muted · ${status(call)}` : status(call)}</div>
+              <div className="text-sm tabular-nums text-white/80">{peer?.muted && !grid ? `Muted · ${status(call)}` : status(call)}</div>
             </>
           ) : (
             <span className="inline-flex items-center gap-1.5 text-xs text-white/70"><Lock size={12} /> End-to-end encrypted</span>
@@ -131,15 +172,15 @@ export function CallScreen({ call, name, calls, onMinimize }: { call: CallView; 
         <span className="w-11" />
       </div>
 
-      {!showRemote && (
+      {!showRemote && !grid && (
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-5 px-8 text-center">
           <Avatar name={name} size={120} />
           <div>
             <h2 className="text-3xl font-semibold tracking-tight">{name}</h2>
-            <p role="status" className="mt-1.5 text-lg tabular-nums text-white/75">{status(call)}</p>
+            <p role="status" className="mt-1.5 text-lg tabular-nums text-white/75">{line}</p>
           </div>
-          {call.remoteMuted && !ended && (
-            <p className="flex items-center gap-1.5 text-sm text-white/75"><MicOff size={14} /> {name} is muted</p>
+          {peer?.muted && !ended && (
+            <p className="flex items-center gap-1.5 text-sm text-white/75"><MicOff size={14} /> {nameOf(peer.user)} is muted</p>
           )}
         </div>
       )}
@@ -149,7 +190,7 @@ export function CallScreen({ call, name, calls, onMinimize }: { call: CallView; 
           {incoming ? (
             <div className="mb-6 flex w-full max-w-xs justify-between">
               <Round label="Decline" caption="Decline" tone={END} onClick={calls.hangup}><EndIcon /></Round>
-              <Round label="Accept" caption="Accept" tone={ACCEPT} onClick={calls.accept}>
+              <Round label={call.group ? 'Join' : 'Accept'} caption={call.group ? 'Join' : 'Accept'} tone={ACCEPT} onClick={calls.accept}>
                 {call.kind === 'video' ? <Video size={28} /> : <Phone size={26} />}
               </Round>
             </div>
@@ -175,7 +216,10 @@ export function CallBar({ call, name, calls, onExpand }: { call: CallView; name:
       <button type="button" onClick={onExpand} aria-label={`Return to call with ${name}`} className="flex min-h-11 min-w-0 flex-1 items-center gap-2.5 rounded-full px-2 text-left">
         <Avatar name={name} size={28} />
         <span className="truncate font-semibold">{name}</span>
-        <span role="status" className="shrink-0 tabular-nums opacity-80">{status(call)}</span>
+        <span role="status" className="shrink-0 tabular-nums opacity-80">
+          {call.group && call.peers.length > 0 && `${call.peers.length + 1} people · `}
+          {status(call)}
+        </span>
       </button>
       {call.phase !== 'ended' && (
         <>

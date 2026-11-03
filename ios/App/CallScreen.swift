@@ -10,18 +10,21 @@ struct CallScreen: View {
   @State private var chrome = true
 
   var body: some View {
-    let name = talk.name(call.peer)
-    let showRemote = call.phase != .ended && call.remoteCamera && call.remote != nil && call.since != nil
+    // A group shows its title, or the one other person's name once it's down to two.
+    let name = call.group.map { call.tiles.count == 1 ? talk.name(call.tiles[0].id) : $0 } ?? talk.name(call.peer)
+    let grid = call.tiles.count > 1 && call.phase != .ended
+    let showRemote = !grid && call.phase != .ended && call.remoteCamera && call.remote != nil && call.since != nil
     let showLocal = call.phase != .ended && call.camera && call.local != nil
     ZStack {
       Color.black.ignoresSafeArea()
       if showRemote, let t = call.remote { VideoView(track: t, mirror: false).ignoresSafeArea() }
       if showLocal, let t = call.local {
-        if showRemote || call.since != nil {
+        if showRemote || grid || call.since != nil {
           VideoView(track: t, mirror: call.front)
-            .frame(width: 110, height: 150).clipShape(.rect(cornerRadius: 16))
+            .frame(width: grid ? 90 : 110, height: grid ? 120 : 150).clipShape(.rect(cornerRadius: 16))
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
             .padding(.top, 60).padding(.trailing, 12)
+            .zIndex(1)
         } else {
           VideoView(track: t, mirror: call.front).ignoresSafeArea().opacity(0.6)
         }
@@ -35,7 +38,7 @@ struct CallScreen: View {
           }
           .labelStyle(.iconOnly).font(.title2).frame(width: 44, height: 44)
           Spacer()
-          if showRemote {
+          if showRemote || grid {
             VStack {
               Text(name).font(.headline)
               Text(status).font(.subheadline).monospacedDigit().opacity(0.8)
@@ -48,16 +51,20 @@ struct CallScreen: View {
         }
         .padding(.horizontal, 8)
 
-        Spacer()
-        if !showRemote {
-          VStack(spacing: 16) {
-            Avatar(name: name, size: 120)
-            Text(name).font(.largeTitle.weight(.semibold))
-            Text(status).font(.title3).monospacedDigit().opacity(0.75)
-            if call.remoteMuted && call.phase != .ended { Label("\(name) is muted", systemImage: "mic.slash").font(.subheadline).opacity(0.75) }
+        if grid {
+          TileGrid(tiles: call.tiles)
+        } else {
+          Spacer()
+          if !showRemote {
+            VStack(spacing: 16) {
+              Avatar(name: name, size: 120)
+              Text(name).font(.largeTitle.weight(.semibold))
+              Text(status).font(.title3).monospacedDigit().opacity(0.75)
+              if call.remoteMuted && call.phase != .ended { Label("\(name) is muted", systemImage: "mic.slash").font(.subheadline).opacity(0.75) }
+            }
           }
+          Spacer()
         }
-        Spacer()
 
         if call.phase != .ended {
           HStack(spacing: 16) {
@@ -103,8 +110,10 @@ struct CallBar: View {
   let call: CallView
 
   static func status(_ c: CallView) -> String {
-    switch c.phase {
-    case .incoming: c.kind == "video" ? "Video call" : "Voice call"
+    // A group call is on as soon as we're in it; its timer starts when someone else is.
+    if c.group != nil, c.tiles.isEmpty, [.ringing, .connecting, .live].contains(c.phase) { return "Waiting for others…" }
+    return switch c.phase {
+    case .incoming: Format.callNoun(c.kind, group: c.group != nil)
     case .calling: "Calling…"
     case .ringing: "Ringing…"
     case .connecting: "Connecting…"
@@ -115,17 +124,19 @@ struct CallBar: View {
   }
 
   var body: some View {
+    let name = call.group ?? talk.name(call.peer)
     TimelineView(.periodic(from: .now, by: 1)) { _ in
       HStack(spacing: 10) {
         Button { calls.minimized = false } label: {
           HStack(spacing: 10) {
-            Avatar(name: talk.name(call.peer), size: 28)
-            Text(talk.name(call.peer)).font(.headline).lineLimit(1)
+            Avatar(name: name, size: 28)
+            Text(name).font(.headline).lineLimit(1)
+            if call.group != nil { Label("\(call.tiles.count + 1)", systemImage: "person.2.fill").font(.subheadline).monospacedDigit() }
             Text(Self.status(call)).monospacedDigit().opacity(0.8)
             Spacer()
           }
         }
-        .accessibilityLabel("Return to call with \(talk.name(call.peer))")
+        .accessibilityLabel(call.group == nil ? "Return to call with \(name)" : "Return to call in \(name), \(call.tiles.count + 1) people")
         if call.phase != .ended {
           Button(call.muted ? "Unmute" : "Mute", systemImage: call.muted ? "mic.slash.fill" : "mic.fill") { calls.toggleMute() }
             .labelStyle(.iconOnly).frame(width: 44, height: 44)
@@ -138,6 +149,65 @@ struct CallBar: View {
       .background(Color.fill)
       .foregroundStyle(Color.onFill)
     }
+  }
+}
+
+// Everyone else in a group call: their video, or their avatar with the camera off.
+private struct TileGrid: View {
+  @Environment(Talk.self) private var talk
+  let tiles: [Tile]
+
+  var body: some View {
+    let g = callGrid(tiles.count)
+    GeometryReader { geo in
+      let h = (geo.size.height - CGFloat(g.rows - 1) * 6) / CGFloat(g.rows)
+      ScrollView {
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: g.columns), spacing: 6) {
+          ForEach(tiles) { tile($0).frame(height: h) }
+        }
+      }
+      .scrollDisabled(!g.scrolls)
+      .scrollBounceBehavior(.basedOnSize)
+    }
+    .padding(.horizontal, 6)
+  }
+
+  private func tile(_ t: Tile) -> some View {
+    let name = talk.name(t.id)
+    return ZStack(alignment: .bottomLeading) {
+      Color.white.opacity(0.1)
+      if t.camera, let v = t.video {
+        VideoView(track: v, mirror: false)
+      } else {
+        Avatar(name: name, size: 72).frame(maxWidth: .infinity, maxHeight: .infinity)
+      }
+      HStack(spacing: 4) {
+        if t.muted { Image(systemName: "mic.slash.fill") }
+        Text(name).lineLimit(1)
+      }
+      .font(.footnote.weight(.semibold))
+      .padding(.horizontal, 8).padding(.vertical, 4)
+      .background(.black.opacity(0.45), in: .capsule)
+      .padding(8)
+    }
+    .clipShape(.rect(cornerRadius: 16))
+    .accessibilityElement(children: .ignore)
+    .accessibilityLabel(t.muted ? "\(name), muted" : name)
+  }
+}
+
+// The green Join on a chat with a group call on (chat list, chat banner).
+struct JoinPill: View {
+  var label = "Join"
+  let action: () -> Void
+
+  var body: some View {
+    Button(action: action) {
+      Text(label).font(.subheadline.weight(.semibold))
+        .padding(.horizontal, 14).padding(.vertical, 6)
+        .background(Color.acceptCall, in: .capsule).foregroundStyle(.white)
+    }
+    .buttonStyle(.borderless)
   }
 }
 

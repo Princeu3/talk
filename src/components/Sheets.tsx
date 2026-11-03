@@ -1,18 +1,40 @@
 import { useEffect, useState, type ReactNode } from 'react'
-import type { Talk } from '../lib/useTalk.ts'
+import type { Decrypted, Talk } from '../lib/useTalk.ts'
 import { api } from '../lib/api.ts'
 import { safetyCode } from '../lib/crypto.ts'
+import { convName, userName } from '../lib/format.ts'
 import { enablePush, needsInstall, pushSupported } from '../lib/push.ts'
 import { Avatar } from './Sidebar.tsx'
 import { loadTheme, setTheme, type Theme } from '../lib/theme.ts'
 import { Close, Monitor, Moon, Sun } from './icons.tsx'
 
-export function Sheet({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
+export function useEscape(onClose: () => void) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose()
     addEventListener('keydown', onKey)
     return () => removeEventListener('keydown', onKey)
   }, [onClose])
+}
+
+// Busy while an action runs; then `onDone`, or the error with the sheet left open.
+function useSubmit(onDone?: () => void, fallback = '') {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const run = async (f: () => Promise<unknown>) => {
+    setBusy(true)
+    try {
+      await f()
+      onDone?.()
+    } catch (e) {
+      setError((e as Error).message || fallback)
+      setBusy(false)
+    }
+  }
+  return { busy, error, run }
+}
+
+export function Sheet({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
+  useEscape(onClose)
   return (
     <div className="fixed inset-0 z-40 flex items-end justify-center bg-black/40 sm:items-center" onClick={onClose}>
       <div
@@ -33,7 +55,72 @@ export function Sheet({ title, onClose, children }: { title: string; onClose: ()
   )
 }
 
-const primary = 'pressable min-h-12 w-full rounded-full bg-fill px-5 font-semibold text-on-fill disabled:opacity-40'
+export const primary = 'pressable min-h-12 w-full rounded-full bg-fill px-5 font-semibold text-on-fill disabled:opacity-40'
+export const danger = 'pressable min-h-12 w-full rounded-full bg-raised px-5 font-semibold text-danger disabled:opacity-40'
+
+// Yes/no for anything that can't be undone; stays open with the error if it fails.
+export function Confirm({ title, body, action, onConfirm, onClose }: {
+  title: string
+  body: string
+  action: string
+  onConfirm: () => Promise<unknown>
+  onClose: () => void
+}) {
+  const { busy, error, run } = useSubmit(onClose)
+  return (
+    <Sheet title={title} onClose={onClose}>
+      <p className="text-mut">{body}</p>
+      {error && <p className="mt-2 text-sm text-danger" role="alert">{error}</p>}
+      <button onClick={() => run(onConfirm)} disabled={busy} className={`${danger} mt-5`}>{action}</button>
+      <button onClick={onClose} className="pressable mt-2 min-h-12 w-full rounded-full px-5 font-semibold text-accent hover:bg-raised">Cancel</button>
+    </Sheet>
+  )
+}
+
+export function ForwardSheet({ talk, m, onClose }: { talk: Talk; m: Decrypted; onClose: () => void }) {
+  const me = talk.me!
+  const { busy, error, run } = useSubmit(onClose, 'Could not forward this message.')
+  return (
+    <Sheet title="Forward to" onClose={onClose}>
+      {error && <p className="mb-2 text-sm text-danger" role="alert">{error}</p>}
+      <ul className="flex flex-col gap-1">
+        {me.conversations.map((conv) => (
+          <li key={conv.id}>
+            <button onClick={() => run(() => talk.forward(m, conv.id))} disabled={busy} className="flex min-h-14 w-full items-center gap-3 rounded-2xl px-2 text-left hover:bg-raised disabled:opacity-40">
+              <Avatar name={convName(me, conv)} size={36} />
+              <span className="min-w-0 flex-1 truncate font-medium">{convName(me, conv)}</span>
+            </button>
+          </li>
+        ))}
+      </ul>
+    </Sheet>
+  )
+}
+
+// The server can't read chats, so a report carries only what the reporter writes (or quotes).
+export function Report({ talk, userId, convId, quote = '', onClose }: { talk: Talk; userId: string; convId: string; quote?: string; onClose: () => void }) {
+  const name = userName(talk.me!, userId)
+  const [note, setNote] = useState(quote && `“${quote.slice(0, 1900)}”`)
+  const { busy, error, run } = useSubmit(onClose)
+  return (
+    <Sheet title={`Report ${name}`} onClose={onClose}>
+      <p className="mb-3 text-sm text-mut">
+        Talk can’t read your chats, so the report holds only what you write here. Reporting also blocks {name}.
+      </p>
+      <textarea
+        value={note}
+        onChange={(e) => setNote(e.target.value)}
+        maxLength={2000}
+        rows={4}
+        placeholder="What happened? (optional)"
+        aria-label="What happened"
+        className="w-full resize-none rounded-2xl bg-surface px-4 py-3"
+      />
+      {error && <p className="mt-2 text-sm text-danger" role="alert">{error}</p>}
+      <button onClick={() => run(() => talk.report(userId, convId, note))} disabled={busy} className={`${danger} mt-4`}>Report and block</button>
+    </Sheet>
+  )
+}
 
 function PeoplePicker({ ids, picked, onToggle, talk }: { ids: string[]; picked: Set<string>; onToggle: (id: string) => void; talk: Talk }) {
   if (!ids.length) return <p className="py-6 text-mut">Nobody else to add yet. Create an invite link in Settings.</p>
@@ -64,19 +151,8 @@ export function NewChat({ talk, onClose, onOpen }: { talk: Talk; onClose: () => 
   const me = talk.me!
   const [picked, setPicked] = useState(new Set<string>())
   const [title, setTitle] = useState('')
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState('')
+  const { busy, error, run } = useSubmit()
   const group = picked.size > 1
-
-  const create = async () => {
-    setBusy(true)
-    try {
-      onOpen(await talk.createConversation([...picked], title.trim()))
-    } catch (e) {
-      setError((e as Error).message)
-      setBusy(false)
-    }
-  }
 
   return (
     <Sheet title="New chat" onClose={onClose}>
@@ -92,7 +168,7 @@ export function NewChat({ talk, onClose, onOpen }: { talk: Talk; onClose: () => 
         />
       )}
       {error && <p className="mt-2 text-sm text-danger">{error}</p>}
-      <button onClick={create} disabled={busy || !picked.size || (group && !title.trim())} className={`${primary} mt-4`}>
+      <button onClick={() => run(async () => onOpen(await talk.createConversation([...picked], title.trim())))} disabled={busy || !picked.size || (group && !title.trim())} className={`${primary} mt-4`}>
         {group ? 'Create group' : 'Message'}
       </button>
     </Sheet>
@@ -103,17 +179,13 @@ export function AddPeople({ talk, convId, onClose }: { talk: Talk; convId: strin
   const me = talk.me!
   const conv = me.conversations.find((c) => c.id === convId)!
   const [picked, setPicked] = useState(new Set<string>())
-  const [busy, setBusy] = useState(false)
-  const add = async () => {
-    setBusy(true)
-    for (const id of picked) await talk.addMember(convId, id)
-    onClose()
-  }
+  const { busy, error, run } = useSubmit(onClose)
   return (
     <Sheet title="Add people" onClose={onClose}>
       <p className="mb-3 text-sm text-mut">New members can read the whole history of this group.</p>
       <PeoplePicker talk={talk} ids={me.users.filter((u) => !conv.members.includes(u.id) && !u.deleted).map((u) => u.id)} picked={picked} onToggle={(id) => setPicked(toggle(picked, id))} />
-      <button onClick={add} disabled={busy || !picked.size} className={`${primary} mt-4`}>Add</button>
+      {error && <p className="mt-2 text-sm text-danger" role="alert">{error}</p>}
+      <button onClick={() => run(() => talk.addMembers(convId, [...picked]))} disabled={busy || !picked.size} className={`${primary} mt-4`}>Add</button>
     </Sheet>
   )
 }
@@ -156,7 +228,7 @@ function ThemePicker() {
   )
 }
 
-function SafetyCode({ pubkey }: { pubkey: string }) {
+export function SafetyCode({ pubkey }: { pubkey: string }) {
   const [code, setCode] = useState('')
   useEffect(() => void safetyCode(pubkey).then(setCode), [pubkey])
   return <span className="font-mono text-sm tracking-wider text-mut">{code}</span>

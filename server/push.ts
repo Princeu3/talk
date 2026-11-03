@@ -32,6 +32,9 @@ export type Apns =
 
 // Payload carries no message content: the sender name and conversation id only.
 // Pushes only to someone with no visible tab or open app; those show it themselves.
+// These users' sockets. An empty room list would reach every socket, so it reaches none.
+export const toUsers = (io: Server, ids: string[]) => io.to(ids.length ? ids.map((u) => `user:${u}`) : 'nobody')
+
 export async function notifyIfAway(io: Server, userId: string, payload: Payload, opts: { ttl?: number; apns?: Apns } = {}) {
   const sockets = await io.in(`user:${userId}`).fetchSockets()
   if (sockets.some((s) => s.data.active)) return
@@ -60,11 +63,12 @@ export async function notify(userId: string, payload: Payload, ttl = 3600) {
 }
 
 // Calls go to VoIP tokens (they ring through CallKit), the rest to alert tokens.
-export async function apns(userId: string, data: Apns) {
+// `v`: only phones whose app knows this push (a group call rings v2 and up).
+export async function apns(userId: string, data: Apns, v = 1) {
   if (!RELAY) return
   const devices = db
-    .prepare('select token, env from devices where user_id = ? and kind = ?')
-    .all(userId, data.type === 'call' ? 'voip' : 'alert') as { token: string; env: string }[]
+    .prepare('select token, env from devices where user_id = ? and kind = ? and v >= ?')
+    .all(userId, data.type === 'call' ? 'voip' : 'alert', v) as { token: string; env: string }[]
   await Promise.all(
     devices.map(async ({ token, env }) => {
       try {

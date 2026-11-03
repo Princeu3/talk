@@ -1,9 +1,20 @@
-import type { CallLog, Conversation, Me, MessageBody } from '../../shared/types.ts'
+import type { CallKind, CallLog, Conversation, Me, MessageBody } from '../../shared/types.ts'
 
 export const userName = (me: Me, id: string) => me.users.find((u) => u.id === id)?.name ?? 'Someone'
+export const who = (me: Me, id: string) => (id === me.user.id ? 'You' : userName(me, id))
 
 export const convName = (me: Me, conv: Conversation) =>
   conv.title ?? userName(me, conv.members.find((m) => m !== me.user.id) ?? me.user.id)
+
+const and = new Intl.ListFormat('en', { type: 'conjunction' })
+export const names = (list: string[]) => and.format(list)
+
+// "typing…" in a DM; who, in a group (two names at most).
+export function typingLabel(me: Me, conv: Conversation, ids: string[]) {
+  if (conv.kind === 'dm') return 'typing…'
+  if (ids.length > 2) return `${ids.length} people are typing…`
+  return `${names(ids.map((id) => userName(me, id)))} ${ids.length > 1 ? 'are' : 'is'} typing…`
+}
 
 export const initials = (name: string) =>
   name.split(/\s+/).slice(0, 2).map((w) => w[0]?.toUpperCase()).join('')
@@ -25,10 +36,14 @@ export function talkTime(ms: number) {
   return m < 60 ? `${m} min` : `${Math.floor(m / 60)} hr ${m % 60} min`
 }
 
+// An old log with no kind was a video call.
+export const callNoun = (kind: CallKind | undefined, group?: boolean) =>
+  group ? `Group ${kind === 'audio' ? 'voice' : 'video'} call` : kind === 'audio' ? 'Voice call' : 'Video call'
+
 // A missed call reads differently to the caller ("No answer") and the callee.
 export function callSummary(c: CallLog, mine: boolean) {
   if (c.room) return { title: 'Call', detail: 'Ended', missed: false }
-  const noun = c.kind === 'audio' ? 'Voice call' : 'Video call'
+  const noun = callNoun(c.kind, c.group)
   if (c.ms) return { title: noun, detail: talkTime(c.ms), missed: false }
   return mine ? { title: noun, detail: 'No answer', missed: false } : { title: `Missed ${noun.toLowerCase()}`, missed: true }
 }

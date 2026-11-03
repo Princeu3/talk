@@ -50,3 +50,35 @@ struct NegotiationTests {
     await #expect(throws: (any Error).self) { _ = try await glare(config) }
   }
 }
+
+// Group calls: one polite side per pair, and tiles that fit the screen.
+struct GroupCallTests {
+  @Test func exactlyOneSideOfEachPairYields() {
+    // DM: the callee yields, the caller doesn't.
+    #expect(isPolite(group: false, outgoing: false, joinedAfterThem: false))
+    #expect(!isPolite(group: false, outgoing: true, joinedAfterThem: false))
+    // Group: the joiner yields to whoever its ack listed; they hear call:joined and don't.
+    // Whether either side placed its call through CallKit (outgoing) doesn't matter.
+    for joinerOutgoing in [true, false] {
+      for theirOutgoing in [true, false] {
+        let joiner = isPolite(group: true, outgoing: joinerOutgoing, joinedAfterThem: true)
+        let earlier = isPolite(group: true, outgoing: theirOutgoing, joinedAfterThem: false)
+        #expect(joiner && !earlier)
+      }
+    }
+  }
+
+  func grid(_ n: Int) -> String {
+    let g = callGrid(n)
+    return "\(g.columns)x\(g.rows)" + (g.scrolls ? " scrolls" : "")
+  }
+
+  @Test func tilesForEachCallSize() {
+    #expect(grid(0) == "1x1") // waiting for others
+    #expect(grid(1) == "1x1") // as in a DM: they fill the screen
+    #expect(grid(2) == "1x2") // stacked
+    #expect(grid(3) == "2x2")
+    #expect(grid(4) == "2x2")
+    for n in 5...7 { #expect(grid(n) == "2x3 scrolls") } // a full call is 8, so 7 others
+  }
+}

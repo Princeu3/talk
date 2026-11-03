@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { io as connect, type Socket } from 'socket.io-client'
 import * as c from '../src/lib/crypto.ts'
-import type { Me, Message, MessageBody } from '../shared/types.ts'
+import type { GroupCall, Me, Message, MessageBody, ReactionBody } from '../shared/types.ts'
 
 const PORT = 4000 + Math.floor(Math.random() * 1000)
 const BASE = `http://localhost:${PORT}`
@@ -86,9 +86,9 @@ async function register(name: string, invite: string): Promise<Client> {
 
 const me = async (cl: Client) => (await (await api(cl, 'GET', '/api/me')).r.json()) as Me
 const invite = async (cl: Client) => (await (await api(cl, 'POST', '/api/invites')).r.json()).code as string
-const socket = (cl: Client) =>
+const socket = (cl: Client, v = 1) =>
   new Promise<Socket>((resolve, reject) => {
-    const s = connect(BASE, { extraHeaders: { cookie: cl.cookie }, transports: ['websocket'] })
+    const s = connect(BASE, { extraHeaders: { cookie: cl.cookie }, transports: ['websocket'], query: { v: String(v) } })
     sockets.push(s)
     s.on('connect', () => resolve(s))
     s.on('connect_error', reject)
@@ -209,7 +209,6 @@ test('three people: accounts, DM, group, realtime, attachments, access', async (
   const ice = await (await api(alice, 'GET', '/api/ice')).r.json()
   assert.ok(Array.isArray(ice) && ice.length)
   assert.equal((await sc.emitWithAck('call:start', { convId: dm.id, kind: 'audio' })).error, 'bad request', 'outsider')
-  assert.equal((await sa.emitWithAck('call:start', { convId: group.id, kind: 'audio' })).error, 'bad request', 'groups have no calls')
   const sb2 = await socket(bob)
   const VOIP = 'ab'.repeat(32)
   const ALERT = 'cd'.repeat(32)
@@ -276,6 +275,213 @@ test('three people: accounts, DM, group, realtime, attachments, access', async (
   assert.deepEqual(after.conversations.find((x) => x.id === ca.id)!.members, [alice.id])
   assert.match((await sa.emitWithAck('call:start', { convId: ca.id, kind: 'audio' })).error, /deleted/)
   assert.equal((await register('Carol', await invite(alice))).name, 'Carol', 'name is free again')
+})
+
+const next = <T>(s: Socket, event: string, match: (x: T) => boolean = () => true) =>
+  new Promise<T>((resolve) => {
+    const on = (x: T) => match(x) && (s.off(event, on), resolve(x))
+    s.on(event, on)
+  })
+const none = async (s: Socket, event: string, ms = 300) => {
+  let heard = false
+  const on = () => (heard = true)
+  s.on(event, on)
+  await new Promise((r) => setTimeout(r, ms))
+  s.off(event, on)
+  assert.equal(heard, false, `unexpected ${event}`)
+}
+
+async function login(name: string): Promise<Client> {
+  const ident = await c.deriveIdentity(name, `${name} correct horse battery`, 1000)
+  const res = await api(null, 'POST', '/api/login', { name, auth: ident.auth })
+  assert.equal(res.status, 200)
+  return { id: (await res.r.json()).id, name, ident, cookie: res.cookie }
+}
+
+const seal = async (cl: Client, convId: string, body: unknown) => c.sealMessage(await convKey(cl, convId), convId, body)
+const history = async (cl: Client, convId: string) => (await (await api(cl, 'GET', `/api/conversations/${convId}/messages`)).r.json()) as Message[]
+const convOf = async (cl: Client, convId: string) => (await me(cl)).conversations.find((x) => x.id === convId)
+
+test('chat actions: reactions, edits, unsend, receipts, typing, mute, pin, group admin', async () => {
+  const alice = await login('Alice')
+  const dan = await register('Dan', await invite(alice))
+  const erin = await register('Erin', await invite(alice))
+  const frank = await register('Frank', await invite(alice))
+  const dm = await createConv(dan, 'dm', [dan, erin])
+  const [sd, se] = await Promise.all([socket(dan, 2), socket(erin, 2)])
+  const { message: hi } = await sd.emitWithAck('send', { convId: dm.id, body: await seal(dan, dm.id, { from: dan.id, text: 'hi' }) })
+
+  // reactions: one per person, sealed, replaced, removed, live to the chat
+  const react = (emoji: string) => seal(erin, dm.id, { from: erin.id, to: hi.id, emoji } satisfies ReactionBody)
+  const live = next<{ messageId: number; userId: string; body: string | null }>(sd, 'reaction')
+  assert.equal((await api(erin, 'PUT', `/api/messages/${hi.id}/reaction`, { body: await react('👍') })).status, 200)
+  assert.deepEqual([(await live).messageId, (await live).userId], [hi.id, erin.id])
+  assert.equal((await api(erin, 'PUT', `/api/messages/${hi.id}/reaction`, { body: await react('❤️') })).status, 200)
+  const [withReaction] = await history(dan, dm.id)
+  assert.equal(withReaction.reactions!.length, 1)
+  assert.equal((await c.openMessage<ReactionBody>(await convKey(dan, dm.id), dm.id, withReaction.reactions![0].body)).emoji, '❤️')
+  assert.equal((await api(frank, 'PUT', `/api/messages/${hi.id}/reaction`, { body: await react('👍') })).status, 404, 'outsider')
+  const removed = next<{ body: string | null }>(sd, 'reaction')
+  assert.equal((await api(erin, 'DELETE', `/api/messages/${hi.id}/reaction`)).status, 200)
+  assert.equal((await removed).body, null)
+  assert.equal((await history(dan, dm.id))[0].reactions, undefined)
+
+  // edit: sender only, live, marked; the broadcast leaves reactions to each viewer
+  await api(erin, 'PUT', `/api/messages/${hi.id}/reaction`, { body: await react('👍') })
+  const edited = next<Message>(se, 'edit')
+  const newBody = await seal(dan, dm.id, { from: dan.id, text: 'hi there' })
+  assert.equal((await api(erin, 'PATCH', `/api/messages/${hi.id}`, { body: newBody })).status, 404, 'not mine')
+  assert.equal((await api(dan, 'PATCH', `/api/messages/${hi.id}`, { body: newBody })).status, 200)
+  assert.equal((await edited).body, newBody)
+  assert.equal((await edited).reactions, undefined)
+  const [afterEdit] = await history(erin, dm.id)
+  assert.ok(afterEdit.editedAt)
+  assert.equal(afterEdit.reactions!.length, 1)
+  assert.equal((await c.openMessage<MessageBody>(await convKey(erin, dm.id), dm.id, afterEdit.body)).text, 'hi there')
+
+  // read receipt: Erin reads, Dan hears it and sees it in /api/me
+  const read = next<{ userId: string; upTo: number }>(sd, 'read')
+  await api(erin, 'POST', `/api/conversations/${dm.id}/read`, { upTo: hi.id })
+  assert.deepEqual(await read, { convId: dm.id, userId: erin.id, upTo: hi.id })
+  const again = none(sd, 'read')
+  await api(erin, 'POST', `/api/conversations/${dm.id}/read`, { upTo: hi.id })
+  await again // nothing moved, nothing sent
+  assert.equal((await convOf(dan, dm.id))!.reads![erin.id], hi.id)
+  assert.equal((await api(frank, 'POST', `/api/conversations/${dm.id}/read`, { upTo: 1 })).status, 404)
+
+  // typing: relayed to the others, never back to me, not from outsiders
+  const typing = next<{ convId: string; userId: string }>(se, 'typing')
+  sd.emit('typing', { convId: dm.id })
+  assert.deepEqual(await typing, { convId: dm.id, userId: dan.id })
+  const sf = await socket(frank, 2)
+  sf.emit('typing', { convId: dm.id })
+  await none(se, 'typing')
+
+  // once Dan blocks Erin, his edits stop reaching her too, not just new messages
+  await api(dan, 'PUT', `/api/blocks/${erin.id}`)
+  const hidden = none(se, 'edit')
+  assert.equal((await api(dan, 'PATCH', `/api/messages/${hi.id}`, { body: newBody })).status, 200)
+  await hidden
+  assert.equal((await convOf(erin, dm.id))!.reads![dan.id], undefined, 'no receipts across a block')
+  await api(dan, 'DELETE', `/api/blocks/${erin.id}`)
+  assert.equal(typeof (await convOf(erin, dm.id))!.reads![dan.id], 'number')
+
+  // unsend: gone for everyone, reactions with it
+  await api(erin, 'PUT', `/api/messages/${hi.id}/reaction`, { body: await react('😂') })
+  const gone = next<{ id: number }>(se, 'unsend')
+  assert.equal((await api(erin, 'DELETE', `/api/messages/${hi.id}`)).status, 404, 'not mine')
+  assert.equal((await api(dan, 'DELETE', `/api/messages/${hi.id}`)).status, 200)
+  assert.equal((await gone).id, hi.id)
+  assert.equal((await history(erin, dm.id)).length, 0)
+
+  // mute and pin are mine alone; a muted chat sends no push
+  assert.equal((await api(erin, 'PATCH', `/api/conversations/${dm.id}/me`, { muted: 'yes' })).status, 400)
+  assert.equal((await api(erin, 'PATCH', `/api/conversations/${dm.id}/me`, { muted: true, pinned: true })).status, 200)
+  assert.deepEqual([(await convOf(erin, dm.id))!.muted, (await convOf(erin, dm.id))!.pinned], [true, true])
+  assert.equal((await convOf(dan, dm.id))!.muted, undefined)
+  const TOKEN = 'ef'.repeat(32)
+  await api(erin, 'POST', '/api/devices', { token: TOKEN, kind: 'alert', env: 'sandbox', v: 2 })
+  se.emit('active', false)
+  await new Promise((r) => setTimeout(r, 50))
+  const { message: quiet } = await sd.emitWithAck('send', { convId: dm.id, body: await seal(dan, dm.id, { from: dan.id, text: 'shh' }) })
+  await new Promise((r) => setTimeout(r, 300))
+  assert.ok(!relayed.some((p) => p.messageId === quiet.id), 'muted: no push')
+  await api(erin, 'PATCH', `/api/conversations/${dm.id}/me`, { muted: false })
+  const { message: loud } = await sd.emitWithAck('send', { convId: dm.id, body: await seal(dan, dm.id, { from: dan.id, text: 'hey' }) })
+  await pushed((p) => p.messageId === loud.id)
+  assert.equal((await convOf(erin, dm.id))!.pinned, true, 'pin kept')
+
+  // group admin: rename, remove, leave; DMs refuse all three
+  const group = await createConv(dan, 'group', [dan, erin, frank], 'Hikers')
+  assert.equal((await api(dan, 'PATCH', `/api/conversations/${group.id}`, { title: 'Hike club' })).status, 200)
+  assert.equal((await convOf(frank, group.id))!.title, 'Hike club')
+  assert.equal((await api(dan, 'PATCH', `/api/conversations/${dm.id}`, { title: 'x' })).status, 400)
+  assert.equal((await api(dan, 'DELETE', `/api/conversations/${dm.id}/members/${erin.id}`)).status, 400)
+  assert.equal((await api(alice, 'DELETE', `/api/conversations/${group.id}/members/${erin.id}`)).status, 404, 'outsider')
+  assert.equal((await api(dan, 'DELETE', `/api/conversations/${group.id}/members/${erin.id}`)).status, 200)
+  assert.equal(await convOf(erin, group.id), undefined)
+  assert.equal((await api(erin, 'GET', `/api/conversations/${group.id}/messages`)).status, 404)
+  assert.equal((await api(frank, 'DELETE', `/api/conversations/${group.id}/members/${frank.id}`)).status, 200, 'leave')
+  assert.deepEqual((await convOf(dan, group.id))!.members, [dan.id])
+})
+
+test('group calls: ring, join, mesh signaling, leave, rejoin', async () => {
+  const alice = await login('Alice')
+  const [gina, hal, ivy, old] = await Promise.all(['Gina', 'Hal', 'Ivy', 'Olaf'].map(async (n) => register(n, await invite(alice))))
+  const group = await createConv(gina, 'group', [gina, hal, ivy, old], 'Call crew')
+  const [sg, sh, si] = await Promise.all([socket(gina, 2), socket(hal, 2), socket(ivy, 2)])
+  const so = await socket(old) // an older app: no group rings
+  const VOIP2 = '12'.repeat(32)
+  const VOIP1 = '34'.repeat(32)
+  await api(hal, 'POST', '/api/devices', { token: VOIP2, kind: 'voip', env: 'sandbox', v: 2 })
+  await api(old, 'POST', '/api/devices', { token: VOIP1, kind: 'voip', env: 'sandbox' })
+
+  const rings = [sh, si].map((s) => next<{ id: string; from: string; group?: true }>(s, 'call:ring'))
+  const live = next<{ convId: string; call: GroupCall | null }>(so, 'call:update')
+  const { id } = await sg.emitWithAck('call:start', { convId: group.id, kind: 'video' })
+  for (const r of await Promise.all(rings)) assert.deepEqual([r.id, r.from, r.group], [id, gina.id, true])
+  assert.deepEqual((await live).call, { id, kind: 'video', from: gina.id, peers: [gina.id] })
+  await pushed((p) => p.callId === id && p.token === VOIP2)
+  await new Promise((r) => setTimeout(r, 100))
+  assert.ok(!relayed.some((p) => p.callId === id && p.token === VOIP1), 'old phones aren’t rung')
+  assert.equal((await convOf(old, group.id))!.call!.id, id, 'old app still sees the call in /api/me')
+  assert.equal((await (await api(hal, 'GET', `/api/calls/${id}`)).r.json()).state, 'ringing')
+  assert.match((await sh.emitWithAck('call:start', { convId: group.id, kind: 'audio' })).error, /Join it/)
+
+  // Hal joins: Gina hears call:joined, Hal gets the peer list; signals route by user
+  const joined = next<{ user: string }>(sg, 'call:joined')
+  assert.deepEqual(await sh.emitWithAck('call:join', { id }), { id, peers: [gina.id] })
+  assert.equal((await joined).user, hal.id)
+  const sig = next<{ from: string; data: unknown }>(sh, 'call:signal')
+  sg.emit('call:signal', { id, to: hal.id, data: { candidate: 'g' } })
+  assert.deepEqual(await sig, { id, from: gina.id, data: { candidate: 'g' } })
+  si.emit('call:signal', { id, to: hal.id, data: { candidate: 'not in it' } })
+  await none(sh, 'call:signal')
+
+  // Ivy declines: only her ring stops; then she joins anyway from the banner
+  const declined = next<{ reason: string }>(si, 'call:end')
+  si.emit('call:hangup', { id })
+  assert.equal((await declined).reason, 'declined')
+  assert.equal((await convOf(ivy, group.id))!.call!.peers.length, 2)
+  assert.deepEqual((await si.emitWithAck('call:join', { id })).peers!.sort(), [gina.id, hal.id].sort())
+
+  // Hal's socket drops and comes back: rejoin keeps him in
+  sh.disconnect()
+  const sh2 = await socket(hal, 2)
+  assert.deepEqual((await sh2.emitWithAck('call:rejoin', { id })).peers!.sort(), [gina.id, ivy.id].sort())
+
+  // Gina (the starter) leaves: the call goes on for two
+  const left = next<{ user: string }>(sh2, 'call:left')
+  sg.emit('call:hangup', { id })
+  assert.equal((await left).user, gina.id)
+  assert.deepEqual((await convOf(gina, group.id))!.call!.peers.sort(), [hal.id, ivy.id].sort())
+
+  // Ivy leaves: one left, so it ends for everyone and the chat hears it's over
+  const ended = next<{ id: string; reason: string }>(sh2, 'call:end', (e) => e.id === id)
+  const over = next<{ call: GroupCall | null }>(so, 'call:update', (u) => u.call === null)
+  si.emit('call:hangup', { id })
+  assert.equal((await ended).reason, 'hangup')
+  await over
+  assert.equal((await convOf(gina, group.id))!.call, undefined)
+  assert.equal((await sh2.emitWithAck('call:join', { id })).error, 'This call has ended.')
+
+  // a starter who gives up before anyone joins cancels it
+  const ring2 = next<{ id: string }>(si, 'call:ring')
+  const { id: id2 } = await sg.emitWithAck('call:start', { convId: group.id, kind: 'audio' })
+  await ring2
+  const cancelled = next<{ id: string; reason: string }>(si, 'call:end', (e) => e.id === id2)
+  sg.emit('call:hangup', { id: id2 })
+  assert.equal((await cancelled).reason, 'cancelled')
+
+  // removed from the group mid-call: out of the call too
+  const { id: id3 } = await sg.emitWithAck('call:start', { convId: group.id, kind: 'audio' })
+  await sh2.emitWithAck('call:join', { id: id3 })
+  await si.emitWithAck('call:join', { id: id3 })
+  const dropped = next<{ user: string }>(sh2, 'call:left', (e) => e.user === ivy.id)
+  const kicked = next<{ id: string }>(si, 'call:end', (e) => e.id === id3)
+  assert.equal((await api(gina, 'DELETE', `/api/conversations/${group.id}/members/${ivy.id}`)).status, 200)
+  await Promise.all([dropped, kicked])
+  assert.deepEqual((await convOf(gina, group.id))!.call!.peers.sort(), [gina.id, hal.id].sort())
 })
 
 test('safety code is stable and short', async () => {
