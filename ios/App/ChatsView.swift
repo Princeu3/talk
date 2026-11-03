@@ -29,8 +29,8 @@ struct ChatsView: View {
       .scrollContentBackground(.hidden)
       .background(Color.bg)
       .searchable(text: $query, placement: .navigationBarDrawer, prompt: "Search")
-      // Loaded messages match at once; the search runs again as older pages arrive.
-      .task(id: q.isEmpty ? "" : "\(q)\n\(talk.progress)") { found = talk.search(q) }
+      // A pause in typing runs the search, and it runs again as older pages arrive.
+      .task(id: q.isEmpty ? "" : "\(q)\n\(talk.progress)") { await find(q) }
       .task(id: q.isEmpty) { if !q.isEmpty { await talk.backfillAll() } }
       .navigationTitle(talk.online ? "Chats" : "Connecting…")
       .navigationDestination(for: Route.self) { ChatView(convId: $0.convId, at: $0.at) }
@@ -56,6 +56,13 @@ struct ChatsView: View {
     .onChange(of: calls.openChat) { _, id in
       if let id { path = [Route(convId: id)]; calls.openChat = nil }
     }
+  }
+
+  // 150 ms after the last keystroke or page; a newer one cancels this.
+  private func find(_ q: String) async {
+    do { try await Task.sleep(for: .milliseconds(150)) } catch { return }
+    let hits = await talk.search(q)
+    if !Task.isCancelled { found = hits }
   }
 
   @ViewBuilder private var chats: some View {
@@ -108,7 +115,7 @@ private struct SearchResults: View {
     }
     if !found.isEmpty {
       Section("Messages") {
-        ForEach(found) { f in NavigationLink(value: Route(convId: f.convId, at: f.id)) { MessageHit(f: f, query: query) }.listRowBackground(Color.bg) }
+        ForEach(found) { f in NavigationLink(value: Route(convId: f.m.message.convId, at: f.id)) { MessageHit(f: f, query: query) }.listRowBackground(Color.bg) }
       }
     }
     if query.count >= 2 && !done {
@@ -131,7 +138,7 @@ private struct MessageHit: View {
   let query: String
 
   var body: some View {
-    let title = talk.me?.conversations.first { $0.id == f.convId }.map(talk.title) ?? ""
+    let title = talk.me?.conversations.first { $0.id == f.m.message.convId }.map(talk.title) ?? ""
     HStack(alignment: .top, spacing: 12) {
       Avatar(name: title, size: 44)
       VStack(alignment: .leading, spacing: 3) {

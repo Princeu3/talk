@@ -1,13 +1,24 @@
 import CryptoKit
 import Foundation
+import ImageIO
 import Observation
+import UIKit
 import UserNotifications
 
-struct Decrypted: Identifiable, Hashable {
+// Nonisolated, so archive pages decrypt and search scans off the main thread.
+nonisolated struct Decrypted: Identifiable, Hashable {
   var message: Message
   let content: MessageBody? // nil: could not decrypt
   var reactions: [String: String] = [:] // user id -> emoji, only those whose sealed from/to match the row
+  let folded: String // what search looks through, folded once (Search.text)
   var id: Int { message.id }
+
+  init(message: Message, content: MessageBody?) {
+    self.message = message
+    self.content = content
+    folded = content.map(Search.text) ?? ""
+  }
+
   var forged: Bool { content.map { $0.from != message.senderId } ?? false }
   // A group event line ("Alice added Bob"). A forged one shows as a message, with the warning.
   var system: Bool { content?.system == true && !forged }
@@ -45,6 +56,7 @@ final class Talk {
   @ObservationIgnored private var keys: [String: Data] = [:]
   @ObservationIgnored private var loaded = Set<String>()
   @ObservationIgnored private var files: [String: Data] = [:]
+  @ObservationIgnored private let thumbs = { let c = NSCache<NSString, UIImage>(); c.totalCostLimit = 32 << 20; return c }() // shared-media squares, by file id
   @ObservationIgnored private(set) var saved: [String: URL] = [:] // attachments over `inMemory`, as temp files
   @ObservationIgnored private(set) var fetching: [String: Task<URL, Error>] = [:] // one download per file at a time
   // On screen, not just running: a call push wakes the app in the background.
@@ -56,12 +68,14 @@ final class Talk {
   @ObservationIgnored private var heard = 0 // messages received, so a reload can tell it raced one
   // shortcut: each chat's whole history, decrypted in memory for the session and scanned on every search;
   // upgrade to an FTS5 index once a device's history makes the first search slow.
-  @ObservationIgnored private var archive: [String: [Decrypted]] = [:] // pages fetched for search and shared media, oldest first
+  @ObservationIgnored private var archive: [String: [Decrypted]] = [:] // pages fetched for search and shared media, newest first
   @ObservationIgnored private var archiving: [String: Task<Void, Never>] = [:]
   @ObservationIgnored private var bumping = false
   private(set) var complete = Set<String>() // chats archived back to their first message
   private(set) var progress = 0 // bumped as pages arrive, at most every 0.4 s, so views re-run without redrawing per page
   private static let page = 50
+  private nonisolated static let archivePage = 500 // the server's most
+  private nonisolated static let maxFound = 200
   static let emoji = ["👍", "❤️", "😂", "😮", "😢", "🙏"]
 
   var api: API { account.api }
@@ -88,21 +102,15 @@ final class Talk {
       guard let r = try? JSONDecoder().decode(R.self, from: data) else { return }
       self?.setReaction(r.convId, r.messageId, r.userId, r.body)
     }
-    // Sent without reactions: keep the ones we hold, take the new body.
     socket.on("edit") { [weak self] data in
-      guard let self, let msg = try? JSONDecoder().decode(Message.self, from: data) else { return }
-      var d = decrypt(msg)
-      if let old = messages[msg.convId]?.first(where: { $0.id == msg.id }) {
-        d.message.reactions = old.message.reactions
-        d.reactions = old.reactions
-      }
-      replace(d)
+      guard let msg = try? JSONDecoder().decode(Message.self, from: data) else { return }
+      self?.edited(msg)
     }
     // A `sync` follows, for previews and unread counts.
     socket.on("unsend") { [weak self] data in
       struct U: Decodable { let id: Int; let convId: String }
       guard let u = try? JSONDecoder().decode(U.self, from: data) else { return }
-      self?.drop(u.convId, u.id)
+      self?.update(u.convId, u.id) { _ in nil }
     }
     socket.on("read") { [weak self] data in
       struct R: Decodable { let convId: String; let userId: String; let upTo: Int }
@@ -194,14 +202,21 @@ final class Talk {
 
   private func decrypt(_ msg: Message) -> Decrypted {
     guard let raw = keys[msg.convId] ?? (try? keyNow(msg.convId)) else { return Decrypted(message: msg, content: nil) }
+    return Self.decrypt(msg, raw)
+  }
+
+  // Every received body opens here, so screens can trust a card's link: the sender picks it, and only http(s) stays.
+  nonisolated private static func decrypt(_ msg: Message, _ raw: Data) -> Decrypted {
     let key = SymmetricKey(data: raw)
-    var d = Decrypted(message: msg, content: try? Crypto.openMessage(key, convId: msg.convId, msg.body))
+    var body: MessageBody? = try? Crypto.openMessage(key, convId: msg.convId, msg.body)
+    if body?.preview?.isWeb == false { body?.preview = nil }
+    var d = Decrypted(message: msg, content: body)
     for r in msg.reactions ?? [] { d.reactions[r.userId] = emoji(key, msg, r) }
     return d
   }
 
   // Only if its sealed from/to match the row.
-  private func emoji(_ key: SymmetricKey, _ msg: Message, _ r: Reaction) -> String? {
+  nonisolated private static func emoji(_ key: SymmetricKey, _ msg: Message, _ r: Reaction) -> String? {
     guard let b: ReactionBody = try? Crypto.openMessage(key, convId: msg.convId, r.body), b.from == r.userId, b.to == msg.id,
           let e = b.emoji.first else { return nil }
     return String(e) // one character: it's someone else's text in our layout
@@ -240,8 +255,13 @@ final class Talk {
     markRead(convId)
   }
 
+  // The next page up: from the archive while it holds older rows (after a jump to a search hit), else the server.
   func loadOlder(_ convId: String) async {
-    if let first = messages[convId]?.first { try? await fetchPage(convId, before: first.id) }
+    guard let first = messages[convId]?.first else { return }
+    if let a = archive[convId], let i = a.firstIndex(where: { $0.id < first.id }) {
+      return merge(convId, Array(a[i..<min(i + Self.page, a.count)]))
+    }
+    try? await fetchPage(convId, before: first.id)
   }
 
   private func receive(_ msg: Message) async {
@@ -273,24 +293,35 @@ final class Talk {
 
   // Opens only the new reaction; `message.reactions` stays current for the cache.
   private func setReaction(_ convId: String, _ messageId: Int, _ userId: String, _ body: String?) {
-    guard let i = messages[convId]?.firstIndex(where: { $0.id == messageId }), var d = messages[convId]?[i], let raw = keys[convId] ?? (try? keyNow(convId)) else { return }
+    guard let raw = keys[convId] ?? (try? keyNow(convId)) else { return }
     let r = body.map { Reaction(userId: userId, body: $0) }
-    d.message.reactions = (d.message.reactions ?? []).filter { $0.userId != userId } + (r.map { [$0] } ?? [])
-    d.reactions[userId] = r.flatMap { emoji(SymmetricKey(data: raw), d.message, $0) }
-    messages[convId]?[i] = d
-    save()
+    update(convId, messageId) { d in
+      var d = d
+      d.message.reactions = (d.message.reactions ?? []).filter { $0.userId != userId } + (r.map { [$0] } ?? [])
+      d.reactions[userId] = r.flatMap { Self.emoji(SymmetricKey(data: raw), d.message, $0) }
+      return d
+    }
   }
 
-  private func drop(_ convId: String, _ id: Int) {
-    messages[convId]?.removeAll { $0.id == id }
-    archive[convId]?.removeAll { $0.id == id }
-    save()
+  // An edit comes without reactions: each copy keeps the ones it holds and takes the new body.
+  private func edited(_ msg: Message) {
+    let new = decrypt(msg)
+    update(msg.convId, msg.id) { old in
+      var d = new
+      d.message.reactions = old.message.reactions
+      d.reactions = old.reactions
+      return d
+    }
   }
 
-  // An edited message, in the chat and in the archive.
-  private func replace(_ d: Decrypted) {
-    merge(d.message.convId, [d])
-    if let i = archive[d.message.convId]?.firstIndex(where: { $0.id == d.id }) { archive[d.message.convId]?[i] = d }
+  // Changes a message we hold, in the chat and in the archive (nil drops it); one we don't hold arrives whole with its page.
+  private func update(_ convId: String, _ id: Int, _ fn: (Decrypted) -> Decrypted?) {
+    func apply(_ list: inout [Decrypted]) {
+      guard let i = list.firstIndex(where: { $0.id == id }) else { return }
+      if let d = fn(list[i]) { list[i] = d } else { list.remove(at: i) }
+    }
+    if archive[convId] != nil { apply(&archive[convId]!) }
+    if messages[convId]?.contains(where: { $0.id == id }) == true { apply(&messages[convId]!) } // untouched otherwise, so the thread doesn't redraw
     save()
   }
 
@@ -310,37 +341,42 @@ final class Talk {
 
   // MARK: - history archive (search, shared media)
 
-  // A chat's messages, oldest first: the archive with the open chat's around it. Never a blocked person's.
+  // A chat's messages, newest first: the archive, with the open chat's above and below it. Never a blocked
+  // person's: a block or unblock empties the archive (`load`), so only the chat's rows need the check.
   func history(_ convId: String) -> [Decrypted] {
-    let old = archive[convId] ?? [], now = messages[convId] ?? []
-    let lo = old.first?.id ?? .max, hi = old.last?.id ?? 0
-    let all = now.filter { $0.id < lo } + old + now.filter { $0.id > hi }
     let blocked = Set(me?.blocked ?? [])
-    return blocked.isEmpty ? all : all.filter { !blocked.contains($0.message.senderId) }
+    let now = (messages[convId] ?? []).filter { !blocked.contains($0.message.senderId) }
+    guard let old = archive[convId], let hi = old.first?.id, let lo = old.last?.id else { return now.reversed() }
+    return Array(now.filter { $0.id > hi }.reversed()) + old + now.filter { $0.id < lo }.reversed()
   }
 
-  // Pages one chat back to its first message, 500 at a time, once per session. The first page is the newest,
+  // Pages one chat back to its first message, `archivePage` at a time, once per session. The first page is the newest,
   // not the oldest we hold: the offline cache can skip messages that came while the app was closed.
   func backfill(_ convId: String) async {
     if complete.contains(convId) { return }
     if let t = archiving[convId] { return await t.value }
     let t = Task {
       do {
-        _ = try await rawKey(convId)
+        let raw = try await rawKey(convId)
         while true {
-          let before = archive[convId]?.first.map { "&before=\($0.id)" } ?? ""
-          let page: [Message] = try await api.call("GET", "/api/conversations/\(convId)/messages?limit=500\(before)")
+          let page = try await Self.archived(api, convId, before: archive[convId]?.last?.id, raw)
           if Task.isCancelled { return } // dropped meanwhile (left the chat, a block)
-          archive[convId] = page.map(decrypt) + (archive[convId] ?? [])
-          if page.count < 500 { complete.insert(convId) }
+          archive[convId, default: []].append(contentsOf: page)
+          if page.count < Self.archivePage { complete.insert(convId) }
           bump()
-          if page.count < 500 { break }
+          if page.count < Self.archivePage { break }
         }
       } catch {} // offline: the next search picks up from the oldest page we have
       if !Task.isCancelled { archiving[convId] = nil }
     }
     archiving[convId] = t
     await t.value
+  }
+
+  // One archive page, newest first, fetched, decoded and decrypted off the main thread.
+  @concurrent nonisolated private static func archived(_ api: API, _ convId: String, before: Int?, _ raw: Data) async throws -> [Decrypted] {
+    let page: [Message] = try await api.call("GET", "/api/conversations/\(convId)/messages?limit=\(archivePage)" + (before.map { "&before=\($0)" } ?? ""))
+    return page.reversed().map { decrypt($0, raw) } // pages come oldest first
   }
 
   // Every chat, in list order, three at a time.
@@ -375,28 +411,36 @@ final class Talk {
 
   // Opens a chat at an archived message: the archive from it to the newest joins the chat, so the thread can scroll there.
   func reveal(_ convId: String, _ id: Int) {
-    let have = Set((messages[convId] ?? []).map(\.id))
-    let slice = (archive[convId] ?? []).filter { $0.id >= id && !have.contains($0.id) }
-    if !slice.isEmpty { merge(convId, slice) }
+    guard let a = archive[convId], let i = a.firstIndex(where: { $0.id == id }) else { return }
+    merge(convId, Array(a[...i]))
   }
 
-  struct Found: Identifiable {
-    let convId: String
+  nonisolated struct Found: Identifiable {
     let m: Decrypted
     let line: String // the text line, file name or link title that matched
     var id: Int { m.id }
   }
 
-  // Messages matching a query of 2+ characters, newest first, at most 200.
-  func search(_ q: String) -> [Found] {
+  // Messages matching a query of 2+ characters, newest first, at most `maxFound`.
+  func search(_ q: String) async -> [Found] {
     guard q.count >= 2 else { return [] }
+    return await Self.scan((me?.conversations ?? []).map { history($0.id) }, q)
+  }
+
+  // Off the main thread: each chat newest first, up to the cap. The folded text narrows it; `Search.hit` finds the line.
+  @concurrent nonisolated private static func scan(_ chats: [[Decrypted]], _ q: String) async -> [Found] {
+    let folded = Search.fold(q)
     var out: [Found] = []
-    for c in me?.conversations ?? [] {
-      for d in history(c.id) {
-        if let b = d.content, let line = Search.hit(b, q) { out.append(Found(convId: c.id, m: d, line: line)) }
+    for list in chats {
+      var n = 0
+      for d in list where d.folded.contains(folded) {
+        guard let b = d.content, let line = Search.hit(b, q) else { continue }
+        out.append(Found(m: d, line: line))
+        n += 1
+        if n == maxFound { break }
       }
     }
-    return Array(out.sorted { $0.id > $1.id }.prefix(200))
+    return Array(out.sorted { $0.id > $1.id }.prefix(maxFound))
   }
 
   // MARK: - offline cache
@@ -454,19 +498,25 @@ final class Talk {
   // Sealed, saved, then sent; returns once queued. A failure shows on the pending row.
   func send(_ convId: String, text: String? = nil, files refs: [FileRef]? = nil, call: CallLog? = nil, reply: Reply? = nil, forwarded: Bool? = nil,
             preview: LinkPreview? = nil, system: Bool? = nil, quiet: Bool = false, seen: Bool = false) async throws {
-    let body = MessageBody(from: account.userId, text: text, files: refs, call: call, reply: reply, forwarded: forwarded, system: system, preview: preview)
-    let sealed = try await seal(convId, body)
+    let sealed = try await seal(convId, MessageBody(from: account.userId, text: text, files: refs, call: call, reply: reply, forwarded: forwarded, system: system, preview: preview))
     let p = Pending(cid: UUID().uuidString.lowercased(), convId: convId, body: sealed, createdAt: Date().timeIntervalSince1970 * 1000, quiet: quiet, seen: seen, sending: socket.connected)
     pending.append(p)
     save(now: true)
     Task { await drain() }
   }
 
+  // Every message body goes out through here (send, edit, forward): its card only while the text still holds its link.
+  private func seal(_ convId: String, _ body: MessageBody) async throws -> String {
+    var body = body
+    if let p = body.preview, !p.fits(body.text ?? "") { body.preview = nil }
+    return try await sealed(convId, body)
+  }
+
   // The server's limit; thrown here, so the draft comes back instead of a row that can never send.
-  private func seal(_ convId: String, _ body: some Encodable) async throws -> String {
-    let sealed = try Crypto.sealMessage(try await key(convId), convId: convId, body)
-    guard sealed.count <= 64 * 1024 else { throw APIError(status: 0, message: "That message is too long to send.") }
-    return sealed
+  private func sealed(_ convId: String, _ plain: some Encodable) async throws -> String {
+    let out = try Crypto.sealMessage(try await key(convId), convId: convId, plain)
+    guard out.count <= 64 * 1024 else { throw APIError(status: 0, message: "That message is too long to send.") }
+    return out
   }
 
   // One at a time, oldest first, so messages land in the order they were written.
@@ -503,7 +553,7 @@ final class Talk {
       let _: OK = try await api.call("DELETE", "/api/messages/\(id)/reaction")
       setReaction(convId, id, account.userId, nil)
     } else {
-      let body = try await seal(convId, ReactionBody(from: account.userId, to: id, emoji: emoji))
+      let body = try await sealed(convId, ReactionBody(from: account.userId, to: id, emoji: emoji))
       let _: OK = try await api.call("PUT", "/api/messages/\(id)/reaction", ["body": body])
       setReaction(convId, id, account.userId, body)
     }
@@ -513,17 +563,15 @@ final class Talk {
   func edit(_ d: Decrypted, text: String) async throws {
     guard var body = d.content else { return }
     body.text = text
-    if body.preview?.fits(text) == false { body.preview = nil } // the card stays while its link does
-    let convId = d.message.convId
-    let sealed = try await seal(convId, body)
+    let sealed = try await seal(d.message.convId, body)
     struct Edited: Decodable { let message: Message }
     let r: Edited = try await api.call("PATCH", "/api/messages/\(d.message.id)", ["body": sealed])
-    replace(decrypt(r.message))
+    edited(r.message)
   }
 
   func unsend(_ d: Decrypted) async throws {
     let _: OK = try await api.call("DELETE", "/api/messages/\(d.message.id)")
-    drop(d.message.convId, d.message.id)
+    update(d.message.convId, d.message.id) { _ in nil }
   }
 
   // Files are fetched, decrypted and sealed again with the other chat's key.
@@ -578,10 +626,23 @@ final class Talk {
   // Decrypted attachment bytes, fetched once per session.
   func file(_ convId: String, _ ref: FileRef) async throws -> Data {
     if let d = files[ref.id] { return d }
-    let (sealed, _) = try await api.data("GET", "/api/attachments/\(ref.id)")
-    let plain = try Crypto.openFile(try await key(convId), convId: convId, sealed)
+    let plain = try await download(convId, ref)
     files[ref.id] = plain
     return plain
+  }
+
+  // A shared-media square: decrypted and shrunk without keeping the photo, unlike `file`; a few dozen stay cached.
+  func thumb(_ convId: String, _ ref: FileRef) async throws -> UIImage? {
+    if let t = thumbs.object(forKey: ref.id as NSString) { return t }
+    let data = if let d = files[ref.id] { d } else { try await download(convId, ref) }
+    guard let t = await Attachment.downsample(CGImageSourceCreateWithData(data as CFData, nil), max: 360) else { return nil }
+    thumbs.setObject(t, forKey: ref.id as NSString, cost: t.cgImage.map { $0.bytesPerRow * $0.height } ?? 0)
+    return t
+  }
+
+  private func download(_ convId: String, _ ref: FileRef) async throws -> Data {
+    let (sealed, _) = try await api.data("GET", "/api/attachments/\(ref.id)")
+    return try Crypto.openFile(try await key(convId), convId: convId, sealed)
   }
 
   // Bigger attachments load on a tap and stay on disk, not in memory.
@@ -594,8 +655,7 @@ final class Talk {
     if let t = fetching[ref.id] { return try await t.value }
     let t = Task {
       defer { fetching[ref.id] = nil }
-      let (sealed, _) = try await api.data("GET", "/api/attachments/\(ref.id)")
-      return try keep(ref.id, ref.name, try Crypto.openFile(try await key(convId), convId: convId, sealed))
+      return try keep(ref.id, ref.name, try await download(convId, ref))
     }
     fetching[ref.id] = t
     return try await t.value

@@ -28,6 +28,7 @@ struct ChatView: View {
   @State private var forwarding: Decrypted?
   @State private var reactionsOf: Decrypted?
   @State private var flash: Int? // a quoted message just scrolled to
+  @State private var jumped = false // to `at`, once
   @State private var card: LinkPreview? // the first link's card, once LinkPresentation has made it
   @State private var unwanted: String? // a link whose card was dismissed
   @State private var info = false
@@ -59,10 +60,13 @@ struct ChatView: View {
         .padding(.horizontal, 12)
         .padding(.bottom, 8)
       }
-      .task {
-        guard let at else { return }
-        talk.reveal(convId, at)
-        try? await Task.sleep(for: .milliseconds(400)) // past the push, so the flash is seen
+      // Opened at a search hit: jump once its row is in and the chat's first page has landed (landing later, it
+      // would push the hit out of view), a moment after the push so the flash is seen.
+      .task(id: canJump) {
+        guard canJump, let at else { return }
+        try? await Task.sleep(for: .milliseconds(400))
+        guard !Task.isCancelled else { return }
+        jumped = true
         jump(at, proxy)
       }
     }
@@ -81,6 +85,7 @@ struct ChatView: View {
     thread
     .onAppear {
       shown = true
+      if let at, !jumped { talk.reveal(convId, at) }
       talk.open(convId)
     }
     .onDisappear {
@@ -91,7 +96,7 @@ struct ChatView: View {
     // Left the group or removed from it: nothing to show here any more.
     .onChange(of: conv == nil) { _, gone in if gone { dismiss() } }
     .onChange(of: text) { _, t in if editing == nil, !t.isEmpty { talk.sendTyping(convId) } }
-    .task(id: link) { await makeCard(link) }
+    .task(id: link?.typed) { await makeCard(link) }
     // A recording never outlives the open, foreground chat, so the 600 s limit can't send one unseen.
     .onChange(of: scenePhase) { _, p in if p != .active { cancelRecording() } }
     // A call owns the audio session: stop our voice audio the moment one starts or rings.
@@ -210,27 +215,25 @@ struct ChatView: View {
     .padding(.leading, 12)
   }
 
-  // The draft's first link, while writing a new message.
-  private var link: String? { editing == nil ? LinkPreview.links(in: text).first?.absoluteString : nil }
+  // The draft's first link, while writing a new message: as typed (the card's url) and as detected (to fetch).
+  private var link: (typed: String, url: URL)? { editing == nil ? LinkPreview.first(in: text) : nil }
 
   // Half a second after a link appears, its card; never one dismissed for that link.
-  private func makeCard(_ link: String?) async {
-    if card?.url != link { card = nil }
-    guard let link, link != unwanted, card == nil else { return }
+  private func makeCard(_ link: (typed: String, url: URL)?) async {
+    if card?.url != link?.typed { card = nil }
+    guard let link, link.typed != unwanted, card == nil else { return }
     try? await Task.sleep(for: .milliseconds(500))
     guard !Task.isCancelled else { return }
-    let p = await Self.preview(link)
-    if !Task.isCancelled, link == self.link { card = p } // a late answer for a link typed past (example.co on the way to .com) stays out
+    let p = await Self.preview(link.typed, link.url)
+    if !Task.isCancelled, link.typed == self.link?.typed { card = p } // a late answer for a link typed past (example.co on the way to .com) stays out
   }
 
   // Made on the phone, so the server never sees the link: one provider per request, kept until it answers.
-  private static func preview(_ link: String) async -> LinkPreview? {
-    guard let url = URL(string: link) else { return nil }
+  private static func preview(_ link: String, _ url: URL) async -> LinkPreview? {
     let provider = LPMetadataProvider()
     provider.timeout = 5
     guard let meta = try? await provider.startFetchingMetadata(for: url) else { return nil }
-    let host = (meta.url ?? url).host().map { $0.hasPrefix("www.") ? String($0.dropFirst(4)) : $0 }
-    var p = LinkPreview(url: link, title: meta.title.map { String($0.prefix(200)) }, site: host)
+    var p = LinkPreview(url: link, title: meta.title.map { String($0.prefix(200)) }, site: Format.host(meta.url ?? url))
     if let images = meta.imageProvider {
       let img: UIImage? = await withCheckedContinuation { c in
         _ = images.loadObject(ofClass: UIImage.self) { obj, _ in c.resume(returning: obj as? UIImage) }
@@ -325,7 +328,7 @@ struct ChatView: View {
       }
     }
     let reply = takeReply()
-    let preview = card.flatMap { $0.fits(t) ? $0 : nil } // never waited for: sent only if ready
+    let preview = card // never waited for: sent only if ready (and `send` drops it if the text lost its link)
     card = nil
     unwanted = nil
     run {
@@ -477,6 +480,8 @@ struct ChatView: View {
 
   private func isLoaded(_ id: Int) -> Bool { talk.messages[convId]?.contains { $0.id == id } == true }
 
+  private var canJump: Bool { at.map { !jumped && talk.hasOlder[convId] != nil && isLoaded($0) } ?? false }
+
   // Under your newest message: whether, or by whom, it's been read.
   private func receipt(_ m: Decrypted) -> String {
     guard let conv else { return "" }
@@ -549,18 +554,17 @@ extension View {
 
 extension LinkPreview {
   var picture: UIImage? { image.flatMap { Data(base64Encoded: $0) }.flatMap(UIImage.init(data:)) }
-  var label: String { site ?? URL(string: url)?.host() ?? url } // the site, else the link's host
-  var web: URL? { URL(string: url).flatMap { ["http", "https"].contains($0.scheme?.lowercased()) ? $0 : nil } } // the sender picks it: http(s) only
+  var label: String { site ?? URL(string: url).flatMap(Format.host) ?? url } // the site, else the link's host
 }
 
-// A link's card under its bubble; a tap opens the link (http and https only).
+// A link's card under its bubble; a tap opens the link (http(s) only: `Talk.decrypt` drops the rest).
 private struct LinkCard: View {
   @Environment(\.openURL) private var openURL
   let p: LinkPreview
   let mine: Bool
 
   var body: some View {
-    Button { if let link = p.web { openURL(link) } } label: {
+    Button { if let link = URL(string: p.url) { openURL(link) } } label: {
       VStack(alignment: .leading, spacing: 0) {
         if let img = p.picture {
           Color.clear.frame(height: 140).overlay { Image(uiImage: img).resizable().scaledToFill() }.clipped()
@@ -578,7 +582,6 @@ private struct LinkCard: View {
     }
     .buttonStyle(.plain)
     .foregroundStyle(Color.ink)
-    .disabled(p.web == nil)
     .accessibilityLabel("Link: \(p.title ?? p.label)")
   }
 }
@@ -801,11 +804,9 @@ private struct MessageRow: View {
     .accessibilityHint("Shows who reacted")
   }
 
-  private static let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
-
   private func linked(_ s: String) -> AttributedString {
     var a = AttributedString(s)
-    for match in Self.detector?.matches(in: s, range: NSRange(s.startIndex..., in: s)) ?? [] {
+    for match in LinkPreview.detector?.matches(in: s, range: NSRange(s.startIndex..., in: s)) ?? [] {
       guard let url = match.url, let r = Range(match.range, in: s), let ar = Range(r, in: a) else { continue }
       a[ar].link = url
       a[ar].underlineStyle = .single
@@ -1034,7 +1035,7 @@ struct Attachment: View {
       } else if saved == nil {
         let url = try await talk.save(convId, file)
         guard !Task.isCancelled else { return } // off screen: decode once when it comes back
-        if file.type.hasPrefix("image/") { preview = await Self.downsample(url) }
+        if file.type.hasPrefix("image/") { preview = await Self.downsample(CGImageSourceCreateWithURL(url as CFURL, nil)) }
         saved = url
       }
     } catch {
@@ -1043,10 +1044,10 @@ struct Attachment: View {
     }
   }
 
-  // A full 48 MP photo decodes to about 190 MB; the bubble and the zoom need only screen size.
-  @concurrent nonisolated static func downsample(_ url: URL) async -> UIImage? {
-    let opts = [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceCreateThumbnailWithTransform: true, kCGImageSourceThumbnailMaxPixelSize: 2048] as CFDictionary
-    guard let src = CGImageSourceCreateWithURL(url as CFURL, nil), let img = CGImageSourceCreateThumbnailAtIndex(src, 0, opts) else { return nil }
+  // A full 48 MP photo decodes to about 190 MB; the bubble and the zoom need only screen size, a grid square less.
+  @concurrent nonisolated static func downsample(_ src: CGImageSource?, max: Int = 2048) async -> UIImage? {
+    let opts = [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceCreateThumbnailWithTransform: true, kCGImageSourceThumbnailMaxPixelSize: max] as CFDictionary
+    guard let src, let img = CGImageSourceCreateThumbnailAtIndex(src, 0, opts) else { return nil }
     return UIImage(cgImage: img)
   }
 

@@ -302,8 +302,8 @@ final class Calls: NSObject {
   // Rings someone in the chat into the group call we're in; returns the server's refusal, if any.
   func ring(_ userId: String) async -> String? {
     guard let talk, let s = session, s.group, let id = s.id else { return "This call has ended." }
-    do { return Self.json(try await talk.socket.ack("call:add", ["id": id, "users": [userId]]))?["error"] as? String }
-    catch { return error.localizedDescription }
+    guard let r = try? await talk.socket.ack("call:add", ["id": id, "users": [userId]], timeout: 10) else { return "Couldn’t reach the server. Check your connection." }
+    return Self.json(r)?["error"] as? String
   }
 
   func flip() {
