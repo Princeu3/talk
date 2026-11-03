@@ -18,6 +18,9 @@ extension Color {
   static let mine = pair(0xa9b887, 0x3e5034)
   static let bubble = pair(0xfafaf6, 0x222b1d)
   static let danger = pair(0xa3352d, 0xf0998e)
+  // Behind swipe-action labels, which are always white: olive in both themes, never sage.
+  static let swipe = pair(0x2e3d28, 0x4f6340)
+
   // Call screens are black in both themes; these are the universal call colors.
   static let endCall = Color(UIColor.hex(0xe5484d))
   static let acceptCall = Color(UIColor.hex(0x30a46c))

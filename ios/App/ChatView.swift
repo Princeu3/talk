@@ -7,6 +7,7 @@ import UniformTypeIdentifiers
 struct ChatView: View {
   @Environment(Talk.self) private var talk
   @Environment(Calls.self) private var calls
+  @Environment(\.dismiss) private var dismiss
   let convId: String
   @State private var text = ""
   @State private var photos: [PhotosPickerItem] = []
@@ -15,12 +16,19 @@ struct ChatView: View {
   @State private var sending = false
   @State private var error: String?
   @State private var reporting = false
-  @State private var reportNote = ""
-  @State private var reported: Decrypted? // set when reporting one message from its long-press menu
+  @State private var reported: Decrypted? // the long-pressed message being reported
   @State private var zoom: UIImage?
   @State private var recorder: VoiceRecorder?
   @State private var startingRecorder = false
   @State private var shown = false
+  @State private var replying: Decrypted?
+  @State private var editing: Decrypted?
+  @State private var deleting: Decrypted?
+  @State private var forwarding: Decrypted?
+  @State private var reactionsOf: Decrypted?
+  @State private var flash: Int? // a quoted message just scrolled to
+  @State private var info = false
+  @FocusState private var focused: Bool
   @Environment(\.scenePhase) private var scenePhase
 
   private var conv: Conversation? { talk.me?.conversations.first { $0.id == convId } }
@@ -29,31 +37,44 @@ struct ChatView: View {
   var body: some View {
     let list = talk.messages[convId] ?? []
     let queued = talk.pending.filter { $0.convId == convId }
-    ScrollView {
-      LazyVStack(spacing: 2) {
-        if talk.hasOlder[convId] == true {
-          ProgressView().padding().onAppear { Task { await talk.loadOlder(convId) } }
-        }
-        ForEach(Array(list.enumerated()), id: \.element.id) { i, m in
-          let prev = i > 0 ? list[i - 1] : nil
-          if prev.map({ !Calendar.current.isDate(date($0), inSameDayAs: date(m)) }) ?? true {
-            Text(Format.day(m.message.createdAt)).font(.caption.weight(.medium)).foregroundStyle(Color.mut).padding(.vertical, 12)
+    let newest = list.last { $0.message.senderId == talk.account.userId && $0.content?.system != true && $0.content?.call == nil }
+    let typers = talk.typers(convId)
+    ScrollViewReader { proxy in
+      ScrollView {
+        LazyVStack(spacing: 2) {
+          if talk.hasOlder[convId] == true {
+            ProgressView().padding().onAppear { Task { await talk.loadOlder(convId) } }
           }
-          let gap: Bool = prev.map { m.message.createdAt - $0.message.createdAt > 5 * 60_000 || $0.message.senderId != m.message.senderId } ?? true
-          MessageRow(convId: convId, m: m, group: conv?.kind == "group", first: gap, onCall: callAgain, onZoom: { zoom = $0 }) {
-            reported = $0
-            reporting = true
+          ForEach(Array(list.enumerated()), id: \.element.id) { i, m in
+            let prev = i > 0 ? list[i - 1] : nil
+            if prev.map({ !Calendar.current.isDate(date($0), inSameDayAs: date(m)) }) ?? true {
+              Text(Format.day(m.message.createdAt)).font(.caption.weight(.medium)).foregroundStyle(Color.mut).padding(.vertical, 12)
+            }
+            let gap: Bool = prev.map {
+              m.message.createdAt - $0.message.createdAt > 5 * 60_000 || $0.message.senderId != m.message.senderId || $0.content?.system == true
+            } ?? true
+            MessageRow(convId: convId, m: m, group: conv?.kind == "group", first: gap, flashing: flash == m.id, onCall: callAgain, onZoom: { zoom = $0 }) {
+              act($0, on: m, proxy)
+            }
+              .padding(.top, gap ? 8 : 0)
+              .id(m.id)
+            if m.id == newest?.id {
+              Text(receipt(m)).font(.caption).foregroundStyle(Color.mut)
+                .frame(maxWidth: .infinity, alignment: .trailing).padding(.horizontal, 4).padding(.top, 2)
+            }
           }
-            .padding(.top, gap ? 8 : 0)
+          ForEach(queued) { p in PendingRow(convId: convId, p: p, onCall: callAgain, onZoom: { zoom = $0 }) }
+          if !typers.isEmpty {
+            TypingBubble().accessibilityLabel(Format.typing(typers.map(talk.name), group: conv?.kind == "group"))
+          }
+          if list.isEmpty, queued.isEmpty, conv != nil {
+            Label("Messages here are end-to-end encrypted.", systemImage: "lock.fill")
+              .font(.footnote).foregroundStyle(Color.mut).padding(.top, 40)
+          }
         }
-        ForEach(queued) { p in PendingRow(convId: convId, p: p, onCall: callAgain, onZoom: { zoom = $0 }) }
-        if list.isEmpty, queued.isEmpty, conv != nil {
-          Label("Messages here are end-to-end encrypted.", systemImage: "lock.fill")
-            .font(.footnote).foregroundStyle(Color.mut).padding(.top, 40)
-        }
+        .padding(.horizontal, 12)
+        .padding(.bottom, 8)
       }
-      .padding(.horizontal, 12)
-      .padding(.bottom, 8)
     }
     .defaultScrollAnchor(.bottom)
     .scrollDismissesKeyboard(.interactively)
@@ -63,6 +84,7 @@ struct ChatView: View {
     .navigationTitle(conv.map(talk.title) ?? "")
     .navigationBarTitleDisplayMode(.inline)
     .toolbar { toolbar }
+    .navigationDestination(isPresented: $info) { ChatInfoView(convId: convId) }
     .onAppear {
       shown = true
       talk.open(convId)
@@ -72,6 +94,9 @@ struct ChatView: View {
       if talk.activeId == convId { talk.open(nil) }
       cancelRecording()
     }
+    // Left the group or removed from it: nothing to show here any more.
+    .onChange(of: conv == nil) { _, gone in if gone { dismiss() } }
+    .onChange(of: text) { _, t in if editing == nil, !t.isEmpty { talk.sendTyping(convId) } }
     // A recording never outlives the open, foreground chat, so the 600 s limit can't send one unseen.
     .onChange(of: scenePhase) { _, p in if p != .active { cancelRecording() } }
     // A call owns the audio session: stop our voice audio the moment one starts or rings.
@@ -84,16 +109,18 @@ struct ChatView: View {
     .alert("Couldn’t send", isPresented: .constant(error != nil), presenting: error) { _ in
       Button("OK") { error = nil }
     } message: { Text($0) }
-    .alert("Report \((reported?.message.senderId ?? peer).map(talk.name) ?? "")", isPresented: $reporting) {
-      TextField("What happened? (optional)", text: $reportNote)
-      Button(reported == nil ? "Report with their last messages" : "Report with this message", role: .destructive) { report(quoting: true) }
-      Button(reported == nil ? "Report without messages" : "Report without the message", role: .destructive) { report(quoting: false) }
-      Button("Cancel", role: .cancel) { reported = nil }
-    } message: {
-      Text(reported == nil
-        ? "Messages are encrypted, so the server’s owner sees only your note, plus their last 10 messages if you choose to include them. Reporting also blocks them."
-        : "Messages are encrypted, so the server’s owner sees only your note, plus this message if you choose to include it. Reporting also blocks them.")
+    .modifier(ReportAlert(convId: convId, who: reported?.message.senderId, one: reported, isPresented: $reporting))
+    .confirmationDialog("Delete for everyone?", isPresented: Binding { deleting != nil } set: { if !$0 { deleting = nil } },
+                        titleVisibility: .visible, presenting: deleting) { d in
+      Button("Delete", role: .destructive) { run { try await talk.unsend(d) } }
+    } message: { _ in Text("It disappears for everyone in this chat.") }
+    .sheet(item: $forwarding) { d in
+      ForwardSheet { target in
+        forwarding = nil
+        run { try await talk.forward(d, to: target) }
+      }
     }
+    .sheet(item: $reactionsOf) { ReactionsSheet(m: $0) }
     .photosPicker(isPresented: $pickingPhotos, selection: $photos, maxSelectionCount: 10, matching: .any(of: [.images, .videos]))
     .onChange(of: photos) { _, items in
       guard !items.isEmpty else { return }
@@ -113,18 +140,16 @@ struct ChatView: View {
   }
 
   @ToolbarContentBuilder private var toolbar: some ToolbarContent {
+    // The header opens chat info, where block, report, mute and the members live.
+    ToolbarItem(placement: .principal) {
+      Button { info = true } label: { header }
+        .buttonStyle(.plain)
+        .accessibilityHint("Shows chat info")
+    }
     if let peer {
       ToolbarItemGroup(placement: .topBarTrailing) {
         Button("Video call", systemImage: "video") { calls.start(convId: convId, peer: peer, kind: "video") }
         Button("Voice call", systemImage: "phone") { calls.start(convId: convId, peer: peer, kind: "audio") }
-        Menu("More", systemImage: "ellipsis") {
-          if talk.isBlocked(peer) {
-            Button("Unblock", systemImage: "hand.raised.slash") { Task { try? await talk.block(peer, false) } }
-          } else {
-            Button("Block", systemImage: "hand.raised", role: .destructive) { Task { try? await talk.block(peer, true) } }
-          }
-          Button("Report", systemImage: "exclamationmark.bubble", role: .destructive) { reporting = true }
-        }
       }
     } else if conv != nil {
       ToolbarItemGroup(placement: .topBarTrailing) {
@@ -134,12 +159,53 @@ struct ChatView: View {
     }
   }
 
+  @ViewBuilder private var header: some View {
+    if let conv {
+      let typers = talk.typers(convId)
+      HStack(spacing: 8) {
+        Avatar(name: talk.title(conv), size: 32)
+        VStack(alignment: .leading, spacing: 0) {
+          Text(talk.title(conv)).font(.headline).lineLimit(1)
+          Text(!typers.isEmpty ? Format.typing(typers.map(talk.name), group: peer == nil)
+               : peer == nil ? conv.members.filter { $0 != talk.account.userId }.map(talk.name).joined(separator: ", ")
+               : "End-to-end encrypted")
+            .font(.caption).foregroundStyle(Color.mut).lineLimit(1)
+        }
+      }
+      .accessibilityElement(children: .combine)
+    }
+  }
+
   private var composer: some View {
-    HStack(alignment: .bottom, spacing: 8) {
-      if let recorder { recording(recorder) } else { editor }
+    VStack(spacing: 4) {
+      if let d = editing ?? replying { bar(d) }
+      HStack(alignment: .bottom, spacing: 8) {
+        if let recorder { recording(recorder) } else { editor }
+      }
     }
     .padding(.horizontal, 8).padding(.vertical, 6)
     .background(.bar)
+  }
+
+  // Above the composer while replying or editing: an accent line, who (or "Editing"), one line of the message, X.
+  private func bar(_ d: Decrypted) -> some View {
+    let mine = d.message.senderId == talk.account.userId
+    return HStack(spacing: 10) {
+      Capsule().fill(Color.accent).frame(width: 3)
+      VStack(alignment: .leading, spacing: 2) {
+        Text(editing != nil ? "Editing" : mine ? "You" : talk.name(d.message.senderId)).font(.subheadline.weight(.semibold))
+        Text(Format.preview(d.content, mine: mine)).font(.subheadline).foregroundStyle(Color.mut).lineLimit(1)
+      }
+      Spacer()
+      Button(editing != nil ? "Cancel editing" : "Cancel reply", systemImage: "xmark") {
+        if editing != nil { text = "" }
+        editing = nil
+        replying = nil
+      }
+      .labelStyle(.iconOnly).frame(width: 44, height: 44).foregroundStyle(Color.mut)
+    }
+    .fixedSize(horizontal: false, vertical: true)
+    .padding(.leading, 12)
   }
 
   @ViewBuilder private var editor: some View {
@@ -150,14 +216,19 @@ struct ChatView: View {
       Image(systemName: "plus").font(.title3).frame(width: 44, height: 44)
     }
     .accessibilityLabel("Attach")
+    .disabled(editing != nil)
     TextField("Message", text: $text, axis: .vertical)
       .lineLimit(1...6)
+      .focused($focused)
       .padding(.horizontal, 14).padding(.vertical, 10)
       .background(Color.surface, in: .rect(cornerRadius: 22))
     // Empty composer: the send spot becomes the mic, as in iMessage and on the web.
-    if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+    let empty = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    if empty && editing == nil {
       let off = sending || calls.current != nil
       roundButton("Record voice message", "mic.fill", action: record).disabled(off).opacity(off ? 0.4 : 1)
+    } else if editing != nil {
+      roundButton("Save edit", "checkmark", action: sendText).disabled(sending || empty)
     } else {
       roundButton("Send", "arrow.up", action: sendText).disabled(sending)
     }
@@ -214,10 +285,24 @@ struct ChatView: View {
     let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !t.isEmpty else { return }
     text = ""
+    if let d = editing {
+      editing = nil
+      guard t != d.content?.text else { return }
+      return run {
+        do { try await talk.edit(d, text: t) } catch { if text.isEmpty { text = t; editing = d }; throw error }
+      }
+    }
+    let reply = takeReply()
     run {
       // Network trouble leaves it queued; only a failure to seal puts the text back.
-      do { try await talk.send(convId, text: t) } catch { if text.isEmpty { text = t }; throw error }
+      do { try await talk.send(convId, text: t, reply: reply) } catch { if text.isEmpty { text = t }; throw error }
     }
+  }
+
+  // The reply bar's message, quoted in whatever is sent next.
+  private func takeReply() -> Reply? {
+    defer { replying = nil }
+    return replying.map { Format.reply($0, mine: $0.message.senderId == talk.account.userId) }
   }
 
   private func record() {
@@ -246,7 +331,8 @@ struct ChatView: View {
     do {
       let (data, voice) = try r.stop()
       guard voice.duration >= 0.7 else { return } // a mis-tap, not a message
-      run { try await talk.send(convId, files: [try await talk.upload(convId, data, name: "Voice message.m4a", type: "audio/mp4", voice: voice)]) }
+      let reply = takeReply()
+      run { try await talk.send(convId, files: [try await talk.upload(convId, data, name: "Voice message.m4a", type: "audio/mp4", voice: voice)], reply: reply) }
     } catch { self.error = error.localizedDescription }
   }
 
@@ -256,6 +342,7 @@ struct ChatView: View {
   }
 
   private func sendPhotos(_ items: [PhotosPickerItem]) {
+    let reply = takeReply()
     run {
       var refs: [FileRef] = []
       for (i, item) in items.enumerated() {
@@ -264,11 +351,12 @@ struct ChatView: View {
         let ext = type.preferredFilenameExtension ?? "jpg"
         refs.append(try await talk.upload(convId, data, name: "\(type.conforms(to: .movie) ? "Video" : "Photo") \(i + 1).\(ext)", type: type.preferredMIMEType ?? "image/jpeg"))
       }
-      if !refs.isEmpty { try await talk.send(convId, files: refs) }
+      if !refs.isEmpty { try await talk.send(convId, files: refs, reply: reply) }
     }
   }
 
   private func sendFiles(_ urls: [URL]) {
+    let reply = takeReply()
     run {
       var refs: [FileRef] = []
       for url in urls {
@@ -278,7 +366,7 @@ struct ChatView: View {
         let type = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "application/octet-stream"
         refs.append(try await talk.upload(convId, data, name: url.lastPathComponent, type: type))
       }
-      if !refs.isEmpty { try await talk.send(convId, files: refs) }
+      if !refs.isEmpty { try await talk.send(convId, files: refs, reply: reply) }
     }
   }
 
@@ -287,20 +375,86 @@ struct ChatView: View {
     calls.start(convId: convId, peer: peer, kind: kind)
   }
 
+  private func act(_ a: RowAction, on m: Decrypted, _ proxy: ScrollViewProxy) {
+    switch a {
+    case .react(let e): run { try await talk.react(m, e) }
+    case .reactions: reactionsOf = m
+    case .reply:
+      if editing != nil { text = "" }
+      editing = nil
+      replying = m
+      focused = true
+    case .edit:
+      replying = nil
+      editing = m
+      text = m.content?.text ?? ""
+      focused = true
+    case .forward: forwarding = m
+    case .delete: deleting = m
+    case .report:
+      reported = m
+      reporting = true
+    case .quote(let id):
+      guard isLoaded(id) else { return } // not loaded (or unsent): the quote is all there is
+      withAnimation { proxy.scrollTo(id, anchor: .center) }
+      flash = id
+      Task {
+        try? await Task.sleep(for: .seconds(1.2))
+        if flash == id { flash = nil }
+      }
+    }
+  }
+
+  private func isLoaded(_ id: Int) -> Bool { talk.messages[convId]?.contains { $0.id == id } == true }
+
+  // Under your newest message: whether, or by whom, it's been read.
+  private func receipt(_ m: Decrypted) -> String {
+    guard let conv else { return "" }
+    let readers = conv.members.filter { $0 != talk.account.userId && (conv.reads?[$0] ?? 0) >= m.id }
+    if readers.isEmpty { return "Sent" }
+    if conv.kind == "dm" { return "Read" }
+    return readers.count <= 3 ? "Read by " + readers.map(talk.name).joined(separator: ", ") : "Read by \(readers.count)"
+  }
+}
+
+// Reports someone: one long-pressed message, or with none, their last 10 here. Reporting also blocks them.
+struct ReportAlert: ViewModifier {
+  @Environment(Talk.self) private var talk
+  let convId: String
+  let who: String?
+  let one: Decrypted?
+  @Binding var isPresented: Bool
+  @State private var note = ""
+  @State private var error: String?
+
+  func body(content: Content) -> some View {
+    content
+      .alert("Report \(who.map(talk.name) ?? "")", isPresented: $isPresented) {
+        TextField("What happened? (optional)", text: $note)
+        Button(one == nil ? "Report with their last messages" : "Report with this message", role: .destructive) { report(quoting: true) }
+        Button(one == nil ? "Report without messages" : "Report without the message", role: .destructive) { report(quoting: false) }
+        Button("Cancel", role: .cancel) {}
+      } message: {
+        Text(one == nil
+          ? "Messages are encrypted, so the server’s owner sees only your note, plus their last 10 messages if you choose to include them. Reporting also blocks them."
+          : "Messages are encrypted, so the server’s owner sees only your note, plus this message if you choose to include it. Reporting also blocks them.")
+      }
+      .alert("Couldn’t report", isPresented: .constant(error != nil), presenting: error) { _ in
+        Button("OK") { error = nil }
+      } message: { Text($0) }
+  }
+
   private func report(quoting: Bool) {
-    let one = reported
-    reported = nil
-    // One long-pressed message reports its sender (groups too); the toolbar reports the DM peer.
-    guard let who = one?.message.senderId ?? peer else { return }
+    guard let who else { return }
     let picked = one.map { [$0] } ?? Array((talk.messages[convId] ?? []).filter { $0.message.senderId == who && $0.content != nil && !$0.forged }.suffix(10))
     // Decrypted here, so the server's owner can see what was said only if the reporter opts in.
     let quotes = quoting ? picked.filter { $0.content != nil }.map {
       "[\(Date(timeIntervalSince1970: $0.message.createdAt / 1000).formatted(date: .abbreviated, time: .shortened))] \(Format.preview($0.content, mine: false))"
     } : []
-    let note = Report.note(reportNote, quoting: quotes)
-    reportNote = ""
+    let text = Report.note(note, quoting: quotes)
+    note = ""
     Task {
-      do { try await talk.report(who, convId: convId, note: note) } catch { self.error = error.localizedDescription }
+      do { try await talk.report(who, convId: convId, note: text) } catch { self.error = error.localizedDescription }
     }
   }
 }
@@ -362,15 +516,19 @@ private struct PendingRow: View {
   }
 }
 
+enum RowAction { case reply, edit, forward, delete, report, reactions, react(String), quote(Int) }
+
 private struct MessageRow: View {
   @Environment(Talk.self) private var talk
   let convId: String
   let m: Decrypted
   let group: Bool
   let first: Bool
+  var flashing = false
   let onCall: (String) -> Void
   let onZoom: (UIImage) -> Void
-  let onReport: (Decrypted) -> Void
+  let onAction: (RowAction) -> Void
+  @State private var drag: CGFloat = 0
 
   var body: some View {
     let mine = m.message.senderId == talk.account.userId
@@ -391,19 +549,30 @@ private struct MessageRow: View {
       }
       .frame(maxWidth: .infinity)
       .padding(.vertical, 8)
+    } else if let c = m.content, c.system == true, !m.forged {
+      Text(c.text ?? "").font(.caption).foregroundStyle(Color.mut).multilineTextAlignment(.center)
+        .frame(maxWidth: .infinity).padding(.vertical, 6)
     } else {
       VStack(alignment: mine ? .trailing : .leading, spacing: 4) {
         if group && !mine && first {
           Text(talk.name(m.message.senderId)).font(.caption.weight(.semibold)).foregroundStyle(Color.mut).padding(.horizontal, 12)
         }
         if let c = m.content {
+          if c.forwarded == true {
+            Label("Forwarded", systemImage: "arrowshape.turn.up.right").font(.caption).foregroundStyle(Color.mut).padding(.horizontal, 12)
+          }
+          if let r = c.reply { quote(r) }
           ForEach(c.files ?? [], id: \.id) { f in Attachment(convId: convId, file: f, mine: mine, onZoom: onZoom) }
+          // No text selection: a long press opens the message menu, which has Copy.
           if let t = c.text, !t.isEmpty {
             Text(linked(t))
               .padding(.horizontal, 14).padding(.vertical, 9)
               .background(mine ? Color.mine : Color.bubble, in: .rect(cornerRadius: 20))
               .foregroundStyle(Color.ink)
-              .textSelection(.enabled)
+          }
+          if !m.reactions.isEmpty { pills }
+          if m.message.editedAt != nil {
+            Text("Edited").font(.caption).foregroundStyle(Color.mut).padding(.horizontal, 12)
           }
           if m.forged {
             Label("Sender doesn’t match. Don’t trust this message.", systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(Color.danger)
@@ -413,17 +582,103 @@ private struct MessageRow: View {
             .padding(.horizontal, 14).padding(.vertical, 9).background(Color.bubble, in: .rect(cornerRadius: 20))
         }
       }
-      .contextMenu {
-        if !mine {
-          if let t = m.content?.text, !t.isEmpty {
-            Button("Copy", systemImage: "doc.on.doc") { UIPasteboard.general.string = t }
-          }
-          Button("Report…", systemImage: "exclamationmark.bubble", role: .destructive) { onReport(m) }
-        }
+      .background(Color.accent.opacity(flashing ? 0.25 : 0), in: .rect(cornerRadius: 20))
+      .animation(.easeOut(duration: 0.6), value: flashing)
+      .offset(x: drag)
+      .background(alignment: .leading) {
+        Image(systemName: "arrowshape.turn.up.left.fill").foregroundStyle(Color.mut)
+          .opacity(min(1, drag / 60)).offset(x: drag / 2 - 10).accessibilityHidden(true)
       }
+      .contextMenu { menu(mine) }
+      .simultaneousGesture(swipe, including: m.message.id != 0 && m.content != nil ? .all : .subviews)
+      .sensoryFeedback(.impact(weight: .light), trigger: drag >= 60) { !$0 && $1 }
+      .accessibilityAction(named: "Reply") { onAction(.reply) }
       .frame(maxWidth: .infinity, alignment: mine ? .trailing : .leading)
       .padding(mine ? .leading : .trailing, 48)
     }
+  }
+
+  // Reactions first, then the actions; your own messages can be edited (15 min) and deleted.
+  @ViewBuilder private func menu(_ mine: Bool) -> some View {
+    if m.message.id != 0 { // a pending row has no id to act on yet
+      if let c = m.content {
+        ControlGroup {
+          ForEach(Talk.emoji, id: \.self) { e in
+            Button { onAction(.react(e)) } label: { Text(e) }
+          }
+        }
+        .controlGroupStyle(.palette)
+        .menuActionDismissBehavior(.enabled) // palettes stay open by default; one pick is the whole job
+        Button("Reply", systemImage: "arrowshape.turn.up.left") { onAction(.reply) }
+        if let t = c.text, !t.isEmpty {
+          Button("Copy", systemImage: "doc.on.doc") { UIPasteboard.general.string = t }
+        }
+        Button("Forward", systemImage: "arrowshape.turn.up.right") { onAction(.forward) }
+        if mine, c.text?.isEmpty == false, Date().timeIntervalSince1970 * 1000 - m.message.createdAt < 15 * 60_000 {
+          Button("Edit", systemImage: "pencil") { onAction(.edit) }
+        }
+      }
+      if mine {
+        Button("Delete", systemImage: "trash", role: .destructive) { onAction(.delete) }
+      } else {
+        Button("Report…", systemImage: "exclamationmark.bubble", role: .destructive) { onAction(.report) }
+      }
+    }
+  }
+
+  // Swipe right to reply; mostly-vertical drags stay with the scroll view.
+  private var swipe: some Gesture {
+    DragGesture(minimumDistance: 20)
+      .onChanged { v in
+        guard v.translation.width > 0, v.translation.width > abs(v.translation.height) * 2 else { return }
+        drag = min(v.translation.width, 80)
+      }
+      .onEnded { _ in
+        if drag >= 60 { onAction(.reply) }
+        withAnimation(.spring(duration: 0.3)) { drag = 0 }
+      }
+  }
+
+  private func quote(_ r: Reply) -> some View {
+    let who = r.from == talk.account.userId ? "You" : talk.name(r.from)
+    return Button { onAction(.quote(r.id)) } label: {
+      HStack(spacing: 8) {
+        Capsule().fill(Color.accent).frame(width: 3)
+        VStack(alignment: .leading, spacing: 2) {
+          Text(who).font(.caption.weight(.semibold))
+          Text(r.preview).font(.caption).foregroundStyle(Color.mut).lineLimit(2)
+        }
+      }
+      .fixedSize(horizontal: false, vertical: true)
+      .padding(.horizontal, 10).padding(.vertical, 6)
+      .background(Color.raised, in: .rect(cornerRadius: 14))
+    }
+    .buttonStyle(.plain)
+    .foregroundStyle(Color.ink)
+    .accessibilityLabel("Reply to \(who): \(r.preview)")
+    .accessibilityHint("Shows the original message")
+  }
+
+  // One pill per emoji with its count, tucked under the bubble's edge; yours is outlined.
+  private var pills: some View {
+    let counts = Dictionary(grouping: m.reactions.values) { $0 }.map { (emoji: $0.key, n: $0.value.count) }
+      .sorted { (Talk.emoji.firstIndex(of: $0.emoji) ?? 99, $0.emoji) < (Talk.emoji.firstIndex(of: $1.emoji) ?? 99, $1.emoji) }
+    let yours = m.reactions[talk.account.userId]
+    return Button { onAction(.reactions) } label: {
+      HStack(spacing: 4) {
+        ForEach(counts, id: \.emoji) { r in
+          Text(r.n > 1 ? "\(r.emoji) \(r.n)" : r.emoji).font(.footnote).monospacedDigit()
+            .padding(.horizontal, 8).padding(.vertical, 3)
+            .background(r.emoji == yours ? Color.mine : Color.surface, in: .capsule)
+            .overlay { Capsule().strokeBorder(r.emoji == yours ? Color.accent : Color.bg, lineWidth: 1.5) }
+        }
+      }
+    }
+    .buttonStyle(.plain)
+    .foregroundStyle(Color.ink)
+    .padding(.top, -10).padding(.horizontal, 8)
+    .accessibilityLabel("Reactions: " + counts.map { "\($0.emoji) \($0.n)" }.joined(separator: ", "))
+    .accessibilityHint("Shows who reacted")
   }
 
   private func linked(_ s: String) -> AttributedString {
@@ -438,7 +693,90 @@ private struct MessageRow: View {
   }
 }
 
+// Three dots taking turns at the bottom of the thread while someone types.
+private struct TypingBubble: View {
+  var body: some View {
+    TimelineView(.periodic(from: .now, by: 0.4)) { t in
+      let on = Int(t.date.timeIntervalSinceReferenceDate / 0.4) % 3
+      HStack(spacing: 4) {
+        ForEach(0..<3, id: \.self) { i in Circle().fill(Color.mut).frame(width: 8, height: 8).opacity(i == on ? 1 : 0.35) }
+      }
+      .padding(.horizontal, 14).padding(.vertical, 13)
+      .background(Color.bubble, in: .rect(cornerRadius: 20))
+    }
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .padding(.top, 8)
+    .accessibilityElement()
+  }
+}
+
+private struct ForwardSheet: View {
+  @Environment(Talk.self) private var talk
+  @Environment(\.dismiss) private var dismiss
+  let onPick: (String) -> Void
+
+  var body: some View {
+    NavigationStack {
+      List(talk.me?.conversations ?? []) { c in
+        Button { onPick(c.id) } label: {
+          HStack(spacing: 12) {
+            Avatar(name: talk.title(c), size: 40)
+            Text(talk.title(c)).foregroundStyle(Color.ink)
+          }
+        }
+      }
+      .navigationTitle("Forward to")
+      .navigationBarTitleDisplayMode(.inline)
+      .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
+    }
+    .tint(Color.accent)
+  }
+}
+
+// Who reacted with what; your own row takes yours back.
+private struct ReactionsSheet: View {
+  @Environment(Talk.self) private var talk
+  @Environment(\.dismiss) private var dismiss
+  let m: Decrypted
+
+  var body: some View {
+    let live = talk.messages[m.message.convId]?.first { $0.id == m.id } ?? m
+    let me = talk.account.userId
+    let rows = live.reactions.sorted { $0.key == me || ($1.key != me && talk.name($0.key) < talk.name($1.key)) }
+    NavigationStack {
+      List(rows, id: \.key) { r in
+        if r.key == me {
+          Button { Task { try? await talk.react(live, r.value) } } label: { row(r.key, r.value, mine: true) }
+            .accessibilityHint("Removes your reaction")
+        } else {
+          row(r.key, r.value, mine: false)
+        }
+      }
+      .navigationTitle("Reactions")
+      .navigationBarTitleDisplayMode(.inline)
+      .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+    }
+    .tint(Color.accent)
+    .presentationDetents([.medium, .large])
+    .onChange(of: live.reactions.isEmpty) { _, empty in if empty { dismiss() } }
+  }
+
+  private func row(_ userId: String, _ emoji: String, mine: Bool) -> some View {
+    HStack(spacing: 12) {
+      Avatar(name: talk.name(userId), size: 36)
+      VStack(alignment: .leading) {
+        Text(mine ? "You" : talk.name(userId)).foregroundStyle(Color.ink)
+        if mine { Text("Tap to remove").font(.caption).foregroundStyle(Color.mut) }
+      }
+      Spacer()
+      Text(emoji).font(.title2)
+    }
+    .accessibilityElement(children: .combine)
+  }
+}
+
 private struct Attachment: View {
+
   @Environment(Talk.self) private var talk
   @Environment(Calls.self) private var calls
   let convId: String
