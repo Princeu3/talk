@@ -322,7 +322,7 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
   }
 
   // One more page of a chat's history into the archive; true once it holds the first message.
-  const older = (convId: string) => {
+  const older = useCallback((convId: string) => {
     let a = archive.current.get(convId)
     if (!a) archive.current.set(convId, (a = { list: [], done: false }))
     if (a.done) return Promise.resolve(true)
@@ -333,22 +333,22 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
         const page = await api<Message[]>('GET', `/api/conversations/${convId}/messages?limit=${ARCHIVE_PAGE}${from ? `&before=${from}` : ''}`)
         const list = await Promise.all(page.map(decrypt))
         if (archive.current.get(convId) !== arch) return true // dropped meanwhile (left, unblocked)
-        arch.list.push(...list)
+        arch.list.push(...list.reverse()) // pages come oldest first
         arch.done = page.length < ARCHIVE_PAGE
         return arch.done
       } finally {
         arch.busy = undefined
       }
     })())
-  }
+  }, [decrypt])
 
   // All of a chat we hold, newest first: what the chat shows, then the archive below it.
-  const history = (convId: string) => {
+  const history = useCallback((convId: string) => {
     const shown = msgRef.current[convId] ?? []
     const a = archive.current.get(convId)
     const floor = shown[0]?.id ?? Infinity
     return { list: shown.toReversed().concat(a?.list.filter((m) => m.id < floor) ?? []), done: !!a?.done }
-  }
+  }, [])
 
   // Opens a chat at a message (from search or shared media): the archive from it up joins the chat, which scrolls to it.
   // shortcut: the chat then renders everything from that message down; window the list if far jumps get slow.
