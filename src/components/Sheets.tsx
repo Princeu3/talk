@@ -196,7 +196,10 @@ const themes = [
   ['dark', 'Dark', Moon],
 ] as const
 
-// Segmented control built on radios, so arrow keys and screen readers work for free.
+// One option of a segmented control built on radios, so arrow keys and screen readers work for free.
+export const segment =
+  'pressable flex min-h-11 flex-1 cursor-pointer items-center justify-center gap-1.5 rounded-full text-sm font-medium text-mut has-checked:bg-mine has-checked:font-semibold has-checked:text-ink has-focus-visible:outline-2 has-focus-visible:outline-accent'
+
 function ThemePicker() {
   const [theme, set] = useState<Theme>(loadTheme)
   return (
@@ -204,10 +207,7 @@ function ThemePicker() {
       <legend className="sr-only">Theme</legend>
       <div className="flex gap-1 rounded-full bg-raised p-1">
         {themes.map(([value, label, Icon]) => (
-          <label
-            key={value}
-            className="pressable flex min-h-11 flex-1 cursor-pointer items-center justify-center gap-1.5 rounded-full text-sm font-medium text-mut has-checked:bg-mine has-checked:font-semibold has-checked:text-ink has-focus-visible:outline-2 has-focus-visible:outline-accent"
-          >
+          <label key={value} className={segment}>
             <input
               type="radio"
               name="theme"

@@ -28,6 +28,7 @@ export interface Pending {
 const PAGE = 50
 const ARCHIVE_PAGE = 500 // the server's most
 export const MAX_FILE = 50 * 1024 * 1024
+export const AUTO_LOAD = 25 * 1024 * 1024 // bigger files wait for a tap
 
 const bump = (list: Conversation[], msg: Message, unread: boolean) =>
   list

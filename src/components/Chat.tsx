@@ -3,7 +3,7 @@ import {
   type ClipboardEvent, type CSSProperties, type FormEvent, type KeyboardEvent, type MouseEvent, type PointerEvent, type ReactNode,
 } from 'react'
 import type { Talk, Decrypted } from '../lib/useTalk.ts'
-import { unfurl } from '../lib/useTalk.ts'
+import { AUTO_LOAD, unfurl } from '../lib/useTalk.ts'
 import type { CallKind, FileRef, LinkPreview, Voice } from '../../shared/types.ts'
 import { callNoun, callSummary, convName, dayLabel, fileSize, host, preview, typingLabel, URL_RE, userName, who } from '../lib/format.ts'
 import { canRecord, startRecording, type Recording } from '../lib/voice.ts'
@@ -14,7 +14,6 @@ import { VoicePlayer, VoiceRecorder } from './Voice.tsx'
 import { Confirm, ForwardSheet, Report, Sheet, useEscape } from './Sheets.tsx'
 import ChatInfo from './ChatInfo.tsx'
 
-const AUTO_LOAD = 25 * 1024 * 1024
 const RUN_GAP = 5 * 60_000
 const EDIT_MS = 15 * 60_000 // the server's window
 const EMOJI = ['👍', '❤️', '😂', '😮', '😢', '🙏']
@@ -318,7 +317,8 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
   const [files, setFiles] = useState<File[]>([])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  const [zoom, setZoom] = useState<string>()
+  const [zoom, setZoom] = useState<{ url: string; video?: boolean }>()
+  const zoomTo = (url: string, video?: boolean) => setZoom({ url, video })
   const [rec, setRec] = useState<Recording | null>(null)
   const [unsent, setUnsent] = useState<{ file: File; voice: Voice } | null>(null) // kept so a failed send isn't lost
   const [reply, setReply] = useState<Decrypted | null>(null)
@@ -350,9 +350,14 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
 
   useEffect(() => {
     if (!zoom) return
-    const onKey = (e: globalThis.KeyboardEvent) => e.key === 'Escape' && setZoom(undefined)
-    addEventListener('keydown', onKey)
-    return () => removeEventListener('keydown', onKey)
+    // Captured and stopped, so a sheet under the viewer (shared media) stays open.
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      e.stopPropagation()
+      setZoom(undefined)
+    }
+    addEventListener('keydown', onKey, true)
+    return () => removeEventListener('keydown', onKey, true)
   }, [zoom])
 
   useEffect(() => {
@@ -673,7 +678,7 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
                     {...menuHandlers(m)}
                     className={`group relative ${column} ${mine ? 'items-end self-end' : 'items-start self-start'} [-webkit-touch-callout:none] pointer-coarse:select-none`}
                   >
-                    <Bubble m={m} mine={mine} first={first} last={last} talk={talk} onCall={onCall} onZoom={setZoom} onJump={jump} />
+                    <Bubble m={m} mine={mine} first={first} last={last} talk={talk} onCall={onCall} onZoom={zoomTo} onJump={jump} />
                     {m.reacts && Object.keys(m.reacts).length > 0 && (
                       <ReactionPill reacts={m.reacts} myId={me.user.id} onClick={() => setAct({ kind: 'reactions', m })} />
                     )}
@@ -706,7 +711,7 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
               <div className={`${column} self-end`}>
                 <Bubble
                   m={{ id: 0, convId, senderId: me.user.id, body: p.body, createdAt: p.createdAt, content: p.content, forged: false, system: false }}
-                  mine first last talk={talk} onZoom={setZoom}
+                  mine first last talk={talk} onZoom={zoomTo}
                 />
               </div>
             )}
@@ -835,11 +840,15 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
       </form>
 
       {zoom && (
-        <div role="dialog" aria-label="Photo" onClick={() => setZoom(undefined)} className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 p-4">
-          <button onClick={() => setZoom(undefined)} aria-label="Close photo" className="pressable pt-safe absolute right-3 top-0 flex h-11 w-11 items-center justify-center rounded-full text-white">
+        <div role="dialog" aria-label={zoom.video ? 'Video' : 'Photo'} onClick={() => setZoom(undefined)} className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 p-4">
+          <button onClick={() => setZoom(undefined)} aria-label={zoom.video ? 'Close video' : 'Close photo'} className="pressable pt-safe absolute right-3 top-0 flex h-11 w-11 items-center justify-center rounded-full text-white">
             <Close />
           </button>
-          <img src={zoom} alt="" className="max-h-full max-w-full object-contain" />
+          {zoom.video ? (
+            <video src={zoom.url} controls autoPlay playsInline onClick={(e) => e.stopPropagation()} className="max-h-full max-w-full" />
+          ) : (
+            <img src={zoom.url} alt="" className="max-h-full max-w-full object-contain" />
+          )}
         </div>
       )}
 
@@ -880,7 +889,7 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
         </MessageMenu>
       )}
 
-      {info && <ChatInfo talk={talk} convId={convId} onClose={() => setInfo(false)} onCall={onCall} onAddPeople={onAddPeople} />}
+      {info && <ChatInfo talk={talk} convId={convId} onClose={() => setInfo(false)} onCall={onCall} onAddPeople={onAddPeople} onZoom={zoomTo} />}
       {act?.kind === 'delete' && (
         <Confirm
           title="Delete for everyone?"
