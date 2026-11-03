@@ -30,6 +30,7 @@ export interface GroupCall {
   kind: CallKind
   from: string // who started it
   peers: string[]
+  ringing?: string[] // rung and not yet in, declined or timed out
 }
 
 export interface Message {
@@ -63,6 +64,17 @@ export interface MessageBody {
   reply?: Reply
   forwarded?: boolean
   system?: boolean // a group event ("Alice added Bob"); `text` holds it, so older apps show it as a message
+  preview?: LinkPreview
+}
+
+// A link's card. The sender's device makes it and seals it with the message,
+// so readers never contact the site.
+export interface LinkPreview {
+  url: string
+  title?: string // at most 200 chars
+  description?: string // at most 300 chars
+  site?: string
+  image?: string // JPEG thumbnail, base64, longest side ≤ 320 px, ≤ 24 KB
 }
 
 // Quoted in a reply, so it shows even when the original isn't loaded or was unsent.

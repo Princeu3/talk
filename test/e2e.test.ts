@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { io as connect, type Socket } from 'socket.io-client'
 import * as c from '../src/lib/crypto.ts'
+import { blocked, parseHead } from '../server/unfurl.ts'
 import type { GroupCall, Me, Message, MessageBody, ReactionBody } from '../shared/types.ts'
 
 const PORT = 4000 + Math.floor(Math.random() * 1000)
@@ -420,7 +421,9 @@ test('group calls: ring, join, mesh signaling, leave, rejoin', async () => {
   const live = next<{ convId: string; call: GroupCall | null }>(so, 'call:update')
   const { id } = await sg.emitWithAck('call:start', { convId: group.id, kind: 'video' })
   for (const r of await Promise.all(rings)) assert.deepEqual([r.id, r.from, r.group], [id, gina.id, true])
-  assert.deepEqual((await live).call, { id, kind: 'video', from: gina.id, peers: [gina.id] })
+  const { ringing, ...call } = (await live).call!
+  assert.deepEqual(call, { id, kind: 'video', from: gina.id, peers: [gina.id] })
+  assert.deepEqual(ringing!.sort(), [hal.id, ivy.id, old.id].sort())
   await pushed((p) => p.callId === id && p.token === VOIP2)
   await new Promise((r) => setTimeout(r, 100))
   assert.ok(!relayed.some((p) => p.callId === id && p.token === VOIP1), 'old phones aren’t rung')
@@ -482,6 +485,66 @@ test('group calls: ring, join, mesh signaling, leave, rejoin', async () => {
   assert.equal((await api(gina, 'DELETE', `/api/conversations/${group.id}/members/${ivy.id}`)).status, 200)
   await Promise.all([dropped, kicked])
   assert.deepEqual((await convOf(gina, group.id))!.call!.peers.sort(), [gina.id, hal.id].sort())
+})
+
+test('group calls: add people mid-call, blocks keep people apart', async () => {
+  const alice = await login('Alice')
+  const [jo, kai, lee, max, ned] = await Promise.all(['Jo', 'Kai', 'Lee', 'Max', 'Ned'].map(async (n) => register(n, await invite(alice))))
+  const group = await createConv(jo, 'group', [jo, kai, lee, max, ned], 'Add crew')
+  const [sj, sk, sl, sm, sn] = await Promise.all([jo, kai, lee, max, ned].map((u) => socket(u, 2)))
+  await api(max, 'PUT', `/api/blocks/${jo.id}`) // Max blocked Jo
+  await api(jo, 'PUT', `/api/blocks/${ned.id}`) // Jo blocked Ned
+
+  // Jo starts: neither Max nor Ned is rung
+  const first = next<{ call: GroupCall | null }>(sk, 'call:update')
+  const { id } = await sj.emitWithAck('call:start', { convId: group.id, kind: 'audio' })
+  assert.deepEqual((await first).call!.ringing!.sort(), [kai.id, lee.id].sort())
+  await sk.emitWithAck('call:join', { id })
+
+  // Lee declines, then Kai rings her again from the call; she joins
+  const cleared = next<{ call: GroupCall | null }>(sk, 'call:update', (u) => !u.call?.ringing?.length)
+  sl.emit('call:hangup', { id })
+  await cleared
+  const again = next<{ id: string; group?: true }>(sl, 'call:ring')
+  const ringingLee = next<{ call: GroupCall | null }>(sj, 'call:update', (u) => !!u.call?.ringing?.includes(lee.id))
+  assert.deepEqual(await sk.emitWithAck('call:add', { id, users: [lee.id] }), {})
+  assert.deepEqual(await again, { id, convId: group.id, from: jo.id, kind: 'audio', group: true })
+  await ringingLee
+  assert.equal((await sl.emitWithAck('call:join', { id })).peers!.length, 2)
+  assert.deepEqual((await convOf(jo, group.id))!.call!.ringing, [])
+
+  // blocks: neither can join, and nobody can ring them in
+  assert.equal((await sm.emitWithAck('call:join', { id })).error, 'Unblock Jo to join this call.')
+  assert.equal((await sn.emitWithAck('call:join', { id })).error, "You can't join this call.")
+  assert.equal((await sk.emitWithAck('call:add', { id, users: [max.id, ned.id] })).error, "They can't be rung right now.")
+  await none(sm, 'call:ring')
+  // only people in the call can ring others
+  assert.equal((await sm.emitWithAck('call:add', { id, users: [ned.id] })).error, 'This call has ended.')
+})
+
+test('history pages and link preview guards', async () => {
+  const alice = await login('Alice')
+  const [pat] = await Promise.all(['Pat'].map(async (n) => register(n, await invite(alice))))
+  const dm = await createConv(alice, 'dm', [alice, pat])
+  const sa = await socket(alice)
+  for (const text of ['one', 'two', 'three']) await sa.emitWithAck('send', { convId: dm.id, body: await seal(alice, dm.id, { from: alice.id, text }) })
+  assert.equal((await (await api(pat, 'GET', `/api/conversations/${dm.id}/messages?limit=2`)).r.json()).length, 2)
+  assert.equal((await (await api(pat, 'GET', `/api/conversations/${dm.id}/messages?limit=junk`)).r.json()).length, 3)
+
+  // the server won't fetch its own network for a preview, and stops at 20 a minute
+  for (const url of ['http://127.0.0.1/', `http://localhost:${PORT}/api/me`, 'http://[::1]/', 'http://169.254.169.254/', 'file:///etc/passwd', 'not a url'])
+    assert.equal((await api(pat, 'POST', '/api/unfurl', { url })).status, 400, url)
+  let last = 0
+  for (let i = 0; i < 15; i++) last = (await api(pat, 'POST', '/api/unfurl', { url: 'http://10.0.0.1/' })).status
+  assert.equal(last, 429)
+
+  assert.ok(['127.0.0.1', '10.2.3.4', '100.64.0.1', '172.20.0.1', '192.168.1.1', '169.254.169.254', '::1', '::', 'fd12::1', 'fe80::1', '::ffff:127.0.0.1', '64:ff9b::a00:1', 'nonsense'].every(blocked))
+  assert.ok(!['8.8.8.8', '1.1.1.1', '2606:4700:4700::1111', '::ffff:8.8.8.8'].some(blocked))
+  const head = parseHead(
+    `<title>Fallback</title><meta content='A &amp; B' property="og:title"><meta name=description content="Desc &#x2014; here"><meta property="og:image" content="/img/a.png"><meta property="og:site_name" content="Site">`,
+    new URL('https://example.com/post/1'),
+  )
+  assert.deepEqual(head, { url: 'https://example.com/post/1', title: 'A & B', description: 'Desc — here', site: 'Site', image: 'https://example.com/img/a.png' })
 })
 
 test('safety code is stable and short', async () => {
