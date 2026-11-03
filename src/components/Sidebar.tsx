@@ -52,35 +52,21 @@ function SearchResults({ talk, q }: { talk: Talk; q: string }) {
   const [tick, setTick] = useState(0)
   const [busy, setBusy] = useState(false)
   const words = q.length >= 2
-  const { older } = talk
+  const { backfill } = talk
   const convs = useRef(me.conversations)
 
-  // Page every chat's older history, 3 chats at a time; results re-run (at most every 300 ms) as pages land.
+  // Page every chat's older history; results re-run as pages land.
   useEffect(() => {
     if (!words) return
-    let stop = false
-    let last = 0
-    const todo = convs.current.map((c) => c.id)
-    const worker = async () => {
-      for (let id; !stop && (id = todo.shift()); ) {
-        // A chat that fails to load counts as done, so one bad chat can't stall the rest.
-        while (!stop && !(await older(id).catch(() => true))) {
-          if (Date.now() - last < 300) continue
-          last = Date.now()
-          setTick((n) => n + 1)
-        }
-      }
-    }
     setBusy(true)
-    Promise.all([worker(), worker(), worker()]).then(() => {
-      if (stop) return
-      setBusy(false)
-      setTick((n) => n + 1)
-    })
-    return () => {
-      stop = true
-    }
-  }, [words, older])
+    return backfill(
+      convs.current.map((c) => c.id),
+      (finished) => {
+        setTick((n) => n + 1)
+        if (finished) setBusy(false)
+      },
+    )
+  }, [words, backfill])
 
   const chats = me.conversations.filter(
     (conv) => fold(convName(me, conv)).includes(q) || conv.members.some((u) => u !== me.user.id && fold(userName(me, u)).includes(q)),
@@ -97,7 +83,10 @@ function SearchResults({ talk, q }: { talk: Talk; q: string }) {
         if (++n >= MAX_HITS) break
       }
     }
-    return all.sort((a, b) => b.id - a.id).slice(0, MAX_HITS)
+    return all
+      .sort((a, b) => b.id - a.id)
+      .slice(0, MAX_HITS)
+      .map((m) => ({ m, parts: fields(m).reduce<ReturnType<typeof snippet>>((hit, s) => hit ?? snippet(s, q), null) }))
   }, [q, words, me, messages, history, tick]) // tick: a page landed in the archive, which isn't state
 
   return (
@@ -126,10 +115,9 @@ function SearchResults({ talk, q }: { talk: Talk; q: string }) {
         <section aria-label="Messages">
           <h2 className="px-3 pb-1 pt-3 text-sm font-semibold text-mut">Messages</h2>
           <ul>
-            {hits.map((m) => {
+            {hits.map(({ m, parts }) => {
               const conv = me.conversations.find((c) => c.id === m.convId)!
               const name = convName(me, conv)
-              const parts = fields(m).map((s) => snippet(s, q)).find((p) => !!p)
               const who = m.senderId === me.user.id ? 'You: ' : conv.kind === 'group' ? `${userName(me, m.senderId)}: ` : ''
               return (
                 <li key={m.id}>

@@ -68,18 +68,14 @@ function once(url: URL, max: number, stopAtHead: boolean) {
       }
       const chunks: Buffer[] = []
       let size = 0
-      let full = true
       res.on('data', (c: Buffer) => {
         chunks.push(c)
         size += c.length
-        if (size > max || (stopAtHead && c.toString('latin1').toLowerCase().includes('</head'))) {
-          full = size <= max
-          res.destroy()
-        }
+        if (size > max || (stopAtHead && c.toString('latin1').toLowerCase().includes('</head'))) res.destroy()
       })
       // A reset or the timeout mid-body errors the response; unhandled, that would take the server down.
       res.on('error', reject)
-      res.on('close', () => resolve({ url, type: String(res.headers['content-type'] ?? ''), body: Buffer.concat(chunks).subarray(0, max), full }))
+      res.on('close', () => resolve({ url, type: String(res.headers['content-type'] ?? ''), body: Buffer.concat(chunks).subarray(0, max), full: size <= max }))
     })
     req.on('error', reject)
   })
@@ -141,7 +137,7 @@ function text(page: Got) {
   }
 }
 
-export interface Unfurled extends Omit<LinkPreview, 'image'> {
+interface Unfurled extends Omit<LinkPreview, 'image'> {
   image?: string // the raw og:image, base64, for the client to shrink
   imageType?: string
 }
@@ -164,7 +160,8 @@ export async function unfurl(raw: string): Promise<Unfurled> {
   if (!value.title && !value.description && !value.image) throw new Error('nothing to show')
   cache.delete(raw)
   cache.set(raw, { at: Date.now(), value })
-  if (cache.size > 200) cache.delete(cache.keys().next().value!)
+  // Entries carry the raw og:image (up to 1 MB): few enough to stay small.
+  if (cache.size > 30) cache.delete(cache.keys().next().value!)
   return value
 }
 

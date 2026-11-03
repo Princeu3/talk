@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, ApiError, socket } from './api.ts'
 import * as c from './crypto.ts'
-import { names, userName } from './format.ts'
+import { fits, names, userName } from './format.ts'
 import type { Conversation, FileRef, GroupCall, LinkPreview, Me, Message, MessageBody, Reaction, ReactionBody, Voice } from '../../shared/types.ts'
 
 export interface Decrypted extends Message {
@@ -60,7 +60,7 @@ export async function unfurl(link: string): Promise<LinkPreview> {
 
 // The wire's thumbnail: JPEG, longest side ≤ 320 px, ≤ 24 KB. Steps quality, then size, down until it fits; else none.
 async function shrink(b64: string, type?: string) {
-  const bmp = await createImageBitmap(new Blob([Uint8Array.from(atob(b64), (ch) => ch.charCodeAt(0))], { type }))
+  const bmp = await createImageBitmap(new Blob([c.unb64(b64) as BlobPart], { type }))
   try {
     for (let side = 320; side >= 80; side = Math.round(side * 0.75)) {
       const k = Math.min(1, side / Math.max(bmp.width, bmp.height))
@@ -161,6 +161,8 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
           const emoji = emojis[i]
           if (emoji) reacts[r.userId] = emoji
         })
+        // The sender picks the card's link and screens use it as an href: http(s) only.
+        if (content.preview && !/^https?:\/\//i.test(String(content.preview.url))) delete content.preview
         const forged = content.from !== msg.senderId
         return { ...msg, content, forged, system: !!content.system && !forged, reacts }
       } catch {
@@ -180,11 +182,8 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
 
   // Changes a message we hold, open or archived (null drops it); one we don't arrives whole with its page.
   const update = (convId: string, id: number, fn: (m: Decrypted) => Decrypted | null) => {
-    const a = archive.current.get(convId)?.list
-    const i = a?.findIndex((m) => m.id === id) ?? -1
-    const changed = i >= 0 && fn(a![i])
-    if (changed) a![i] = changed
-    else if (i >= 0) a!.splice(i, 1)
+    const a = archive.current.get(convId)
+    if (a) a.list = a.list.flatMap((m) => (m.id !== id ? [m] : (fn(m) ?? [])))
     setMessages((prev) => {
       const list = prev[convId]
       if (!list?.some((m) => m.id === id)) return prev
@@ -346,9 +345,13 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
     [fetchPage],
   )
 
-  const loadOlder = (convId: string) => {
+  // Scrolling up after a jump takes the archive below the chat before asking the server again.
+  const loadOlder = async (convId: string) => {
     const first = messages[convId]?.[0]
-    if (first) return fetchPage(convId, first.id)
+    if (!first) return
+    const next = archive.current.get(convId)?.list.filter((m) => m.id < first.id).slice(0, PAGE)
+    if (next?.length) merge(convId, next)
+    else await fetchPage(convId, first.id)
   }
 
   // One more page of a chat's history into the archive; true once it holds the first message.
@@ -372,6 +375,29 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
     })())
   }, [decrypt])
 
+  // Pages chats' history into the archive, 3 chats at a time. onPage runs as pages land (at most every
+  // 300 ms), then once with true when all are in; a chat whose page fails counts as done. Returns a stop.
+  const backfill = useCallback(
+    (ids: string[], onPage: (finished: boolean) => void) => {
+      let stop = false
+      let last = 0
+      const todo = [...ids]
+      const worker = async () => {
+        for (let id; !stop && (id = todo.shift()); )
+          while (!stop && !(await older(id).catch(() => true)))
+            if (Date.now() - last >= 300) {
+              last = Date.now()
+              onPage(false)
+            }
+      }
+      void Promise.all([worker(), worker(), worker()]).then(() => stop || onPage(true))
+      return () => {
+        stop = true
+      }
+    },
+    [older],
+  )
+
   // All of a chat we hold, newest first: what the chat shows, then the archive below it.
   const history = useCallback((convId: string) => {
     const shown = msgRef.current[convId] ?? []
@@ -391,6 +417,7 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
   }
 
   const seal = async (convId: string, plain: MessageBody | ReactionBody) => {
+    if ('preview' in plain && plain.preview && !fits(plain.preview, plain.text)) plain = { ...plain, preview: undefined }
     const { key } = await keyFor(convId)
     const body = await c.sealMessage(key, convId, plain)
     // The server's limit; caught here, so the draft comes back instead of a row that can never send.
@@ -489,10 +516,9 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
     update(m.convId, m.id, (x) => ({ ...x, reacts: withReaction(x.reacts, myId, off ? null : emoji) }))
   }
 
-  // New text, everything else (reply, files, forwarded) kept; a link card only while its link is still in the text.
+  // New text, everything else (reply, files, forwarded) kept; seal() drops a card whose link is gone.
   const edit = async (m: Decrypted, text: string) => {
-    const card = m.content?.preview
-    const body = await seal(m.convId, { ...m.content, text, preview: card && text.includes(card.url) ? card : undefined, from: meRef.current!.user.id })
+    const body = await seal(m.convId, { ...m.content, text, from: meRef.current!.user.id })
     const { message } = await api<{ message: Message }>('PATCH', `/api/messages/${m.id}`, { body })
     await applyEdit(message)
   }
@@ -568,7 +594,7 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
 
   return {
     me, messages, pending, hasOlder, activeId, totalUnread, typers, focus, setFocus,
-    open, loadOlder, older, history, openAt, send, retry, discard, sendWithFiles, fileUrl, createConversation, addMembers,
+    open, loadOlder, backfill, history, openAt, send, retry, discard, sendWithFiles, fileUrl, createConversation, addMembers,
     react, edit, unsend, forward, typing, setMine, rename, removeMember, leave, block, report,
   }
 }

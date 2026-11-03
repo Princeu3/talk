@@ -10,13 +10,13 @@ const row = 'flex min-h-12 w-full items-center gap-3 rounded-2xl px-2 text-left 
 const TABS = ['Media', 'Links', 'Docs'] as const
 const isMedia = (f: FileRef) => /^(image|video)\//.test(f.type)
 
-// A photo or video in the grid, decrypted once it scrolls into view; big files wait for a tap, as in the chat.
+// A photo in the grid, decrypted once it scrolls into view; videos and big files wait for a tap.
 function Thumb({ talk, convId, file, onOpen }: { talk: Talk; convId: string; file: FileRef; onOpen: (url: string, video: boolean) => void }) {
   const ref = useRef<HTMLButtonElement>(null)
   const [url, setUrl] = useState<string>()
   const video = file.type.startsWith('video/')
   useEffect(() => {
-    if (url || file.size > AUTO_LOAD) return
+    if (url || video || file.size > AUTO_LOAD) return
     const io = new IntersectionObserver(([e]) => {
       if (!e.isIntersecting) return
       io.disconnect()
@@ -24,12 +24,11 @@ function Thumb({ talk, convId, file, onOpen }: { talk: Talk; convId: string; fil
     })
     io.observe(ref.current!)
     return () => io.disconnect()
-  }, [talk, convId, file, url])
+  }, [convId, file, url, video]) // not talk: a new object each render, and fileUrl only reads refs
   const open = async () => onOpen(url ?? (await talk.fileUrl(convId, file)), video)
   return (
     <button ref={ref} type="button" onClick={() => void open().catch(() => {})} aria-label={`Open ${file.name}`} className="relative block aspect-square w-full overflow-hidden rounded-lg bg-raised">
-      {url && (video ? <video src={url} muted playsInline preload="metadata" className="h-full w-full object-cover" /> : <img src={url} alt="" className="h-full w-full object-cover" />)}
-      {video && <span className="absolute bottom-1 left-1 rounded-full bg-black/50 p-1 text-white"><Video size={14} /></span>}
+      {video ? <span className="flex h-full items-center justify-center text-mut"><Video size={24} /></span> : url && <img src={url} alt="" className="h-full w-full object-cover" />}
     </button>
   )
 }
@@ -38,30 +37,29 @@ function Thumb({ talk, convId, file, onOpen }: { talk: Talk; convId: string; fil
 function SharedMedia({ talk, convId, onZoom, onClose }: { talk: Talk; convId: string; onZoom: (url: string, video?: boolean) => void; onClose: () => void }) {
   const [tab, setTab] = useState<(typeof TABS)[number]>('Media')
   const [, setTick] = useState(0)
-  const { older } = talk
-  useEffect(() => {
-    let stop = false
-    void (async () => {
-      // A page that fails to load ends the paging; what arrived still shows.
-      while (!stop && !(await older(convId).catch(() => true))) setTick((n) => n + 1)
-      if (!stop) setTick((n) => n + 1)
-    })()
-    return () => {
-      stop = true
-    }
-  }, [older, convId])
+  const [done, setDone] = useState(false)
+  const { backfill } = talk
+  useEffect(
+    () =>
+      backfill([convId], (finished) => {
+        setTick((n) => n + 1)
+        if (finished) setDone(true)
+      }),
+    [backfill, convId],
+  )
 
-  const { list, done } = talk.history(convId)
-  const msgs = list.filter((m) => m.content && !m.system && !m.content.call)
-  const files = msgs.flatMap((m) => (m.content!.files ?? []).filter((f) => !f.voice).map((f) => ({ m, f })))
-  const media = files.filter(({ f }) => isMedia(f))
-  const docs = files.filter(({ f }) => !isMedia(f))
-  const links = msgs.flatMap((m) => {
-    const p = m.content!.preview
-    const url = p && /^https?:\/\//i.test(p.url) ? p.url : m.content!.text?.match(URL_RE)?.[0]
-    return url ? [{ m, url, p: p?.url === url ? p : undefined }] : []
-  })
-  const count = { Media: media.length, Links: links.length, Docs: docs.length }[tab]
+  // Only the open tab's list is built.
+  const msgs = talk.history(convId).list.filter((m) => m.content && !m.system && !m.content.call)
+  const files = tab === 'Links' ? [] : msgs.flatMap((m) => (m.content!.files ?? []).filter((f) => !f.voice && isMedia(f) === (tab === 'Media')).map((f) => ({ m, f })))
+  const links =
+    tab !== 'Links'
+      ? []
+      : msgs.flatMap((m) => {
+          const p = m.content!.preview
+          const url = p?.url ?? m.content!.text?.match(URL_RE)?.[0]
+          return url ? [{ m, url, p }] : []
+        })
+  const count = files.length + links.length
 
   const save = async (f: FileRef) => {
     const a = document.createElement('a')
@@ -87,7 +85,7 @@ function SharedMedia({ talk, convId, onZoom, onClose }: { talk: Talk; convId: st
       <div className="min-h-[60dvh]">
         {tab === 'Media' && (
           <ul className="grid grid-cols-3 gap-1">
-            {media.map(({ f }) => (
+            {files.map(({ f }) => (
               <li key={f.id}><Thumb talk={talk} convId={convId} file={f} onOpen={onZoom} /></li>
             ))}
           </ul>
@@ -113,7 +111,7 @@ function SharedMedia({ talk, convId, onZoom, onClose }: { talk: Talk; convId: st
         )}
         {tab === 'Docs' && (
           <ul>
-            {docs.map(({ m, f }) => (
+            {files.map(({ m, f }) => (
               <li key={f.id}>
                 <button onClick={() => void save(f).catch(() => {})} className={`${row} py-1.5`}>
                   <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-raised text-accent"><FileIcon size={18} /></span>

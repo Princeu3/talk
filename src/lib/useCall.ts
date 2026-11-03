@@ -74,6 +74,9 @@ interface Session {
 const LOST_MS = 30_000
 const STUN: RTCIceServer[] = [{ urls: 'stun:stun.cloudflare.com:3478' }]
 const fetchIce = () => api<RTCIceServer[]>('GET', '/api/ice').catch(() => STUN)
+// A socket request that answers within 10 s, or reads as a lost connection.
+const ask = <T = object>(event: string, data: unknown): Promise<T & { error?: string }> =>
+  socket.timeout(10_000).emitWithAck(event, data).catch(() => ({ error: "Couldn't reach the server. Check your connection." }))
 
 const VIDEO = { width: { ideal: 1280 }, height: { ideal: 720 } }
 const getMedia = (video: boolean) =>
@@ -331,10 +334,7 @@ export function useCall(onLog: (convId: string, kind: CallKind, ms: number, grou
       }
       if (s.done) return s.local.getTracks().forEach((t) => t.stop())
       patch({ local: s.local })
-      const r: { id?: string; error?: string } = await socket
-        .timeout(10_000)
-        .emitWithAck('call:start', { convId, kind })
-        .catch(() => ({ error: "Couldn't reach the server. Check your connection." }))
+      const r = await ask<{ id?: string }>('call:start', { convId, kind })
       if (s.done) return void (r.id && socket.emit('call:hangup', { id: r.id }))
       if (!r.id) return finish(r.error)
       s.id = r.id
@@ -360,10 +360,7 @@ export function useCall(onLog: (convId: string, kind: CallKind, ms: number, grou
     }
     if (s.done) return s.local.getTracks().forEach((t) => t.stop())
     patch({ local: s.local })
-    const r: { id?: string; peers?: string[]; error?: string } = await socket
-      .timeout(10_000)
-      .emitWithAck(s.group ? 'call:join' : 'call:accept', { id: s.id })
-      .catch(() => ({ error: "Couldn't reach the server. Check your connection." }))
+    const r = await ask<{ id?: string; peers?: string[] }>(s.group ? 'call:join' : 'call:accept', { id: s.id })
     if (s.done) return
     if (!r.id) return finish(r.error)
     s.joined = true
@@ -386,11 +383,7 @@ export function useCall(onLog: (convId: string, kind: CallKind, ms: number, grou
   const ring = useCallback(async (user: string) => {
     const s = ref.current
     if (!s?.group || !s.id) return
-    const r: { error?: string } = await socket
-      .timeout(10_000)
-      .emitWithAck('call:add', { id: s.id, users: [user] })
-      .catch(() => ({ error: "Couldn't reach the server. Check your connection." }))
-    return r.error
+    return (await ask('call:add', { id: s.id, users: [user] })).error
   }, [])
 
   const toggleMute = useCallback(() => {

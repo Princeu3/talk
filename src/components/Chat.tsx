@@ -81,9 +81,8 @@ function Linkified({ text }: { text: string }) {
   )
 }
 
-// A link's card, sealed in the message by the sender's device; only http(s) links open.
+// A link's card, sealed in the message by the sender's device (decrypt() lets only http(s) links through).
 function LinkCard({ p }: { p: LinkPreview }) {
-  if (!/^https?:\/\//i.test(p.url)) return null
   return (
     <a href={p.url} target="_blank" rel="noopener noreferrer" className="block w-72 max-w-full overflow-hidden whitespace-normal rounded-xl bg-ink/8">
       {p.image && <img src={`data:image/jpeg;base64,${p.image}`} alt="" className="max-h-44 w-full object-cover" />}
@@ -327,7 +326,7 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
   const [act, setAct] = useState<{ kind: 'delete' | 'forward' | 'report' | 'reactions'; m: Decrypted } | null>(null)
   const [info, setInfo] = useState(false)
   const [card, setCard] = useState<LinkPreview | null>(null) // the composer's link card, for card.url
-  const [dropped, setDropped] = useState<string[]>([]) // links whose card was dismissed
+  const [dropped, setDropped] = useState<string>() // the link whose card was dismissed
   const recRef = useRef<Recording | null>(null)
   recRef.current = rec
   const starting = useRef(false)
@@ -373,15 +372,15 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
     setAct(null)
     setInfo(false)
     setCard(null)
-    setDropped([])
+    setDropped(undefined)
     return () => recRef.current?.cancel()
   }, [convId])
 
   // The first link typed gets a card once typing pauses. Failures (a link the server won't read, the rate limit) mean no card.
   const link = editing ? undefined : text.match(URL_RE)?.[0]
-  const shown = card && card.url === link && !dropped.includes(link) ? card : null
+  const shown = card && card.url === link && link !== dropped ? card : null
   useEffect(() => {
-    if (!link || card?.url === link || dropped.includes(link)) return
+    if (!link || card?.url === link || link === dropped) return
     let live = true
     const t = setTimeout(() => unfurl(link).then((p) => live && setCard(p), () => {}), 500)
     return () => {
@@ -782,7 +781,7 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
               <p className="truncate text-sm font-semibold">{shown.title || shown.description}</p>
               <p className="truncate text-sm text-mut">{shown.site || host(shown.url)}</p>
             </div>
-            <button type="button" onClick={() => setDropped((d) => [...d, shown.url])} aria-label="Remove link preview" className={`${iconButton} text-mut`}>
+            <button type="button" onClick={() => setDropped(shown.url)} aria-label="Remove link preview" className={`${iconButton} text-mut`}>
               <Close size={18} />
             </button>
           </div>

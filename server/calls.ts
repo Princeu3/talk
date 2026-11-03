@@ -30,8 +30,7 @@ interface Call extends CallRing {
 
 interface Group extends CallRing {
   peers: Map<string, string | null> // who's in: user -> socket, null while it reconnects
-  ringing: Set<string> // rung and hasn't joined or declined
-  rings: Map<string, ReturnType<typeof setTimeout>> // timeouts for rings added mid-call
+  ringing: Map<string, ReturnType<typeof setTimeout>> // rung and hasn't joined or declined: user -> ring timeout
   answered: boolean // someone besides the starter joined
   timer?: ReturnType<typeof setTimeout>
   lost: Map<string, ReturnType<typeof setTimeout>>
@@ -55,7 +54,7 @@ const back = (g: Group, u: string) => {
 const apart = (a: string, b: string) => blocks(a, b) || blocks(b, a)
 const inCall = (u: string) => [...calls.values()].some((c) => c.from === u || c.to === u) || [...groups.values()].some((g) => g.peers.has(u))
 const label = (k: CallKind) => (k === 'video' ? 'video call' : 'voice call')
-const view = (g: Group): GroupCall => ({ id: g.id, kind: g.kind, from: g.from, peers: [...g.peers.keys()], ringing: [...g.ringing] })
+const view = (g: Group): GroupCall => ({ id: g.id, kind: g.kind, from: g.from, peers: [...g.peers.keys()], ringing: [...g.ringing.keys()] })
 
 // The live group call in a chat, for /api/me.
 export const groupCall = (convId: string) => {
@@ -95,15 +94,14 @@ export function callHandlers(io: Server) {
   const update = (g: Group, live = true) =>
     toUsers(io, memberIds(g.convId)).emit('call:update', { convId: g.convId, call: live ? view(g) : null })
   const ringOne = (g: Group, u: string, by: string) => {
-    g.ringing.add(u)
+    g.ringing.set(u, setTimeout(() => (miss(g, u), update(g)), RING_MS))
     io.to(`v2:${u}`).emit('call:ring', groupRing(g))
     notifyIfAway(io, u, { title: titleOf(g.convId), body: `${nameOf(by)} · Group ${label(g.kind)}`, convId: g.convId }, { ttl: 45 })
     apns(u, { type: 'call', convId: g.convId, callId: g.id, kind: g.kind, from: by }, 2)
   }
   // Stop ringing u: they joined, declined or left the chat.
   const unring = (g: Group, u: string) => {
-    clearTimeout(g.rings.get(u))
-    g.rings.delete(u)
+    clearTimeout(g.ringing.get(u))
     return g.ringing.delete(u)
   }
   const miss = (g: Group, u: string) => {
@@ -113,15 +111,14 @@ export function callHandlers(io: Server) {
       apns: { type: 'missed', convId: g.convId, callId: g.id, kind: g.kind },
     })
   }
-  // The first rings time out together; rings added mid-call keep their own timers.
-  const missed = (g: Group, all = false) => [...g.ringing].filter((u) => all || !g.rings.has(u)).forEach((u) => miss(g, u))
   const endGroup = (g: Group, reason: CallEnd) => {
     clearTimeout(g.timer)
     g.lost.forEach(clearTimeout)
-    g.rings.forEach(clearTimeout)
     groups.delete(g.id)
-    if (reason !== 'cancelled') missed(g, true)
-    g.ringing.clear()
+    for (const u of [...g.ringing.keys()]) {
+      if (reason === 'cancelled') unring(g, u)
+      else miss(g, u)
+    }
     toUsers(io, memberIds(g.convId)).emit('call:end', { id: g.id, reason })
     update(g, false)
   }
@@ -137,11 +134,12 @@ export function callHandlers(io: Server) {
   const startGroup = (socket: Socket, me: string, convId: string, kind: CallKind, ack: Ack) => {
     if (inCall(me)) return ack({ error: 'You are already in a call.' })
     if (groupCall(convId)) return ack({ error: 'A call is already on in this chat. Join it instead.' })
-    const g: Group = { id: randomUUID(), convId, from: me, kind, peers: new Map([[me, socket.id]]), ringing: new Set(), rings: new Map(), answered: false, lost: new Map() }
+    const g: Group = { id: randomUUID(), convId, from: me, kind, peers: new Map([[me, socket.id]]), ringing: new Map(), answered: false, lost: new Map() }
     const muted = mutedIds(convId)
     groups.set(g.id, g)
+    // Set before the rings' own timers, so it fires first: unanswered, the call ends in one go.
+    g.timer = setTimeout(() => g.answered || endGroup(g, 'missed'), RING_MS)
     for (const u of audience(convId, me)) if (u !== me && !muted.has(u) && !inCall(u) && !blocks(me, u)) ringOne(g, u, me)
-    g.timer = setTimeout(() => (g.answered ? (missed(g), update(g)) : endGroup(g, 'missed')), RING_MS)
     ack({ id: g.id })
     update(g)
   }
@@ -259,7 +257,6 @@ export function callHandlers(io: Server) {
       for (const u of users) {
         unring(g, u)
         ringOne(g, u, me)
-        g.rings.set(u, setTimeout(() => (miss(g, u), update(g)), RING_MS))
       }
       ack({})
       update(g)

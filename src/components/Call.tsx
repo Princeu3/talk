@@ -153,7 +153,8 @@ export function CallScreen({ call, name, nameOf, calls, others = [], ringing = [
   const n = call.peers.length
   const ended = call.phase === 'ended'
   const rung = n ? ringing.filter((u) => !call.peers.some((p) => p.user === u)) : []
-  const grid = n + rung.length > 1 && !ended
+  const count = n + rung.length
+  const grid = count > 1 && !ended
   const remoteRef = useStream<HTMLVideoElement>(peer?.stream)
   const localRef = useStream<HTMLVideoElement>(call.local)
   const incoming = call.phase === 'incoming'
@@ -190,7 +191,7 @@ export function CallScreen({ call, name, nameOf, calls, others = [], ringing = [
 
       {grid && (
         <div
-          className={`absolute inset-0 grid gap-1.5 px-1.5 pb-[calc(max(0.75rem,env(safe-area-inset-bottom))+6.5rem)] pt-[calc(max(0.75rem,env(safe-area-inset-top))+3.25rem)] ${n + rung.length === 2 ? 'grid-rows-2 md:grid-cols-2 md:grid-rows-1' : n + rung.length <= 4 ? 'grid-cols-2 grid-rows-2' : 'auto-rows-[32%] grid-cols-2 overflow-y-auto'}`}
+          className={`absolute inset-0 grid gap-1.5 px-1.5 pb-[calc(max(0.75rem,env(safe-area-inset-bottom))+6.5rem)] pt-[calc(max(0.75rem,env(safe-area-inset-top))+3.25rem)] ${count === 2 ? 'grid-rows-2 md:grid-cols-2 md:grid-rows-1' : count <= 4 ? 'grid-cols-2 grid-rows-2' : 'auto-rows-[32%] grid-cols-2 overflow-y-auto'}`}
         >
           {call.peers.map((p) => <Tile key={p.user} peer={p} name={nameOf(p.user)} />)}
           {rung.map((u) => <Tile key={u} peer={{ user: u, muted: false, camera: false }} name={nameOf(u)} ringing />)}

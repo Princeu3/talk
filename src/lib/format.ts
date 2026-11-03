@@ -1,4 +1,4 @@
-import type { CallKind, CallLog, Conversation, Me, MessageBody } from '../../shared/types.ts'
+import type { CallKind, CallLog, Conversation, LinkPreview, Me, MessageBody } from '../../shared/types.ts'
 
 export const userName = (me: Me, id: string) => me.users.find((u) => u.id === id)?.name ?? 'Someone'
 export const who = (me: Me, id: string) => (id === me.user.id ? 'You' : userName(me, id))
@@ -91,6 +91,10 @@ export function snippet(text: string, q: string): [string, string, string] | nul
 }
 
 export const URL_RE = /(https?:\/\/[^\s<]+[^\s<.,:;"')\]!?])/g
+
+// A link card belongs with a text while the text still holds its link, scheme optional
+// (the iPhone saves a typed www.x.com as http://www.x.com).
+export const fits = (p: LinkPreview, text = '') => text.includes(p.url.replace(/^https?:\/\//i, ''))
 
 export const host = (url: string) => {
   try {
