@@ -4,7 +4,7 @@ import { clearIdentity, loadIdentity, type StoredIdentity } from './lib/keystore
 import { pushSupported, subscribe } from './lib/push.ts'
 import { useTalk } from './lib/useTalk.ts'
 import { useCall } from './lib/useCall.ts'
-import { userName } from './lib/format.ts'
+import { convName, userName } from './lib/format.ts'
 import Auth from './components/Auth.tsx'
 import Sidebar from './components/Sidebar.tsx'
 import Chat from './components/Chat.tsx'
@@ -32,7 +32,10 @@ function Main({ ident, onSignOut }: { ident: StoredIdentity; onSignOut: () => vo
   const talk = useTalk(ident.privateKey, onSignOut)
   const [sheet, setSheet] = useState<'new' | 'settings' | 'add' | null>(null)
   const { open, me, send } = talk
-  const calls = useCall(useCallback((convId, kind, ms) => void send(convId, { call: { kind, ms } }, true, ms > 0).catch(() => {}), [send]))
+  const calls = useCall(
+    useCallback((convId, kind, ms, group) => void send(convId, { call: { kind, ms, group: group || undefined } }, true, ms > 0).catch(() => {}), [send]),
+    (convId) => me?.conversations.find((c) => c.id === convId)?.kind === 'group',
+  )
   const { call } = calls
   const [minimized, setMinimized] = useState(false)
   useEffect(() => {
@@ -65,12 +68,21 @@ function Main({ ident, onSignOut }: { ident: StoredIdentity; onSignOut: () => vo
       </div>
     )
 
+  // In a group with a call on, the call buttons join it.
   const startCall = (kind: CallKind) => {
     const conv = me.conversations.find((c) => c.id === talk.activeId)
+    if (conv?.call) return calls.join(conv.id, conv.call)
     const peer = conv?.members.find((u) => u !== me.user.id)
-    if (conv && peer) calls.start(conv.id, peer, kind)
+    if (conv?.kind === 'group') calls.start(conv.id, kind)
+    else if (conv && peer) calls.start(conv.id, kind, peer)
   }
-  const callName = call ? userName(me, call.peer) : ''
+  const joinCall = (convId: string) => {
+    if (call?.convId === convId) return setMinimized(false)
+    const live = me.conversations.find((c) => c.id === convId)?.call
+    if (live) calls.join(convId, live)
+  }
+  const callConv = call && me.conversations.find((c) => c.id === call.convId)
+  const callName = !call ? '' : call.group && callConv ? convName(me, callConv) : userName(me, call.peer)
   const bar = call && minimized && call.phase !== 'incoming'
 
   return (
@@ -79,7 +91,7 @@ function Main({ ident, onSignOut }: { ident: StoredIdentity; onSignOut: () => vo
       {/* the bar already clears the notch, so the headers below it don't */}
       <div className="flex min-h-0 flex-1" style={bar ? ({ '--safe-top': '0px' } as CSSProperties) : undefined}>
         <aside className={`${talk.activeId ? 'hidden' : 'flex'} w-full flex-col md:flex md:w-[22rem] md:shrink-0 md:bg-surface`}>
-          <Sidebar talk={talk} onNew={() => setSheet('new')} onSettings={() => setSheet('settings')} />
+          <Sidebar talk={talk} onNew={() => setSheet('new')} onSettings={() => setSheet('settings')} onJoin={joinCall} />
         </aside>
         <main className={`${talk.activeId ? 'flex' : 'hidden'} min-w-0 flex-1 flex-col md:flex`}>
           {talk.activeId ? (
@@ -88,6 +100,7 @@ function Main({ ident, onSignOut }: { ident: StoredIdentity; onSignOut: () => vo
               convId={talk.activeId}
               onBack={() => open(null)}
               onCall={call ? undefined : startCall}
+              onJoin={() => joinCall(talk.activeId!)}
               onAddPeople={() => setSheet('add')}
             />
           ) : (
@@ -107,6 +120,7 @@ function Main({ ident, onSignOut }: { ident: StoredIdentity; onSignOut: () => vo
         <CallScreen
           call={call}
           name={callName}
+          nameOf={(id) => userName(me, id)}
           calls={calls}
           onMinimize={() => {
             open(call.convId)
@@ -114,7 +128,7 @@ function Main({ ident, onSignOut }: { ident: StoredIdentity; onSignOut: () => vo
           }}
         />
       )}
-      <CallAudio stream={call?.remote} />
+      <CallAudio peers={call?.peers ?? []} />
     </div>
   )
 }

@@ -1,6 +1,6 @@
 import type { Talk } from '../lib/useTalk.ts'
 import { convName, preview, shortTime, userName } from '../lib/format.ts'
-import { Compose, Lock, Settings } from './icons.tsx'
+import { Compose, Lock, Phone, Settings, Video } from './icons.tsx'
 
 // Olive to soft white, so every avatar sits inside the app palette in both themes.
 const SHADES = ['#2e3d28', '#4f6340', '#7e9466', '#a9b887', '#cdd6b8', '#e8e9df']
@@ -29,7 +29,7 @@ export function Avatar({ name, size = 44 }: { name: string; size?: number }) {
 
 export const iconButton = 'pressable flex h-11 w-11 shrink-0 items-center justify-center rounded-full text-accent hover:bg-raised'
 
-export default function Sidebar({ talk, onNew, onSettings }: { talk: Talk; onNew: () => void; onSettings: () => void }) {
+export default function Sidebar({ talk, onNew, onSettings, onJoin }: { talk: Talk; onNew: () => void; onSettings: () => void; onJoin: (convId: string) => void }) {
   const me = talk.me!
   return (
     <div className="flex h-full flex-col">
@@ -64,12 +64,13 @@ export default function Sidebar({ talk, onNew, onSettings }: { talk: Talk; onNew
             const active = conv.id === talk.activeId
             const text = preview(last?.content, last?.senderId === me.user.id)
             const who = !last ? '' : last.senderId === me.user.id ? 'You: ' : conv.kind === 'group' ? `${userName(me, last.senderId)}: ` : ''
+            const join = conv.call && !conv.call.peers.includes(me.user.id) ? conv.call : null
             return (
-              <li key={conv.id}>
+              <li key={conv.id} className="relative">
                 <button
                   onClick={() => talk.open(conv.id)}
                   aria-current={active ? 'true' : undefined}
-                  className={`flex w-full items-center gap-3 rounded-2xl px-3 py-2.5 text-left transition-colors duration-150 ${active ? 'bg-raised' : 'hover:bg-raised/60 active:bg-raised'}`}
+                  className={`flex w-full items-center gap-3 rounded-2xl px-3 py-2.5 text-left transition-colors duration-150 ${active ? 'bg-raised' : 'hover:bg-raised/60 active:bg-raised'} ${join ? 'pr-24' : ''}`}
                 >
                   <Avatar name={name} size={48} />
                   <div className="min-w-0 flex-1">
@@ -102,6 +103,16 @@ export default function Sidebar({ talk, onNew, onSettings }: { talk: Talk; onNew
                     </div>
                   </div>
                 </button>
+                {/* A sibling of the row, since a button can't hold another */}
+                {join && (
+                  <button
+                    onClick={() => onJoin(conv.id)}
+                    aria-label={`Join the call in ${name}`}
+                    className="pressable absolute right-3 top-1/2 flex min-h-9 -translate-y-1/2 items-center gap-1.5 rounded-full bg-fill px-3.5 text-sm font-semibold text-on-fill"
+                  >
+                    {join.kind === 'audio' ? <Phone size={14} /> : <Video size={16} />} Join
+                  </button>
+                )}
               </li>
             )
           })}

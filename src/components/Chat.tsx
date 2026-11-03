@@ -123,7 +123,7 @@ function Bubble({ m, mine, first, last, talk, onCall, onZoom }: {
   first: boolean
   last: boolean
   talk: Talk
-  onCall?: (kind: CallKind) => void // unset in groups and during a call
+  onCall?: (kind: CallKind) => void // unset during a call
   onZoom: (u: string) => void
 }) {
   const c = m.content
@@ -138,6 +138,7 @@ function Bubble({ m, mine, first, last, talk, onCall, onZoom }: {
   if (c.call) {
     const kind = c.call.kind ?? 'video'
     const { title, detail, missed } = callSummary(c.call, mine)
+    const conv = talk.me!.conversations.find((x) => x.id === m.convId)
     return (
       <div className={`${shape} ${tone} flex items-center gap-3 py-2 pl-2.5 pr-2`}>
         <span className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full ${missed ? 'bg-danger/15 text-danger' : 'bg-ink/8'}`}>
@@ -149,7 +150,7 @@ function Bubble({ m, mine, first, last, talk, onCall, onZoom }: {
         </div>
         {onCall && (
           <button onClick={() => onCall(kind)} className="pressable min-h-9 shrink-0 rounded-full bg-fill px-3.5 text-sm font-semibold text-on-fill">
-            {mine ? 'Call again' : 'Call back'}
+            {conv?.kind === 'group' ? (conv.call ? 'Join' : 'Call') : mine ? 'Call again' : 'Call back'}
           </button>
         )}
       </div>
@@ -165,11 +166,12 @@ function Bubble({ m, mine, first, last, talk, onCall, onZoom }: {
   )
 }
 
-export default function Chat({ talk, convId, onBack, onCall, onAddPeople }: {
+export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople }: {
   talk: Talk
   convId: string
   onBack: () => void
   onCall?: (kind: CallKind) => void // unset while a call is on
+  onJoin: () => void // the group call on in this chat, or back to it
   onAddPeople: () => void
 }) {
   const me = talk.me!
@@ -327,17 +329,24 @@ export default function Chat({ talk, convId, onBack, onCall, onAddPeople }: {
             <UserPlus size={22} />
           </button>
         )}
-        {conv.kind === 'dm' && (
-          <>
-            <button onClick={() => onCall?.('audio')} disabled={!onCall} aria-label="Voice call" className={iconButton}>
-              <Phone size={22} />
-            </button>
-            <button onClick={() => onCall?.('video')} disabled={!onCall} aria-label="Video call" className={iconButton}>
-              <Video size={24} />
-            </button>
-          </>
-        )}
+        <button onClick={() => onCall?.('audio')} disabled={!onCall} aria-label="Voice call" className={iconButton}>
+          <Phone size={22} />
+        </button>
+        <button onClick={() => onCall?.('video')} disabled={!onCall} aria-label="Video call" className={iconButton}>
+          <Video size={24} />
+        </button>
       </header>
+      {conv.call && (
+        <button onClick={onJoin} className="flex min-h-11 items-center gap-2.5 border-t border-line bg-surface px-4 py-1.5 text-left text-sm">
+          {conv.call.kind === 'audio' ? <Phone size={16} /> : <Video size={18} />}
+          <span className="min-w-0 flex-1 truncate">
+            Group {conv.call.kind === 'audio' ? 'voice' : 'video'} call · {conv.call.peers.length} {conv.call.peers.length === 1 ? 'person' : 'people'}
+          </span>
+          <span className="shrink-0 rounded-full bg-fill px-3.5 py-1.5 font-semibold text-on-fill">
+            {conv.call.peers.includes(me.user.id) ? 'Return to call' : 'Join'}
+          </span>
+        </button>
+      )}
 
       <div
         ref={scroller}
@@ -385,7 +394,7 @@ export default function Chat({ talk, convId, onBack, onCall, onAddPeople }: {
             <div key={m.id} className={`flex flex-col ${first ? 'mt-3' : 'mt-0.5'}`}>
               {newDay && <div className="mb-2 mt-3 self-center text-xs font-medium text-mut">{dayLabel(m.createdAt)}</div>}
               {first && !mine && conv.kind === 'group' && <div className="mb-1 ml-3 text-xs font-medium text-mut">{userName(me, m.senderId)}</div>}
-              <Bubble m={m} mine={mine} first={first} last={last} talk={talk} onCall={conv.kind === 'dm' ? onCall : undefined} onZoom={setZoom} />
+              <Bubble m={m} mine={mine} first={first} last={last} talk={talk} onCall={onCall} onZoom={setZoom} />
               {last && (
                 <time className={`mt-1 px-2 text-xs tabular-nums text-mut ${mine ? 'self-end' : 'self-start'}`}>
                   {new Date(m.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}

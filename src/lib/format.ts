@@ -28,7 +28,7 @@ export function talkTime(ms: number) {
 // A missed call reads differently to the caller ("No answer") and the callee.
 export function callSummary(c: CallLog, mine: boolean) {
   if (c.room) return { title: 'Call', detail: 'Ended', missed: false }
-  const noun = c.kind === 'audio' ? 'Voice call' : 'Video call'
+  const noun = c.group ? `Group ${c.kind === 'audio' ? 'voice' : 'video'} call` : c.kind === 'audio' ? 'Voice call' : 'Video call'
   if (c.ms) return { title: noun, detail: talkTime(c.ms), missed: false }
   return mine ? { title: noun, detail: 'No answer', missed: false } : { title: `Missed ${noun.toLowerCase()}`, missed: true }
 }
