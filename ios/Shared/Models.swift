@@ -152,4 +152,5 @@ nonisolated struct CallRing: Codable, Sendable {
   let convId: String
   let from: String
   let kind: String
+  var group: Bool? = nil // set on group rings
 }

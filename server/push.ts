@@ -32,6 +32,9 @@ export type Apns =
 
 // Payload carries no message content: the sender name and conversation id only.
 // Pushes only to someone with no visible tab or open app; those show it themselves.
+// These users' sockets. An empty room list would reach every socket, so it reaches none.
+export const toUsers = (io: Server, ids: string[]) => io.to(ids.length ? ids.map((u) => `user:${u}`) : 'nobody')
+
 export async function notifyIfAway(io: Server, userId: string, payload: Payload, opts: { ttl?: number; apns?: Apns } = {}) {
   const sockets = await io.in(`user:${userId}`).fetchSockets()
   if (sockets.some((s) => s.data.active)) return

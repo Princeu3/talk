@@ -16,8 +16,8 @@
 // Only sockets and phones on protocol v2 hear group rings; older apps don't know them.
 import { randomUUID } from 'node:crypto'
 import type { Server, Socket } from 'socket.io'
-import { db, blocks, isMember, memberIds, mutedIds } from './db.ts'
-import { apns, notifyIfAway } from './push.ts'
+import { db, audience, blocks, isMember, kindOf, memberIds, mutedIds } from './db.ts'
+import { apns, notifyIfAway, toUsers } from './push.ts'
 import type { CallEnd, CallKind, CallRing, GroupCall } from '../shared/types.ts'
 
 interface Call extends CallRing {
@@ -42,6 +42,13 @@ const calls = new Map<string, Call>()
 const groups = new Map<string, Group>()
 
 const nameOf = (id: string) => (db.prepare('select name from users where id = ?').get(id) as { name: string }).name
+const titleOf = (convId: string) => (db.prepare('select title from conversations where id = ?').get(convId) as { title: string }).title
+const group = (id: unknown) => (typeof id === 'string' ? groups.get(id) : undefined)
+// They're connected again (or gone): stop the timer that drops them.
+const back = (g: Group, u: string) => {
+  clearTimeout(g.lost.get(u))
+  g.lost.delete(u)
+}
 const inCall = (u: string) => [...calls.values()].some((c) => c.from === u || c.to === u) || [...groups.values()].some((g) => g.peers.has(u))
 const label = (k: CallKind) => (k === 'video' ? 'video call' : 'voice call')
 const view = (g: Group): GroupCall => ({ id: g.id, kind: g.kind, from: g.from, peers: [...g.peers.keys()] })
@@ -52,17 +59,18 @@ export const groupCall = (convId: string) => {
   return g && view(g)
 }
 
-type Ack = (r: { id?: string; error?: string }) => void
+type Ack = (r: { id?: string; peers?: string[]; error?: string }) => void
 
 // For the phone woken by a call push: is this call still ringing for me?
 export function callState(id: string, userId: string) {
   const g = groups.get(id)
-  if (g) return isMember(g.convId, userId) ? { ...ring(g), state: g.ringing.has(userId) ? 'ringing' : 'answered' } : null
+  if (g) return isMember(g.convId, userId) ? { ...groupRing(g), state: g.ringing.has(userId) ? 'ringing' : 'answered' } : null
   const c = calls.get(id)
   if (!c || (c.from !== userId && c.to !== userId)) return null
   return { ...ring(c), state: c.answered ? 'answered' : 'ringing' }
 }
 const ring = ({ id, convId, from, kind }: CallRing): CallRing => ({ id, convId, from, kind })
+const groupRing = (g: Group): CallRing => ({ ...ring(g), group: true })
 
 export function callHandlers(io: Server) {
   const end = (c: Call, reason: CallEnd) => {
@@ -81,9 +89,9 @@ export function callHandlers(io: Server) {
 
   // --- group calls ---
   const update = (g: Group, live = true) =>
-    io.to(memberIds(g.convId).map((u) => `user:${u}`)).emit('call:update', { convId: g.convId, call: live ? view(g) : null })
+    toUsers(io, memberIds(g.convId)).emit('call:update', { convId: g.convId, call: live ? view(g) : null })
   const missed = (g: Group) => {
-    const title = (db.prepare('select title from conversations where id = ?').get(g.convId) as { title: string }).title
+    const title = titleOf(g.convId)
     for (const u of g.ringing) {
       io.to(`user:${u}`).emit('call:end', { id: g.id, reason: 'missed' })
       notifyIfAway(io, u, { title, body: `Missed group ${label(g.kind)}`, convId: g.convId }, {
@@ -97,13 +105,12 @@ export function callHandlers(io: Server) {
     g.lost.forEach(clearTimeout)
     groups.delete(g.id)
     if (reason !== 'cancelled') missed(g)
-    io.to(memberIds(g.convId).map((u) => `user:${u}`)).emit('call:end', { id: g.id, reason })
+    toUsers(io, memberIds(g.convId)).emit('call:end', { id: g.id, reason })
     update(g, false)
   }
   const leave = (g: Group, u: string, reason: CallEnd) => {
     g.peers.delete(u)
-    clearTimeout(g.lost.get(u))
-    g.lost.delete(u)
+    back(g, u)
     io.to(`user:${u}`).emit('call:end', { id: g.id, reason })
     for (const s of g.peers.values()) if (s) io.to(s).emit('call:left', { id: g.id, user: u })
     if (!g.answered && u === g.from) endGroup(g, 'cancelled')
@@ -115,12 +122,12 @@ export function callHandlers(io: Server) {
     if (groupCall(convId)) return ack({ error: 'A call is already on in this chat. Join it instead.' })
     const g: Group = { id: randomUUID(), convId, from: me, kind, peers: new Map([[me, socket.id]]), ringing: new Set(), answered: false, lost: new Map() }
     const muted = mutedIds(convId)
-    for (const u of memberIds(convId)) if (u !== me && !blocks(u, me) && !muted.has(u) && !inCall(u)) g.ringing.add(u)
+    for (const u of audience(convId, me)) if (u !== me && !muted.has(u) && !inCall(u)) g.ringing.add(u)
     groups.set(g.id, g)
     g.timer = setTimeout(() => (g.answered ? missed(g) : endGroup(g, 'missed')), RING_MS)
-    const title = (db.prepare('select title from conversations where id = ?').get(convId) as { title: string }).title
+    const title = titleOf(convId)
     for (const u of g.ringing) {
-      io.to(`v2:${u}`).emit('call:ring', ring(g))
+      io.to(`v2:${u}`).emit('call:ring', groupRing(g))
       notifyIfAway(io, u, { title, body: `${nameOf(me)} · Group ${label(kind)}`, convId }, { ttl: 45 })
       apns(u, { type: 'call', convId, callId: g.id, kind, from: me }, 2)
     }
@@ -138,15 +145,15 @@ export function callHandlers(io: Server) {
 
     // Opening the app from a call notification: it's still ringing, show it.
     for (const c of calls.values()) if (c.to === me && !c.answered) socket.emit('call:ring', ring(c))
-    if (socket.data.v >= 2) for (const g of groups.values()) if (g.ringing.has(me)) socket.emit('call:ring', ring(g))
+    if (socket.data.v >= 2) for (const g of groups.values()) if (g.ringing.has(me)) socket.emit('call:ring', groupRing(g))
     const others = (g: Group) => [...g.peers.keys()].filter((u) => u !== me)
 
     socket.on('call:start', (p: { convId?: unknown; kind?: unknown }, ack: Ack) => {
       if (typeof ack !== 'function') return
       const { convId, kind } = p ?? {}
-      const conv = typeof convId === 'string' && db.prepare('select kind from conversations where id = ?').get(convId) as { kind: string } | undefined
-      if (!conv || !isMember(convId as string, me) || (kind !== 'audio' && kind !== 'video')) return ack({ error: 'bad request' })
-      if (conv.kind === 'group') return startGroup(socket, me, convId as string, kind, ack)
+      const convKind = typeof convId === 'string' && kindOf(convId)
+      if (!convKind || !isMember(convId as string, me) || (kind !== 'audio' && kind !== 'video')) return ack({ error: 'bad request' })
+      if (convKind === 'group') return startGroup(socket, me, convId as string, kind, ack)
       const to = memberIds(convId as string).find((u) => u !== me)
       if (!to) return ack({ error: 'This account was deleted.' })
       if (blocks(me, to)) return ack({ error: `Unblock ${nameOf(to)} to call them.` })
@@ -178,17 +185,16 @@ export function callHandlers(io: Server) {
       if (caller) io.to(caller).emit('call:accepted', { id: c.id })
     })
 
-    socket.on('call:join', (p: { id?: unknown }, ack: (r: { id?: string; peers?: string[]; error?: string }) => void) => {
+    socket.on('call:join', (p: { id?: unknown }, ack: Ack) => {
       if (typeof ack !== 'function') return
-      const g = typeof p?.id === 'string' ? groups.get(p.id) : undefined
+      const g = group(p?.id)
       if (!g || !isMember(g.convId, me)) return ack({ error: 'This call has ended.' })
       if (!g.peers.has(me)) {
         if (inCall(me)) return ack({ error: 'You are already in a call.' })
         if (g.peers.size >= MAX_PEERS) return ack({ error: 'This call is full.' })
       }
       g.ringing.delete(me)
-      clearTimeout(g.lost.get(me))
-      g.lost.delete(me)
+      back(g, me)
       g.peers.set(me, socket.id)
       if (me !== g.from) g.answered = true
       ack({ id: g.id, peers: others(g) })
@@ -202,7 +208,7 @@ export function callHandlers(io: Server) {
     })
 
     socket.on('call:hangup', (p: { id?: unknown }) => {
-      const g = typeof p?.id === 'string' ? groups.get(p.id) : undefined
+      const g = group(p?.id)
       if (g) {
         if (g.peers.has(me)) leave(g, me, 'hangup')
         else if (g.ringing.delete(me)) {
@@ -216,7 +222,7 @@ export function callHandlers(io: Server) {
     })
 
     socket.on('call:signal', (p: { id?: unknown; to?: unknown; data?: unknown }) => {
-      const g = typeof p?.id === 'string' ? groups.get(p.id) : undefined
+      const g = group(p?.id)
       if (g) {
         const to = g.peers.get(me) === socket.id && typeof p.to === 'string' ? g.peers.get(p.to) : undefined
         if (to) io.to(to).emit('call:signal', { id: g.id, from: me, data: p.data })
@@ -227,14 +233,13 @@ export function callHandlers(io: Server) {
       if (to) io.to(to).emit('call:signal', { id: c.id, data: p.data })
     })
 
-    socket.on('call:rejoin', (p: { id?: unknown }, ack: (r: { id?: string; peers?: string[]; error?: string }) => void) => {
+    socket.on('call:rejoin', (p: { id?: unknown }, ack: Ack) => {
       if (typeof ack !== 'function') return
-      const g = typeof p?.id === 'string' ? groups.get(p.id) : undefined
+      const g = group(p?.id)
       if (g) {
         if (!g.peers.has(me)) return ack({ error: 'This call has ended.' })
         g.peers.set(me, socket.id)
-        clearTimeout(g.lost.get(me))
-        g.lost.delete(me)
+        back(g, me)
         return ack({ id: g.id, peers: others(g) })
       }
       const c = mine(p?.id)

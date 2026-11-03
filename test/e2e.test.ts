@@ -326,20 +326,26 @@ test('chat actions: reactions, edits, unsend, receipts, typing, mute, pin, group
   assert.equal((await removed).body, null)
   assert.equal((await history(dan, dm.id))[0].reactions, undefined)
 
-  // edit: sender only, live, marked
+  // edit: sender only, live, marked; the broadcast leaves reactions to each viewer
+  await api(erin, 'PUT', `/api/messages/${hi.id}/reaction`, { body: await react('👍') })
   const edited = next<Message>(se, 'edit')
   const newBody = await seal(dan, dm.id, { from: dan.id, text: 'hi there' })
   assert.equal((await api(erin, 'PATCH', `/api/messages/${hi.id}`, { body: newBody })).status, 404, 'not mine')
   assert.equal((await api(dan, 'PATCH', `/api/messages/${hi.id}`, { body: newBody })).status, 200)
   assert.equal((await edited).body, newBody)
+  assert.equal((await edited).reactions, undefined)
   const [afterEdit] = await history(erin, dm.id)
   assert.ok(afterEdit.editedAt)
+  assert.equal(afterEdit.reactions!.length, 1)
   assert.equal((await c.openMessage<MessageBody>(await convKey(erin, dm.id), dm.id, afterEdit.body)).text, 'hi there')
 
   // read receipt: Erin reads, Dan hears it and sees it in /api/me
   const read = next<{ userId: string; upTo: number }>(sd, 'read')
   await api(erin, 'POST', `/api/conversations/${dm.id}/read`, { upTo: hi.id })
   assert.deepEqual(await read, { convId: dm.id, userId: erin.id, upTo: hi.id })
+  const again = none(sd, 'read')
+  await api(erin, 'POST', `/api/conversations/${dm.id}/read`, { upTo: hi.id })
+  await again // nothing moved, nothing sent
   assert.equal((await convOf(dan, dm.id))!.reads![erin.id], hi.id)
   assert.equal((await api(frank, 'POST', `/api/conversations/${dm.id}/read`, { upTo: 1 })).status, 404)
 
@@ -350,6 +356,13 @@ test('chat actions: reactions, edits, unsend, receipts, typing, mute, pin, group
   const sf = await socket(frank, 2)
   sf.emit('typing', { convId: dm.id })
   await none(se, 'typing')
+
+  // once Dan blocks Erin, his edits stop reaching her too, not just new messages
+  await api(dan, 'PUT', `/api/blocks/${erin.id}`)
+  const hidden = none(se, 'edit')
+  assert.equal((await api(dan, 'PATCH', `/api/messages/${hi.id}`, { body: newBody })).status, 200)
+  await hidden
+  await api(dan, 'DELETE', `/api/blocks/${erin.id}`)
 
   // unsend: gone for everyone, reactions with it
   await api(erin, 'PUT', `/api/messages/${hi.id}/reaction`, { body: await react('😂') })
@@ -401,10 +414,10 @@ test('group calls: ring, join, mesh signaling, leave, rejoin', async () => {
   await api(hal, 'POST', '/api/devices', { token: VOIP2, kind: 'voip', env: 'sandbox', v: 2 })
   await api(old, 'POST', '/api/devices', { token: VOIP1, kind: 'voip', env: 'sandbox' })
 
-  const rings = [sh, si].map((s) => next<{ id: string; from: string }>(s, 'call:ring'))
+  const rings = [sh, si].map((s) => next<{ id: string; from: string; group?: true }>(s, 'call:ring'))
   const live = next<{ convId: string; call: GroupCall | null }>(so, 'call:update')
   const { id } = await sg.emitWithAck('call:start', { convId: group.id, kind: 'video' })
-  for (const r of await Promise.all(rings)) assert.deepEqual([r.id, r.from], [id, gina.id])
+  for (const r of await Promise.all(rings)) assert.deepEqual([r.id, r.from, r.group], [id, gina.id, true])
   assert.deepEqual((await live).call, { id, kind: 'video', from: gina.id, peers: [gina.id] })
   await pushed((p) => p.callId === id && p.token === VOIP2)
   await new Promise((r) => setTimeout(r, 100))

@@ -140,15 +140,20 @@ export const blocks = (owner: string, other: string) =>
 export const memberIds = (convId: string) =>
   (db.prepare('select user_id from members where conv_id = ?').all(convId) as { user_id: string }[]).map((r) => r.user_id)
 
+export const kindOf = (convId: string) =>
+  (db.prepare('select kind from conversations where id = ?').get(convId) as { kind: string } | undefined)?.kind
+
 export const mutedIds = (convId: string) =>
   new Set((db.prepare('select user_id from members where conv_id = ? and muted').all(convId) as { user_id: string }[]).map((r) => r.user_id))
 
-// Members who get what `from` does in this chat: everyone but those who blocked them.
-export const audience = (convId: string, from: string) => memberIds(convId).filter((u) => !blocks(u, from))
+// Members who get what `from` does in this chat: everyone but those who blocked
+// them, and in a DM only `from` once either side has blocked.
+export const audience = (convId: string, from: string) =>
+  dmRefusal(convId, from) ? [from] : memberIds(convId).filter((u) => !blocks(u, from))
 
 // In a DM, a block either way stops messages, reactions and calls.
 export function dmRefusal(convId: string, me: string): string | undefined {
-  if ((db.prepare('select kind from conversations where id = ?').get(convId) as { kind: string }).kind !== 'dm') return
+  if (kindOf(convId) !== 'dm') return
   const other = memberIds(convId).find((u) => u !== me)
   if (other && blocks(me, other)) return 'Unblock this person to message them.'
   if (other && blocks(other, me)) return 'This person isn’t taking messages from you.'

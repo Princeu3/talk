@@ -89,6 +89,7 @@ export interface CallRing {
   convId: string
   from: string
   kind: CallKind
+  group?: true // set on group rings; older apps never get those
 }
 
 export type CallEnd = 'hangup' | 'declined' | 'cancelled' | 'missed' | 'elsewhere' | 'lost'

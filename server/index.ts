@@ -5,9 +5,9 @@ import { writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Server } from 'socket.io'
-import { db, BLOB_DIR, setting, isMember, memberIds, mutedIds, audience, dmRefusal } from './db.ts'
+import { db, BLOB_DIR, setting, isMember, memberIds, mutedIds, audience, dmRefusal, kindOf } from './db.ts'
 import { authMatches, hashAuth, setSession, clearSession, userFromCookie, requireUser, throttled, recordFail } from './auth.ts'
-import { vapidPublicKey, saveSubscription, notifyIfAway } from './push.ts'
+import { vapidPublicKey, saveSubscription, notifyIfAway, toUsers } from './push.ts'
 import { callHandlers, callState, groupCall } from './calls.ts'
 import type { Conversation, Me, Message, Reaction, SendPayload, User } from '../shared/types.ts'
 
@@ -29,13 +29,18 @@ const userExists = (id: string) => !!db.prepare('select 1 from users where id = 
 const NOT_BLOCKED = 'sender_id not in (select blocked_id from blocks where user_id = ?)'
 const MESSAGE = 'id, conv_id as convId, sender_id as senderId, body, created_at as createdAt, edited_at as editedAt'
 const reactionsOf = db.prepare(
-  'select user_id as userId, body from reactions where message_id = ? and user_id not in (select blocked_id from blocks where user_id = ?)',
+  `select message_id as messageId, user_id as userId, body from reactions
+   where message_id in (select value from json_each(?)) and user_id not in (select blocked_id from blocks where user_id = ?)`,
 )
-// A message as `viewer` gets it: editedAt and reactions only when there are some.
-function shaped(row: Message, viewer: string): Message {
-  const { editedAt, ...m } = row
-  const reactions = reactionsOf.all(m.id, viewer) as unknown as Reaction[]
-  return { ...m, ...(editedAt != null && { editedAt }), ...(reactions.length ? { reactions } : {}) }
+// Messages as `viewer` gets them: editedAt and reactions only when there are some.
+function shaped(rows: Message[], viewer: string): Message[] {
+  const byMessage = new Map<number, Reaction[]>()
+  for (const { messageId, ...r } of reactionsOf.all(JSON.stringify(rows.map((m) => m.id)), viewer) as unknown as (Reaction & { messageId: number })[])
+    byMessage.set(messageId, [...(byMessage.get(messageId) ?? []), r])
+  return rows.map(({ editedAt, ...m }) => {
+    const reactions = byMessage.get(m.id)
+    return { ...m, ...(editedAt != null && { editedAt }), ...(reactions && { reactions }) }
+  })
 }
 
 const app = express()
@@ -115,15 +120,17 @@ app.get('/api/me', (req, res) => {
     .all(req.userId, req.userId) as unknown as (Omit<Conversation, 'members' | 'lastMessage' | 'muted' | 'pinned'> & { muted: number; pinned: number })[]
   const last = db.prepare(`select ${MESSAGE} from messages where conv_id = ? and ${NOT_BLOCKED} order by id desc limit 1`)
   const reads = db.prepare('select user_id as id, last_read as upTo from members where conv_id = ?')
+  const lasts = new Map(
+    shaped(rows.flatMap((c) => (last.get(c.id, req.userId) as unknown as Message | undefined) ?? []), req.userId).map((m) => [m.convId, m]),
+  )
   const conversations = rows.map(({ muted, pinned, ...c }) => {
     const r = reads.all(c.id) as { id: string; upTo: number }[]
-    const lastMessage = last.get(c.id, req.userId) as unknown as Message | undefined
     const call = groupCall(c.id)
     return {
       ...c,
       members: r.map((x) => x.id),
       reads: Object.fromEntries(r.map((x) => [x.id, x.upTo])),
-      lastMessage: lastMessage ? shaped(lastMessage, req.userId) : null,
+      lastMessage: lasts.get(c.id) ?? null,
       ...(muted && { muted: true }),
       ...(pinned && { pinned: true }),
       ...(call && { call }),
@@ -258,7 +265,7 @@ app.get('/api/ice', async (_req, res) => {
 
 // --- conversations ---
 
-const sync = (userIds: string[]) => io.to(userIds.map((u) => `user:${u}`)).emit('sync')
+const sync = (userIds: string[]) => toUsers(io, userIds).emit('sync')
 
 app.post('/api/conversations', (req, res) => {
   const { id, kind, title, members } = req.body ?? {}
@@ -301,9 +308,9 @@ app.post('/api/conversations', (req, res) => {
 app.post('/api/conversations/:id/members', (req, res) => {
   const convId = req.params.id
   const { userId, wrappedKey } = req.body ?? {}
-  const conv = db.prepare('select kind from conversations where id = ?').get(convId) as { kind: string } | undefined
-  if (!conv || !isMember(convId, req.userId)) return void res.status(404).json({ error: 'not found' })
-  if (conv.kind !== 'group' || typeof userId !== 'string' || !userExists(userId) || isMember(convId, userId) || !isSealed(wrappedKey, 200))
+  const kind = kindOf(convId)
+  if (!kind || !isMember(convId, req.userId)) return void res.status(404).json({ error: 'not found' })
+  if (kind !== 'group' || typeof userId !== 'string' || !userExists(userId) || isMember(convId, userId) || !isSealed(wrappedKey, 200))
     return void res.status(400).json({ error: 'bad request' })
   db.prepare('insert into members (conv_id, user_id, wrapped_key, wrapped_by) values (?, ?, ?, ?)').run(convId, userId, wrappedKey, req.userId)
   sync(memberIds(convId))
@@ -315,9 +322,9 @@ app.post('/api/conversations/:id/members', (req, res) => {
 // it could read what the server would send them; the server just stops sending.
 app.delete('/api/conversations/:id/members/:userId', (req, res) => {
   const { id: convId, userId } = req.params
-  const conv = db.prepare('select kind from conversations where id = ?').get(convId) as { kind: string } | undefined
-  if (!conv || !isMember(convId, req.userId)) return void res.status(404).json({ error: 'not found' })
-  if (conv.kind !== 'group' || !isMember(convId, userId)) return void res.status(400).json({ error: 'bad request' })
+  const kind = kindOf(convId)
+  if (!kind || !isMember(convId, req.userId)) return void res.status(404).json({ error: 'not found' })
+  if (kind !== 'group' || !isMember(convId, userId)) return void res.status(400).json({ error: 'bad request' })
   const before = memberIds(convId)
   db.prepare('delete from members where conv_id = ? and user_id = ?').run(convId, userId)
   sync(before)
@@ -326,9 +333,9 @@ app.delete('/api/conversations/:id/members/:userId', (req, res) => {
 
 app.patch('/api/conversations/:id', (req, res) => {
   const convId = req.params.id
-  const conv = db.prepare('select kind from conversations where id = ?').get(convId) as { kind: string } | undefined
-  if (!conv || !isMember(convId, req.userId)) return void res.status(404).json({ error: 'not found' })
-  if (conv.kind !== 'group' || !isName(req.body?.title)) return void res.status(400).json({ error: 'bad request' })
+  const kind = kindOf(convId)
+  if (!kind || !isMember(convId, req.userId)) return void res.status(404).json({ error: 'not found' })
+  if (kind !== 'group' || !isName(req.body?.title)) return void res.status(400).json({ error: 'bad request' })
   db.prepare('update conversations set title = ? where id = ?').run(req.body.title, convId)
   sync(memberIds(convId))
   res.json({ ok: true })
@@ -354,7 +361,7 @@ app.get('/api/conversations/:id/messages', (req, res) => {
   const rows = db
     .prepare(`select ${MESSAGE} from messages where conv_id = ? and id < ? and ${NOT_BLOCKED} order by id desc limit 50`)
     .all(convId, before, req.userId) as unknown as Message[]
-  res.json(rows.reverse().map((m) => shaped(m, req.userId)))
+  res.json(shaped(rows.reverse(), req.userId))
 })
 
 // Also the read receipt: the chat's other members hear how far I've read.
@@ -363,9 +370,8 @@ app.post('/api/conversations/:id/read', (req, res) => {
   const upTo = Number(req.body?.upTo)
   if (!Number.isSafeInteger(upTo)) return void res.status(400).json({ error: 'bad request' })
   if (!isMember(convId, req.userId)) return void res.status(404).json({ error: 'not found' })
-  db.prepare('update members set last_read = max(last_read, ?) where conv_id = ? and user_id = ?').run(upTo, convId, req.userId)
-  const { last_read } = db.prepare('select last_read from members where conv_id = ? and user_id = ?').get(convId, req.userId) as { last_read: number }
-  io.to(audience(convId, req.userId).map((u) => `user:${u}`)).emit('read', { convId, userId: req.userId, upTo: last_read })
+  const { changes } = db.prepare('update members set last_read = ? where conv_id = ? and user_id = ? and last_read < ?').run(upTo, convId, req.userId, upTo)
+  if (changes) toUsers(io, audience(convId, req.userId)).emit('read', { convId, userId: req.userId, upTo })
   res.json({ ok: true })
 })
 
@@ -384,9 +390,9 @@ app.patch('/api/messages/:id', (req, res) => {
   if (Date.now() - m.createdAt > EDIT_MS) return void res.status(403).json({ error: 'Messages can be edited for 15 minutes after sending.' })
   const editedAt = Date.now()
   db.prepare('update messages set body = ?, edited_at = ? where id = ?').run(req.body.body, editedAt, m.id)
-  const message = shaped({ ...m, body: req.body.body, editedAt }, req.userId)
-  io.to(audience(m.convId, req.userId).map((u) => `user:${u}`)).emit('edit', message)
-  res.json({ message })
+  const message = { ...m, body: req.body.body, editedAt }
+  toUsers(io, audience(m.convId, req.userId)).emit('edit', message) // no reactions: each member keeps the ones they see
+  res.json({ message: shaped([message], req.userId)[0] })
 })
 
 // Unsend: gone for everyone, reactions too. Older apps simply stop seeing it.
@@ -395,9 +401,8 @@ app.delete('/api/messages/:id', (req, res) => {
   const m = target(req, true)
   if (!m) return void res.status(404).json({ error: 'not found' })
   db.prepare('delete from messages where id = ?').run(m.id)
-  const to = memberIds(m.convId).map((u) => `user:${u}`)
-  io.to(to).emit('unsend', { id: m.id, convId: m.convId })
-  io.to(to).emit('sync') // previews and unread counts
+  toUsers(io, memberIds(m.convId)).emit('unsend', { id: m.id, convId: m.convId })
+  sync(memberIds(m.convId)) // previews and unread counts
   res.json({ ok: true })
 })
 
@@ -408,7 +413,7 @@ app.put('/api/messages/:id/reaction', (req, res) => {
   const refused = dmRefusal(m.convId, req.userId)
   if (refused) return void res.status(403).json({ error: refused })
   db.prepare('insert or replace into reactions (message_id, user_id, body) values (?, ?, ?)').run(m.id, req.userId, req.body.body)
-  io.to(audience(m.convId, req.userId).map((u) => `user:${u}`)).emit('reaction', { messageId: m.id, convId: m.convId, userId: req.userId, body: req.body.body })
+  toUsers(io, audience(m.convId, req.userId)).emit('reaction', { messageId: m.id, convId: m.convId, userId: req.userId, body: req.body.body })
   res.json({ ok: true })
 })
 
@@ -416,7 +421,7 @@ app.delete('/api/messages/:id/reaction', (req, res) => {
   const m = target(req, false)
   if (!m) return void res.status(404).json({ error: 'not found' })
   db.prepare('delete from reactions where message_id = ? and user_id = ?').run(m.id, req.userId)
-  io.to(audience(m.convId, req.userId).map((u) => `user:${u}`)).emit('reaction', { messageId: m.id, convId: m.convId, userId: req.userId, body: null })
+  toUsers(io, audience(m.convId, req.userId)).emit('reaction', { messageId: m.id, convId: m.convId, userId: req.userId, body: null })
   res.json({ ok: true })
 })
 
@@ -474,10 +479,8 @@ io.on('connection', (socket) => {
         (p.cid !== undefined && (typeof p.cid !== 'string' || !UUID.test(p.cid))))
       return ack({ error: 'bad request' })
     // A resend (the first ack was lost): ack what's stored, with no second broadcast or push.
-    const sent = p.cid && db
-      .prepare('select id, conv_id as convId, sender_id as senderId, body, created_at as createdAt from messages where sender_id = ? and cid = ?')
-      .get(me, p.cid) as unknown as Message | undefined
-    if (sent) return ack({ message: sent })
+    const sent = p.cid && db.prepare(`select ${MESSAGE} from messages where sender_id = ? and cid = ?`).get(me, p.cid) as unknown as Message | undefined
+    if (sent) return ack({ message: shaped([sent], me)[0] })
     const refused = dmRefusal(p.convId, me)
     if (refused) return ack({ error: refused })
     const createdAt = Date.now()
@@ -486,7 +489,7 @@ io.on('connection', (socket) => {
       .run(p.convId, me, p.body, createdAt, p.seen === true ? 1 : 0, p.cid ?? null)
     const message: Message = { id: Number(lastInsertRowid), convId: p.convId, senderId: me, body: p.body, createdAt }
     const to = audience(p.convId, me)
-    io.to(to.map((u) => `user:${u}`)).emit('message', message)
+    toUsers(io, to).emit('message', message)
     ack({ message })
 
     if (p.quiet) return
@@ -499,8 +502,8 @@ io.on('connection', (socket) => {
   // "I'm typing" for the chat's other members, never stored. Clients send it at
   // most every few seconds while typing and drop it after 6 s without one.
   socket.on('typing', (p: { convId?: unknown }) => {
-    if (typeof p?.convId !== 'string' || !isMember(p.convId, me) || dmRefusal(p.convId, me)) return
-    io.to(audience(p.convId, me).filter((u) => u !== me).map((u) => `user:${u}`)).emit('typing', { convId: p.convId, userId: me })
+    if (typeof p?.convId !== 'string' || !isMember(p.convId, me)) return
+    toUsers(io, audience(p.convId, me).filter((u) => u !== me)).emit('typing', { convId: p.convId, userId: me })
   })
 
   calls(socket)

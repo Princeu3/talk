@@ -64,15 +64,15 @@ Types live in `shared/types.ts` (mirrored in `ios/Shared/Models.swift`). The ser
 | What | How |
 | --- | --- |
 | React | `PUT /api/messages/:id/reaction {body}`, body = sealed `ReactionBody {from, to, emoji}`. `DELETE` the same path removes it. Socket `reaction {messageId, convId, userId, body \| null}`. Messages carry `reactions: [{userId, body}]`. Ignore a reaction whose `from`/`to` don't match its row. |
-| Edit | `PATCH /api/messages/:id {body}` (sender, 15 min) → `{message}`. Socket `edit` (the whole Message, with `editedAt`). |
+| Edit | `PATCH /api/messages/:id {body}` (sender, 15 min) → `{message}`. Socket `edit` (the Message with `editedAt` but no `reactions`: keep the ones you have). |
 | Unsend | `DELETE /api/messages/:id` (sender). Socket `unsend {id, convId}`, then `sync`. |
 | Reply, forward | Fields in the sealed MessageBody: `reply {id, from, preview}`, `forwarded: true`. No server change. |
 | System line | Send a MessageBody with `system: true` and the sentence in `text`, with `quiet: true, seen: true`. |
-| Read receipts | `Conversation.reads {userId: lastReadId}`. Socket `read {convId, userId, upTo}`. |
+| Read receipts | `Conversation.reads {userId: lastReadId}`. Socket `read {convId, userId, upTo}`, only when `upTo` moves forward. |
 | Typing | Emit `typing {convId}` at most every 3 s while the composer has text. Socket `typing {convId, userId}`. |
 | Mute, pin | `PATCH /api/conversations/:id/me {muted?, pinned?}` → `sync`. `Conversation.muted`, `.pinned`; `/api/me` lists pinned first. |
 | Rename group | `PATCH /api/conversations/:id {title}` → `sync`. |
 | Leave, remove | `DELETE /api/conversations/:id/members/:userId` (your id to leave) → `sync`. |
-| Group calls | See the comment at the top of `server/calls.ts`. Connect the socket with `?v=2`, and register iPhone push tokens with `v: 2`, or group calls never ring. `Conversation.call` is the live call; socket `call:update {convId, call}` keeps it current. |
+| Group calls | See the comment at the top of `server/calls.ts`. Connect the socket with `?v=2`, and register iPhone push tokens with `v: 2`, or group calls never ring. Group rings carry `group: true`. `Conversation.call` is the live call; socket `call:update {convId, call}` keeps it current. |
 
 Older apps keep working: every new field is optional, DM calls keep the 1:1 protocol, and older apps never hear group rings.
