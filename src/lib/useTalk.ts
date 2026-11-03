@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, ApiError, socket } from './api.ts'
 import * as c from './crypto.ts'
 import { names, userName } from './format.ts'
-import type { Conversation, FileRef, GroupCall, Me, Message, MessageBody, Reaction, ReactionBody, Voice } from '../../shared/types.ts'
+import type { Conversation, FileRef, GroupCall, LinkPreview, Me, Message, MessageBody, Reaction, ReactionBody, Voice } from '../../shared/types.ts'
 
 export interface Decrypted extends Message {
   content: MessageBody | null // null: could not decrypt
@@ -26,7 +26,9 @@ export interface Pending {
 }
 
 const PAGE = 50
+const ARCHIVE_PAGE = 500 // the server's most
 export const MAX_FILE = 50 * 1024 * 1024
+export const AUTO_LOAD = 25 * 1024 * 1024 // bigger files wait for a tap
 
 const bump = (list: Conversation[], msg: Message, unread: boolean) =>
   list
@@ -45,6 +47,35 @@ async function openReaction(key: CryptoKey, convId: string, messageId: number, r
     return b.from === r.userId && b.to === messageId && typeof b.emoji === 'string' && b.emoji.length <= 16 ? b.emoji : null
   } catch {
     return null
+  }
+}
+
+// A link's card for the composer. The server reads the page (the web can't fetch other sites);
+// `url` stays the link as typed, so anyone can tell whether it's still in the text.
+export async function unfurl(link: string): Promise<LinkPreview> {
+  const r = await api<LinkPreview & { imageType?: string }>('POST', '/api/unfurl', { url: link })
+  const image = r.image && (await shrink(r.image, r.imageType).catch(() => undefined))
+  return { url: link, title: r.title, description: r.description, site: r.site, image }
+}
+
+// The wire's thumbnail: JPEG, longest side ≤ 320 px, ≤ 24 KB. Steps quality, then size, down until it fits; else none.
+async function shrink(b64: string, type?: string) {
+  const bmp = await createImageBitmap(new Blob([Uint8Array.from(atob(b64), (ch) => ch.charCodeAt(0))], { type }))
+  try {
+    for (let side = 320; side >= 80; side = Math.round(side * 0.75)) {
+      const k = Math.min(1, side / Math.max(bmp.width, bmp.height))
+      const canvas = new OffscreenCanvas(Math.max(1, Math.round(bmp.width * k)), Math.max(1, Math.round(bmp.height * k)))
+      const ctx = canvas.getContext('2d')!
+      ctx.fillStyle = '#fff' // JPEG has no transparency; a logo's clear parts would turn black
+      ctx.fillRect(0, 0, canvas.width, canvas.height)
+      ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height)
+      for (const quality of [0.8, 0.6, 0.4]) {
+        const jpeg = new Uint8Array(await (await canvas.convertToBlob({ type: 'image/jpeg', quality })).arrayBuffer())
+        if (jpeg.length <= 24 * 1024) return btoa(String.fromCharCode(...jpeg))
+      }
+    }
+  } finally {
+    bmp.close()
   }
 }
 
@@ -71,14 +102,21 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
   const heard = useRef(0) // messages received, so a reload can tell it raced one
   // load() needs decrypt(), which needs keyFor(), which needs load(): break the cycle with a ref.
   const decryptRef = useRef<(m: Message) => Promise<Decrypted>>(null!)
+  const msgRef = useRef(messages)
+  msgRef.current = messages
+  // Older history for search and shared media, newest first, below what `messages` held when paging began.
+  // Decrypted in memory for this session only, never React state (a page must not re-render the chat).
+  // shortcut: every session pages and decrypts history again; persist to an index once a device's history makes the first search slow.
+  const archive = useRef(new Map<string, { list: Decrypted[]; done: boolean; busy?: Promise<boolean> }>())
+  const [focus, setFocus] = useState<{ convId: string; id: number } | null>(null) // a message to scroll to and flash
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (again = true): Promise<Me> => {
     try {
       const before = heard.current
       const m = await api<Me>('GET', '/api/me')
       // A message landed while this was in flight (a rename's sync, then its line): the
-      // answer may predate it and would undo its bump, so ask again.
-      if (heard.current !== before) return load()
+      // answer may predate it and would undo its bump, so ask again, once (a busy chat never goes quiet).
+      if (again && heard.current !== before) return load(false)
       // The open chat is read even if the server hasn't heard yet (that request may still be in flight).
       const shown = activeRef.current && !document.hidden ? activeRef.current : null
       m.conversations = m.conversations.map((x) => (x.id === shown ? { ...x, unread: 0 } : x))
@@ -86,6 +124,7 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
       setMe(m)
       // Left or removed from the open chat: close it rather than show an empty pane.
       if (activeRef.current && !m.conversations.some((x) => x.id === activeRef.current)) setActiveId(null)
+      for (const id of archive.current.keys()) if (!m.conversations.some((x) => x.id === id)) archive.current.delete(id)
       for (const conv of m.conversations)
         if (conv.lastMessage) decryptRef.current(conv.lastMessage).then((d) => merge(conv.id, [d]))
       return m
@@ -139,13 +178,19 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
       return { ...prev, [convId]: [...byId.values()].sort((a, b) => a.id - b.id) }
     })
 
-  // Changes a message we hold (null drops it); one we don't arrives whole with its page.
-  const update = (convId: string, id: number, fn: (m: Decrypted) => Decrypted | null) =>
+  // Changes a message we hold, open or archived (null drops it); one we don't arrives whole with its page.
+  const update = (convId: string, id: number, fn: (m: Decrypted) => Decrypted | null) => {
+    const a = archive.current.get(convId)?.list
+    const i = a?.findIndex((m) => m.id === id) ?? -1
+    const changed = i >= 0 && fn(a![i])
+    if (changed) a![i] = changed
+    else if (i >= 0) a!.splice(i, 1)
     setMessages((prev) => {
       const list = prev[convId]
       if (!list?.some((m) => m.id === id)) return prev
       return { ...prev, [convId]: list.flatMap((m) => (m.id !== id ? [m] : (fn(m) ?? []))) }
     })
+  }
 
   // An edit arrives without reactions; keep the ones we hold.
   const applyEdit = useCallback(
@@ -306,6 +351,45 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
     if (first) return fetchPage(convId, first.id)
   }
 
+  // One more page of a chat's history into the archive; true once it holds the first message.
+  const older = useCallback((convId: string) => {
+    let a = archive.current.get(convId)
+    if (!a) archive.current.set(convId, (a = { list: [], done: false }))
+    if (a.done) return Promise.resolve(true)
+    const arch = a
+    return (arch.busy ??= (async () => {
+      try {
+        const from = arch.list.at(-1)?.id ?? msgRef.current[convId]?.[0]?.id
+        const page = await api<Message[]>('GET', `/api/conversations/${convId}/messages?limit=${ARCHIVE_PAGE}${from ? `&before=${from}` : ''}`)
+        const list = await Promise.all(page.map(decrypt))
+        if (archive.current.get(convId) !== arch) return true // dropped meanwhile (left, unblocked)
+        arch.list.push(...list.reverse()) // pages come oldest first
+        arch.done = page.length < ARCHIVE_PAGE
+        return arch.done
+      } finally {
+        arch.busy = undefined
+      }
+    })())
+  }, [decrypt])
+
+  // All of a chat we hold, newest first: what the chat shows, then the archive below it.
+  const history = useCallback((convId: string) => {
+    const shown = msgRef.current[convId] ?? []
+    const a = archive.current.get(convId)
+    const floor = shown[0]?.id ?? Infinity
+    return { list: shown.toReversed().concat(a?.list.filter((m) => m.id < floor) ?? []), done: !!a?.done }
+  }, [])
+
+  // Opens a chat at a message (from search or shared media): the archive from it up joins the chat, which scrolls to it.
+  // shortcut: the chat then renders everything from that message down; window the list if far jumps get slow.
+  const openAt = (convId: string, id: number) => {
+    const a = archive.current.get(convId)?.list
+    const i = a?.findIndex((m) => m.id === id) ?? -1
+    if (i >= 0) merge(convId, a!.slice(0, i + 1))
+    setFocus({ convId, id })
+    open(convId)
+  }
+
   const seal = async (convId: string, plain: MessageBody | ReactionBody) => {
     const { key } = await keyFor(convId)
     const body = await c.sealMessage(key, convId, plain)
@@ -330,7 +414,7 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
   }
   const discard = (p: Pending) => patch(p, null)
 
-  const sendWithFiles = async (convId: string, text: string, files: File[], voice?: Voice, extra?: Pick<MessageBody, 'reply' | 'forwarded'>) => {
+  const sendWithFiles = async (convId: string, text: string, files: File[], voice?: Voice, extra?: Pick<MessageBody, 'reply' | 'forwarded' | 'preview'>) => {
     const { key } = await keyFor(convId)
     const refs: FileRef[] = []
     for (const f of files) {
@@ -405,9 +489,10 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
     update(m.convId, m.id, (x) => ({ ...x, reacts: withReaction(x.reacts, myId, off ? null : emoji) }))
   }
 
-  // New text, everything else (reply, files, forwarded) kept.
+  // New text, everything else (reply, files, forwarded) kept; a link card only while its link is still in the text.
   const edit = async (m: Decrypted, text: string) => {
-    const body = await seal(m.convId, { ...m.content, text, from: meRef.current!.user.id })
+    const card = m.content?.preview
+    const body = await seal(m.convId, { ...m.content, text, preview: card && text.includes(card.url) ? card : undefined, from: meRef.current!.user.id })
     const { message } = await api<{ message: Message }>('PATCH', `/api/messages/${m.id}`, { body })
     await applyEdit(message)
   }
@@ -419,12 +504,12 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
 
   // Files are decrypted here and sealed again with the other chat's key.
   const forward = async (m: Decrypted, convId: string) => {
-    const { text, files } = m.content!
-    if (!files?.length) return send(convId, { text, forwarded: true })
+    const { text, files, preview } = m.content!
+    if (!files?.length) return send(convId, { text, preview, forwarded: true })
     const plain = await Promise.all(
       files.map(async (f) => new File([await (await fetch(await fileUrl(m.convId, f))).blob()], f.name, { type: f.type })),
     )
-    await sendWithFiles(convId, text ?? '', plain, files[0].voice, { forwarded: true })
+    await sendWithFiles(convId, text ?? '', plain, files[0].voice, { forwarded: true, preview })
   }
 
   const typing = (convId: string) => {
@@ -462,14 +547,17 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
   }
 
   // The server hides a blocked person's messages from now on; drop the ones on screen too.
-  const hideFrom = (userId: string) =>
+  const hideFrom = (userId: string) => {
+    for (const a of archive.current.values()) a.list = a.list.filter((x) => x.senderId !== userId)
     setMessages((prev) => Object.fromEntries(Object.entries(prev).map(([k, list]) => [k, list.filter((x) => x.senderId !== userId)])))
+  }
 
   const block = async (userId: string, on: boolean) => {
     await api(on ? 'PUT' : 'DELETE', `/api/blocks/${userId}`)
-    if (on) hideFrom(userId)
+    if (on) return hideFrom(userId)
     // shortcut: unblocking restores only the newest page of each loaded chat; older ones come back on scroll-up.
-    else for (const id of loaded.current) fetchPage(id).catch(() => {})
+    for (const id of loaded.current) fetchPage(id).catch(() => {})
+    archive.current.clear() // their messages are back; search and shared media page again
   }
 
   // Reporting blocks too (server side).
@@ -479,8 +567,8 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
   }
 
   return {
-    me, messages, pending, hasOlder, activeId, totalUnread, typers,
-    open, loadOlder, send, retry, discard, sendWithFiles, fileUrl, createConversation, addMembers,
+    me, messages, pending, hasOlder, activeId, totalUnread, typers, focus, setFocus,
+    open, loadOlder, older, history, openAt, send, retry, discard, sendWithFiles, fileUrl, createConversation, addMembers,
     react, edit, unsend, forward, typing, setMine, rename, removeMember, leave, block, report,
   }
 }
