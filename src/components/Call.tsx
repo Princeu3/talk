@@ -3,7 +3,8 @@ import type { Calls, CallView, Remote } from '../lib/useCall.ts'
 import { clock } from '../lib/voice.ts'
 import { callNoun } from '../lib/format.ts'
 import { Avatar } from './Sidebar.tsx'
-import { ChevronDown, Lock, Mic, MicOff, Phone, SwitchCamera, Video, VideoOff } from './icons.tsx'
+import { Sheet } from './Sheets.tsx'
+import { ChevronDown, Lock, Mic, MicOff, Phone, SwitchCamera, UserPlus, Video, VideoOff } from './icons.tsx'
 
 // The call screens are black whatever the theme, like the photo viewer, so
 // they use white and the two universal call colors directly.
@@ -54,7 +55,7 @@ export function CallAudio({ peers }: { peers: Remote[] }) {
 }
 
 // One person in a group call: their video, or their avatar with the camera off.
-function Tile({ peer, name }: { peer: Remote; name: string }) {
+function Tile({ peer, name, ringing }: { peer: Remote; name: string; ringing?: boolean }) {
   const ref = useStream<HTMLVideoElement>(peer.stream)
   const video = peer.camera && !!peer.stream?.getVideoTracks().length
   return (
@@ -64,7 +65,46 @@ function Tile({ peer, name }: { peer: Remote; name: string }) {
       <span className="absolute inset-x-0 bottom-0 flex items-center gap-1.5 bg-linear-to-t from-black/50 px-3 pb-2 pt-4 text-sm font-medium">
         {peer.muted && <MicOff size={14} />}
         <span className="truncate">{name}</span>
+        {ringing && <span className="shrink-0 font-normal text-white/75">Ringing…</span>}
       </span>
+    </div>
+  )
+}
+
+// The chat's members who aren't in the call, to ring, or ring again once a ring has run out.
+function AddToCall({ others, ringing, nameOf, ring, onClose }: {
+  others: string[]
+  ringing: string[]
+  nameOf: (userId: string) => string
+  ring: (userId: string) => Promise<string | undefined>
+  onClose: () => void
+}) {
+  const [error, setError] = useState('')
+  return (
+    // The sheet sits inside the black call screen: give it the page's ink, and keep its taps from toggling the controls.
+    <div className="text-ink" onClick={(e) => e.stopPropagation()}>
+      <Sheet title="Add people" onClose={onClose}>
+        {error && <p className="mb-2 text-sm text-danger" role="alert">{error}</p>}
+        {others.length ? (
+          <ul>
+            {others.map((u) => (
+              <li key={u} className="flex min-h-14 items-center gap-3">
+                <Avatar name={nameOf(u)} size={40} />
+                <span className="min-w-0 flex-1 truncate">{nameOf(u)}</span>
+                {ringing.includes(u) ? (
+                  <span className="text-sm text-mut">Ringing…</span>
+                ) : (
+                  <button type="button" onClick={async () => setError((await ring(u)) ?? '')} className="pressable min-h-10 rounded-full bg-fill px-4 text-sm font-semibold text-on-fill">
+                    Ring
+                  </button>
+                )}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="text-mut">Everyone in this chat is in the call.</p>
+        )}
+      </Sheet>
     </div>
   )
 }
@@ -96,19 +136,24 @@ function Round({ label, caption, tone = 'bg-white/15 text-white hover:bg-white/2
   )
 }
 
-export function CallScreen({ call, name, nameOf, calls, onMinimize }: {
+export function CallScreen({ call, name, nameOf, calls, others = [], ringing = [], onMinimize }: {
   call: CallView
   name: string // the person, or the group
   nameOf: (userId: string) => string
   calls: Calls
+  others?: string[] // group: members not in the call
+  ringing?: string[] // group: members being rung
   onMinimize: () => void
 }) {
   useSecondTick(call.phase === 'live')
-  // One other person fills the screen (a DM, or a group of two); more get a grid.
+  const [adding, setAdding] = useState(false)
+  // One other person fills the screen (a DM, or a group of two); more get a grid. Once someone's in,
+  // people being rung get tiles too; before that the screen just says it's waiting.
   const peer = call.peers.at(0)
   const n = call.peers.length
   const ended = call.phase === 'ended'
-  const grid = n > 1 && !ended
+  const rung = n ? ringing.filter((u) => !call.peers.some((p) => p.user === u)) : []
+  const grid = n + rung.length > 1 && !ended
   const remoteRef = useStream<HTMLVideoElement>(peer?.stream)
   const localRef = useStream<HTMLVideoElement>(call.local)
   const incoming = call.phase === 'incoming'
@@ -145,9 +190,10 @@ export function CallScreen({ call, name, nameOf, calls, onMinimize }: {
 
       {grid && (
         <div
-          className={`absolute inset-0 grid gap-1.5 px-1.5 pb-[calc(max(0.75rem,env(safe-area-inset-bottom))+6.5rem)] pt-[calc(max(0.75rem,env(safe-area-inset-top))+3.25rem)] ${n === 2 ? 'grid-rows-2 md:grid-cols-2 md:grid-rows-1' : n <= 4 ? 'grid-cols-2 grid-rows-2' : 'auto-rows-[32%] grid-cols-2 overflow-y-auto'}`}
+          className={`absolute inset-0 grid gap-1.5 px-1.5 pb-[calc(max(0.75rem,env(safe-area-inset-bottom))+6.5rem)] pt-[calc(max(0.75rem,env(safe-area-inset-top))+3.25rem)] ${n + rung.length === 2 ? 'grid-rows-2 md:grid-cols-2 md:grid-rows-1' : n + rung.length <= 4 ? 'grid-cols-2 grid-rows-2' : 'auto-rows-[32%] grid-cols-2 overflow-y-auto'}`}
         >
           {call.peers.map((p) => <Tile key={p.user} peer={p} name={nameOf(p.user)} />)}
+          {rung.map((u) => <Tile key={u} peer={{ user: u, muted: false, camera: false }} name={nameOf(u)} ringing />)}
         </div>
       )}
 
@@ -169,7 +215,13 @@ export function CallScreen({ call, name, nameOf, calls, onMinimize }: {
             <span className="inline-flex items-center gap-1.5 text-xs text-white/70"><Lock size={12} /> End-to-end encrypted</span>
           )}
         </div>
-        <span className="w-11" />
+        {call.group && !incoming && !ended ? (
+          <button type="button" onClick={(e) => (e.stopPropagation(), setAdding(true))} aria-label="Add people" className="pressable flex h-11 w-11 items-center justify-center rounded-full hover:bg-white/10">
+            <UserPlus size={22} />
+          </button>
+        ) : (
+          <span className="w-11" />
+        )}
       </div>
 
       {!showRemote && !grid && (
@@ -204,6 +256,7 @@ export function CallScreen({ call, name, nameOf, calls, onMinimize }: {
           )}
         </div>
       )}
+      {adding && !ended && <AddToCall others={others} ringing={ringing} nameOf={nameOf} ring={calls.ring} onClose={() => setAdding(false)} />}
     </div>
   )
 }

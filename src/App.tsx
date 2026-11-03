@@ -82,6 +82,7 @@ function Main({ ident, onSignOut }: { ident: StoredIdentity; onSignOut: () => vo
     else calls.start(active.id, kind, peer)
   }
   const callConv = call && me.conversations.find((c) => c.id === call.convId)
+  const groupCall = call?.group ? callConv?.call : undefined
   const callName = !call ? '' : call.group && callConv ? convName(me, callConv) : userName(me, call.peer)
   const bar = call && minimized && call.phase !== 'incoming'
 
@@ -122,6 +123,8 @@ function Main({ ident, onSignOut }: { ident: StoredIdentity; onSignOut: () => vo
           name={callName}
           nameOf={(id) => userName(me, id)}
           calls={calls}
+          others={groupCall ? callConv!.members.filter((u) => u !== me.user.id && !groupCall.peers.includes(u)) : undefined}
+          ringing={groupCall?.ringing}
           onMinimize={() => {
             open(call.convId)
             setMinimized(true)

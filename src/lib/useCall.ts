@@ -363,6 +363,17 @@ export function useCall(onLog: (convId: string, kind: CallKind, ms: number, grou
     [accept],
   )
 
+  // Rings a member of the group who isn't in the call (again, if they were). Resolves to the server's error, if any.
+  const ring = useCallback(async (user: string) => {
+    const s = ref.current
+    if (!s?.group || !s.id) return
+    const r: { error?: string } = await socket
+      .timeout(10_000)
+      .emitWithAck('call:add', { id: s.id, users: [user] })
+      .catch(() => ({ error: "Couldn't reach the server. Check your connection." }))
+    return r.error
+  }, [])
+
   const toggleMute = useCallback(() => {
     const s = ref.current
     if (!s) return
@@ -501,7 +512,7 @@ export function useCall(onLog: (convId: string, kind: CallKind, ms: number, grou
     // connect and handle only read refs and stable setters
   }, [finish])
 
-  return { call, start, join, accept, hangup, toggleMute, toggleCamera, flip }
+  return { call, start, join, accept, hangup, ring, toggleMute, toggleCamera, flip }
 }
 
 export type Calls = ReturnType<typeof useCall>
