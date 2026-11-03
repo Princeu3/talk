@@ -27,6 +27,15 @@ const breaks = (a: Decrypted, b: Decrypted) =>
 
 const SystemLine = ({ text }: { text?: string }) => <p className="mx-6 my-1 self-center text-center text-xs text-mut">{text}</p>
 
+// Scroll a message into view and flash it, if it's loaded.
+function jump(id: number) {
+  const el = document.getElementById(`m-${id}`)
+  if (!el) return
+  el.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  el.classList.add('flash')
+  el.addEventListener('animationend', () => el.classList.remove('flash'), { once: true })
+}
+
 function FileChip({ file, onRemove }: { file: File; onRemove: () => void }) {
   const [thumb, setThumb] = useState<string>()
   useEffect(() => {
@@ -344,6 +353,15 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
     return () => recRef.current?.cancel()
   }, [convId])
 
+  // Opened at a message (search, shared media): scroll to it once it's rendered.
+  const { focus, setFocus } = talk
+  useEffect(() => {
+    if (focus?.convId !== convId || !document.getElementById(`m-${focus.id}`)) return
+    stick.current = false
+    jump(focus.id)
+    setFocus(null)
+  }, [focus, setFocus, convId, list.length])
+
   // The body fields that make a message a reply to `r`.
   const quote = (r: Decrypted | null) =>
     r ? { reply: { id: r.id, from: r.senderId, preview: preview(r.content, r.senderId === talk.me!.user.id).slice(0, 200) } } : undefined
@@ -488,15 +506,6 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
         ? { label: 'Delete', Icon: Trash, run: go(() => setAct({ kind: 'delete', m })), red: true }
         : { label: 'Report', Icon: Flag, run: go(() => setAct({ kind: 'report', m })), red: true },
     ].filter((x) => !!x)
-  }
-
-  // Scroll a reply's original into view and flash it, if it's loaded.
-  const jump = (id: number) => {
-    const el = document.getElementById(`m-${id}`)
-    if (!el) return
-    el.scrollIntoView({ block: 'center', behavior: 'smooth' })
-    el.classList.add('flash')
-    el.addEventListener('animationend', () => el.classList.remove('flash'), { once: true })
   }
 
   const typers = talk.typers[convId] ?? []

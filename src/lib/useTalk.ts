@@ -26,6 +26,7 @@ export interface Pending {
 }
 
 const PAGE = 50
+const ARCHIVE_PAGE = 500 // the server's most
 export const MAX_FILE = 50 * 1024 * 1024
 
 const bump = (list: Conversation[], msg: Message, unread: boolean) =>
@@ -71,6 +72,13 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
   const heard = useRef(0) // messages received, so a reload can tell it raced one
   // load() needs decrypt(), which needs keyFor(), which needs load(): break the cycle with a ref.
   const decryptRef = useRef<(m: Message) => Promise<Decrypted>>(null!)
+  const msgRef = useRef(messages)
+  msgRef.current = messages
+  // Older history for search and shared media, newest first, below what `messages` held when paging began.
+  // Decrypted in memory for this session only, never React state (a page must not re-render the chat).
+  // shortcut: every session pages and decrypts history again; persist to an index once a device's history makes the first search slow.
+  const archive = useRef(new Map<string, { list: Decrypted[]; done: boolean; busy?: Promise<boolean> }>())
+  const [focus, setFocus] = useState<{ convId: string; id: number } | null>(null) // a message to scroll to and flash
 
   const load = useCallback(async (again = true): Promise<Me> => {
     try {
@@ -86,6 +94,7 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
       setMe(m)
       // Left or removed from the open chat: close it rather than show an empty pane.
       if (activeRef.current && !m.conversations.some((x) => x.id === activeRef.current)) setActiveId(null)
+      for (const id of archive.current.keys()) if (!m.conversations.some((x) => x.id === id)) archive.current.delete(id)
       for (const conv of m.conversations)
         if (conv.lastMessage) decryptRef.current(conv.lastMessage).then((d) => merge(conv.id, [d]))
       return m
@@ -139,13 +148,19 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
       return { ...prev, [convId]: [...byId.values()].sort((a, b) => a.id - b.id) }
     })
 
-  // Changes a message we hold (null drops it); one we don't arrives whole with its page.
-  const update = (convId: string, id: number, fn: (m: Decrypted) => Decrypted | null) =>
+  // Changes a message we hold, open or archived (null drops it); one we don't arrives whole with its page.
+  const update = (convId: string, id: number, fn: (m: Decrypted) => Decrypted | null) => {
+    const a = archive.current.get(convId)?.list
+    const i = a?.findIndex((m) => m.id === id) ?? -1
+    const changed = i >= 0 && fn(a![i])
+    if (changed) a![i] = changed
+    else if (i >= 0) a!.splice(i, 1)
     setMessages((prev) => {
       const list = prev[convId]
       if (!list?.some((m) => m.id === id)) return prev
       return { ...prev, [convId]: list.flatMap((m) => (m.id !== id ? [m] : (fn(m) ?? []))) }
     })
+  }
 
   // An edit arrives without reactions; keep the ones we hold.
   const applyEdit = useCallback(
@@ -306,6 +321,45 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
     if (first) return fetchPage(convId, first.id)
   }
 
+  // One more page of a chat's history into the archive; true once it holds the first message.
+  const older = (convId: string) => {
+    let a = archive.current.get(convId)
+    if (!a) archive.current.set(convId, (a = { list: [], done: false }))
+    if (a.done) return Promise.resolve(true)
+    const arch = a
+    return (arch.busy ??= (async () => {
+      try {
+        const from = arch.list.at(-1)?.id ?? msgRef.current[convId]?.[0]?.id
+        const page = await api<Message[]>('GET', `/api/conversations/${convId}/messages?limit=${ARCHIVE_PAGE}${from ? `&before=${from}` : ''}`)
+        const list = await Promise.all(page.map(decrypt))
+        if (archive.current.get(convId) !== arch) return true // dropped meanwhile (left, unblocked)
+        arch.list.push(...list)
+        arch.done = page.length < ARCHIVE_PAGE
+        return arch.done
+      } finally {
+        arch.busy = undefined
+      }
+    })())
+  }
+
+  // All of a chat we hold, newest first: what the chat shows, then the archive below it.
+  const history = (convId: string) => {
+    const shown = msgRef.current[convId] ?? []
+    const a = archive.current.get(convId)
+    const floor = shown[0]?.id ?? Infinity
+    return { list: shown.toReversed().concat(a?.list.filter((m) => m.id < floor) ?? []), done: !!a?.done }
+  }
+
+  // Opens a chat at a message (from search or shared media): the archive from it up joins the chat, which scrolls to it.
+  // shortcut: the chat then renders everything from that message down; window the list if far jumps get slow.
+  const openAt = (convId: string, id: number) => {
+    const a = archive.current.get(convId)?.list
+    const i = a?.findIndex((m) => m.id === id) ?? -1
+    if (i >= 0) merge(convId, a!.slice(0, i + 1))
+    setFocus({ convId, id })
+    open(convId)
+  }
+
   const seal = async (convId: string, plain: MessageBody | ReactionBody) => {
     const { key } = await keyFor(convId)
     const body = await c.sealMessage(key, convId, plain)
@@ -462,14 +516,17 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
   }
 
   // The server hides a blocked person's messages from now on; drop the ones on screen too.
-  const hideFrom = (userId: string) =>
+  const hideFrom = (userId: string) => {
+    for (const a of archive.current.values()) a.list = a.list.filter((x) => x.senderId !== userId)
     setMessages((prev) => Object.fromEntries(Object.entries(prev).map(([k, list]) => [k, list.filter((x) => x.senderId !== userId)])))
+  }
 
   const block = async (userId: string, on: boolean) => {
     await api(on ? 'PUT' : 'DELETE', `/api/blocks/${userId}`)
-    if (on) hideFrom(userId)
+    if (on) return hideFrom(userId)
     // shortcut: unblocking restores only the newest page of each loaded chat; older ones come back on scroll-up.
-    else for (const id of loaded.current) fetchPage(id).catch(() => {})
+    for (const id of loaded.current) fetchPage(id).catch(() => {})
+    archive.current.clear() // their messages are back; search and shared media page again
   }
 
   // Reporting blocks too (server side).
@@ -479,8 +536,8 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
   }
 
   return {
-    me, messages, pending, hasOlder, activeId, totalUnread, typers,
-    open, loadOlder, send, retry, discard, sendWithFiles, fileUrl, createConversation, addMembers,
+    me, messages, pending, hasOlder, activeId, totalUnread, typers, focus, setFocus,
+    open, loadOlder, older, history, openAt, send, retry, discard, sendWithFiles, fileUrl, createConversation, addMembers,
     react, edit, unsend, forward, typing, setMine, rename, removeMember, leave, block, report,
   }
 }
