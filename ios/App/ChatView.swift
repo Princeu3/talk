@@ -48,9 +48,7 @@ struct ChatView: View {
             if prev.map({ !Calendar.current.isDate(date($0), inSameDayAs: date(m)) }) ?? true {
               Text(Format.day(m.message.createdAt)).font(.caption.weight(.medium)).foregroundStyle(Color.mut).padding(.vertical, 12)
             }
-            let gap: Bool = prev.map {
-              m.message.createdAt - $0.message.createdAt > 5 * 60_000 || $0.message.senderId != m.message.senderId || $0.system
-            } ?? true
+            let gap = prev.map { breaks($0, m) } ?? true
             MessageRow(convId: convId, m: m, group: conv?.kind == "group", first: gap, flashing: flash == m.id, onCall: callAgain, onZoom: { zoom = $0 }) {
               act($0, on: m, proxy)
             }
@@ -355,6 +353,12 @@ struct ChatView: View {
   }
 
   private func callAgain(_ kind: String) { calls.start(convId: convId, kind: kind) }
+
+  // A new run of bubbles: a pause of 5 minutes, another sender, or after an event line.
+  // Its own function: inline in the body, it was too slow for CI's compiler to type-check.
+  private func breaks(_ a: Decrypted, _ b: Decrypted) -> Bool {
+    b.message.createdAt - a.message.createdAt > 5 * 60_000 || a.message.senderId != b.message.senderId || a.system
+  }
 
   // Out of editing (its text goes) and replying.
   private func cancelCompose() {
