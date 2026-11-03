@@ -199,7 +199,7 @@ The second demo account is "Sam" (passphrase: <SAM PASSPHRASE>). The server also
 
 WHERE THINGS ARE
 - Report a message: long-press a message from Sam → Report.
-- Report or block a person: open the chat → "…" menu at the top right.
+- Report or block a person: open the chat → tap the name at the top → Report or Block.
 - Delete account: Settings (gear, top left) → Delete account. Deleting the demo account breaks later review steps, so please test it last or create a throwaway account with an invite link (Settings → Create invite link, then sign out and open the link).
 - Terms of use: https://push.princeuniverse.dev/terms (accepted at sign-in and sign-up). Reports reach the server operator (us, for this server), who acts within 24 hours.
 
