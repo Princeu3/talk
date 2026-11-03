@@ -89,6 +89,16 @@ textarea::placeholder {
   }
 }
 
+/* a reply's original, scrolled to: a short tint so the eye finds it */
+.flash {
+  animation: flash 1.4s ease-out;
+}
+@keyframes flash {
+  from {
+    background: color-mix(in srgb, var(--color-accent) 22%, transparent);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .rise {
     animation: none;
