@@ -135,7 +135,14 @@ export function callHandlers(io: Server) {
     update(g)
   }
 
-  return (socket: Socket) => {
+  // Left or removed from the chat: out of its call too (or no longer rung).
+  const drop = (convId: string, u: string) => {
+    const g = [...groups.values()].find((x) => x.convId === convId)
+    if (g?.peers.has(u)) leave(g, u, 'hangup')
+    else if (g?.ringing.delete(u)) io.to(`user:${u}`).emit('call:end', { id: g.id, reason: 'cancelled' })
+  }
+
+  const handlers = (socket: Socket) => {
     const me = socket.data.userId as string
     const mine = (id: unknown) => {
       const c = typeof id === 'string' ? calls.get(id) : undefined
@@ -264,4 +271,5 @@ export function callHandlers(io: Server) {
       }
     })
   }
+  return Object.assign(handlers, { drop })
 }

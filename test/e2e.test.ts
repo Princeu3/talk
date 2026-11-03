@@ -362,7 +362,9 @@ test('chat actions: reactions, edits, unsend, receipts, typing, mute, pin, group
   const hidden = none(se, 'edit')
   assert.equal((await api(dan, 'PATCH', `/api/messages/${hi.id}`, { body: newBody })).status, 200)
   await hidden
+  assert.equal((await convOf(erin, dm.id))!.reads![dan.id], undefined, 'no receipts across a block')
   await api(dan, 'DELETE', `/api/blocks/${erin.id}`)
+  assert.equal(typeof (await convOf(erin, dm.id))!.reads![dan.id], 'number')
 
   // unsend: gone for everyone, reactions with it
   await api(erin, 'PUT', `/api/messages/${hi.id}/reaction`, { body: await react('😂') })
@@ -470,6 +472,16 @@ test('group calls: ring, join, mesh signaling, leave, rejoin', async () => {
   const cancelled = next<{ id: string; reason: string }>(si, 'call:end', (e) => e.id === id2)
   sg.emit('call:hangup', { id: id2 })
   assert.equal((await cancelled).reason, 'cancelled')
+
+  // removed from the group mid-call: out of the call too
+  const { id: id3 } = await sg.emitWithAck('call:start', { convId: group.id, kind: 'audio' })
+  await sh2.emitWithAck('call:join', { id: id3 })
+  await si.emitWithAck('call:join', { id: id3 })
+  const dropped = next<{ user: string }>(sh2, 'call:left', (e) => e.user === ivy.id)
+  const kicked = next<{ id: string }>(si, 'call:end', (e) => e.id === id3)
+  assert.equal((await api(gina, 'DELETE', `/api/conversations/${group.id}/members/${ivy.id}`)).status, 200)
+  await Promise.all([dropped, kicked])
+  assert.deepEqual((await convOf(gina, group.id))!.call!.peers.sort(), [gina.id, hal.id].sort())
 })
 
 test('safety code is stable and short', async () => {

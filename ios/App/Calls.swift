@@ -337,7 +337,7 @@ final class Calls: NSObject {
       session = s
       current = CallView(convId: convId, peer: from, group: title, kind: kind, phase: .incoming, camera: s.camera)
       // A push can arrive after the caller gave up, or after another of our devices answered.
-      s.checked = Task {
+      let check = Task {
         struct Ring: Decodable { let state: String; let group: Bool? }
         do {
           let r: Ring = try await talk!.api.call("GET", "/api/calls/\(id)")
@@ -347,6 +347,7 @@ final class Calls: NSObject {
         catch let e as APIError where e.status == 404 { if session === s { remoteEnded(s, reason: "cancelled") } }
         catch {}
       }
+      if flag == nil { s.checked = check } // only a push leaves the kind to this check; answering waits for it then
     }
     provider.reportNewIncomingCall(with: uuid, update: update) { _ in }
     talk?.socket.connect()

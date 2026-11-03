@@ -72,13 +72,14 @@ function Main({ ident, onSignOut }: { ident: StoredIdentity; onSignOut: () => vo
     const live = me.conversations.find((c) => c.id === convId)?.call
     if (live) calls.join(convId, live)
   }
-  // In a group with a call on, the call buttons join it.
-  const startCall = (kind: CallKind) => {
-    const conv = me.conversations.find((c) => c.id === talk.activeId)
-    if (conv?.call) return joinCall(conv.id)
-    const peer = conv?.members.find((u) => u !== me.user.id)
-    if (conv?.kind === 'group') calls.start(conv.id, kind)
-    else if (conv && peer) calls.start(conv.id, kind, peer)
+  // In a group with a call on, the call buttons join it. A DM whose other account
+  // was deleted has nobody to call, so it gets no buttons.
+  const active = me.conversations.find((c) => c.id === talk.activeId)
+  const peer = active?.members.find((u) => u !== me.user.id)
+  const startCall = !active || (active.kind !== 'group' && !peer) ? undefined : (kind: CallKind) => {
+    if (active.call) return joinCall(active.id)
+    if (active.kind === 'group') calls.start(active.id, kind)
+    else calls.start(active.id, kind, peer)
   }
   const callConv = call && me.conversations.find((c) => c.id === call.convId)
   const callName = !call ? '' : call.group && callConv ? convName(me, callConv) : userName(me, call.peer)

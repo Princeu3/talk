@@ -129,7 +129,8 @@ app.get('/api/me', (req, res) => {
     return {
       ...c,
       members: r.map((x) => x.id),
-      reads: Object.fromEntries(r.map((x) => [x.id, x.upTo])),
+      // A blocked DM shares no receipts, as with the live `read` event.
+      reads: Object.fromEntries(r.filter((x) => x.id === req.userId || c.kind !== 'dm' || !dmRefusal(c.id, req.userId)).map((x) => [x.id, x.upTo])),
       lastMessage: lasts.get(c.id) ?? null,
       ...(muted && { muted: true }),
       ...(pinned && { pinned: true }),
@@ -327,6 +328,7 @@ app.delete('/api/conversations/:id/members/:userId', (req, res) => {
   if (kind !== 'group' || !isMember(convId, userId)) return void res.status(400).json({ error: 'bad request' })
   const before = memberIds(convId)
   db.prepare('delete from members where conv_id = ? and user_id = ?').run(convId, userId)
+  calls.drop(convId, userId)
   sync(before)
   res.json({ ok: true })
 })
