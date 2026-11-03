@@ -4,13 +4,13 @@ import {
 } from 'react'
 import type { Talk, Decrypted } from '../lib/useTalk.ts'
 import type { CallKind, FileRef, Voice } from '../../shared/types.ts'
-import { callSummary, convName, dayLabel, fileSize, preview, typingLabel, userName } from '../lib/format.ts'
+import { callNoun, callSummary, convName, dayLabel, fileSize, preview, typingLabel, userName, who } from '../lib/format.ts'
 import { canRecord, startRecording, type Recording } from '../lib/voice.ts'
 import { Avatar } from './Sidebar.tsx'
 import { Back, Check, Clip, Close, Copy, FileIcon, Flag, Forward, Lock, Mic, More, Pencil, Phone, Reply, Send, Trash, Video } from './icons.tsx'
 import { iconButton } from './Sidebar.tsx'
 import { VoicePlayer, VoiceRecorder } from './Voice.tsx'
-import { Confirm, ForwardSheet, Report, Sheet } from './Sheets.tsx'
+import { Confirm, ForwardSheet, Report, Sheet, useEscape } from './Sheets.tsx'
 import ChatInfo from './ChatInfo.tsx'
 
 const AUTO_LOAD = 25 * 1024 * 1024
@@ -20,6 +20,12 @@ const EDIT_MS = 15 * 60_000 // the server's window
 const EMOJI = ['👍', '❤️', '😂', '😮', '😢', '🙏']
 const column = 'flex max-w-[80%] flex-col sm:max-w-[65%]' // a bubble and what hangs off it
 const desktop = () => matchMedia('(pointer: fine)').matches
+const day = (ts: number) => new Date(ts).toDateString()
+// Where one run of bubbles ends and the next starts.
+const breaks = (a: Decrypted, b: Decrypted) =>
+  a.senderId !== b.senderId || b.createdAt - a.createdAt > RUN_GAP || day(a.createdAt) !== day(b.createdAt) || a.system || b.system
+
+const SystemLine = ({ text }: { text?: string }) => <p className="mx-6 my-1 self-center text-center text-xs text-mut">{text}</p>
 
 function FileChip({ file, onRemove }: { file: File; onRemove: () => void }) {
   const [thumb, setThumb] = useState<string>()
@@ -180,7 +186,7 @@ function Bubble({ m, mine, first, last, talk, onCall, onZoom, onJump }: {
           onClick={() => onJump?.(c.reply!.id)}
           className="flex flex-col rounded-xl border-l-[3px] border-accent bg-ink/8 px-3 py-1.5 text-left text-sm"
         >
-          <span className="font-semibold">{c.reply.from === me.user.id ? 'You' : userName(me, c.reply.from)}</span>
+          <span className="font-semibold">{who(me, c.reply.from)}</span>
           <span className="line-clamp-2 text-ink/80">{c.reply.preview}</span>
         </button>
       )}
@@ -200,11 +206,7 @@ function MessageMenu({ at, mine, onClose, children }: { at: DOMRect; mine: boole
     const top = at.bottom + 6 + h < innerHeight - 8 ? at.bottom + 6 : Math.max(8, at.top - h - 6)
     setPos({ top, left: Math.min(Math.max(8, mine ? at.right - w : at.left), innerWidth - w - 8) })
   }, [at, mine])
-  useEffect(() => {
-    const onKey = (e: globalThis.KeyboardEvent) => e.key === 'Escape' && onClose()
-    addEventListener('keydown', onKey)
-    return () => removeEventListener('keydown', onKey)
-  }, [onClose])
+  useEscape(onClose)
   return (
     <div className="fixed inset-0 z-40" onClick={onClose} onContextMenu={(e) => { e.preventDefault(); onClose() }}>
       <div
@@ -253,7 +255,7 @@ function Reactions({ talk, m, onClose }: { talk: Talk; m: Decrypted; onClose: ()
             <>
               <Avatar name={userName(me, id)} size={36} />
               <span className="min-w-0 flex-1">
-                <span className="block font-medium">{mine ? 'You' : userName(me, id)}</span>
+                <span className="block font-medium">{who(me, id)}</span>
                 {mine && <span className="block text-xs text-mut">Tap to remove</span>}
               </span>
               <span className="text-2xl">{emoji}</span>
@@ -281,7 +283,7 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
   convId: string
   onBack: () => void
   onCall?: (kind: CallKind) => void // unset while a call is on
-  onJoin: () => void // the group call on in this chat, or back to it
+  onJoin: (convId: string) => void // the group call on in this chat, or back to it
   onAddPeople: () => void
 }) {
   const me = talk.me!
@@ -297,7 +299,7 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
   const [unsent, setUnsent] = useState<{ file: File; voice: Voice } | null>(null) // kept so a failed send isn't lost
   const [reply, setReply] = useState<Decrypted | null>(null)
   const [editing, setEditing] = useState<Decrypted | null>(null)
-  const [menu, setMenu] = useState<{ m: Decrypted; at: DOMRect; mine: boolean } | null>(null)
+  const [menu, setMenu] = useState<{ m: Decrypted; at: DOMRect } | null>(null)
   const [act, setAct] = useState<{ kind: 'delete' | 'forward' | 'report' | 'reactions'; m: Decrypted } | null>(null)
   const [info, setInfo] = useState(false)
   const recRef = useRef<Recording | null>(null)
@@ -442,7 +444,7 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
     }
   }
 
-  const openMenu = (m: Decrypted, el: Element) => setMenu({ m, at: el.getBoundingClientRect(), mine: m.senderId === me.user.id })
+  const openMenu = (m: Decrypted, el: Element) => setMenu({ m, at: el.getBoundingClientRect() })
   // Right-click on desktop; long-press on touch (iOS fires no contextmenu, Android does: both open the same menu).
   const menuHandlers = (m: Decrypted) => ({
     onContextMenu: (e: MouseEvent<HTMLElement>) => {
@@ -470,8 +472,9 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
     },
   })
 
-  const actions = (m: Decrypted, mine: boolean) => {
+  const actions = (m: Decrypted) => {
     const c = m.content
+    const mine = m.senderId === me.user.id
     const go = (f: () => void) => () => {
       setMenu(null)
       f()
@@ -498,7 +501,7 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
 
   const typers = talk.typers[convId] ?? []
   // Receipt under my newest message: who has read up to it.
-  const newest = list.findLast((m) => m.senderId === me.user.id && !m.content?.system)
+  const newest = list.findLast((m) => m.senderId === me.user.id && !m.system)
   const readers = newest ? conv.members.filter((u) => u !== me.user.id && (conv.reads?.[u] ?? 0) >= newest.id) : []
   const receipt =
     conv.kind === 'dm' || !readers.length
@@ -567,10 +570,10 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
         </button>
       </header>
       {conv.call && (
-        <button onClick={onJoin} className="flex min-h-11 items-center gap-2.5 border-t border-line bg-surface px-4 py-1.5 text-left text-sm">
+        <button onClick={() => onJoin(convId)} className="flex min-h-11 items-center gap-2.5 border-t border-line bg-surface px-4 py-1.5 text-left text-sm">
           {conv.call.kind === 'audio' ? <Phone size={16} /> : <Video size={18} />}
           <span className="min-w-0 flex-1 truncate">
-            Group {conv.call.kind === 'audio' ? 'voice' : 'video'} call · {conv.call.peers.length} {conv.call.peers.length === 1 ? 'person' : 'people'}
+            {callNoun(conv.call.kind, true)} · {conv.call.peers.length} {conv.call.peers.length === 1 ? 'person' : 'people'}
           </span>
           <span className="shrink-0 rounded-full bg-fill px-3.5 py-1.5 font-semibold text-on-fill">
             {conv.call.peers.includes(me.user.id) ? 'Return to call' : 'Join'}
@@ -613,20 +616,14 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
           const prev = list[i - 1]
           const next = list[i + 1]
           const mine = m.senderId === me.user.id
-          const newDay = !prev || new Date(prev.createdAt).toDateString() !== new Date(m.createdAt).toDateString()
-          const system = m.content?.system && !m.forged
-          const first = newDay || prev.senderId !== m.senderId || m.createdAt - prev.createdAt > RUN_GAP || !!prev.content?.system
-          const last =
-            !next ||
-            next.senderId !== m.senderId ||
-            next.createdAt - m.createdAt > RUN_GAP ||
-            new Date(next.createdAt).toDateString() !== new Date(m.createdAt).toDateString() ||
-            !!next.content?.system
+          const newDay = !prev || day(prev.createdAt) !== day(m.createdAt)
+          const first = !prev || breaks(prev, m)
+          const last = !next || breaks(m, next)
           return (
             <div key={m.id} id={`m-${m.id}`} className={`flex flex-col rounded-xl ${first ? 'mt-3' : 'mt-0.5'}`}>
               {newDay && <div className="mb-2 mt-3 self-center text-xs font-medium text-mut">{dayLabel(m.createdAt)}</div>}
-              {system ? (
-                <p className="mx-6 my-1 self-center text-center text-xs text-mut">{m.content!.text}</p>
+              {m.system ? (
+                <SystemLine text={m.content!.text} />
               ) : (
                 <>
                   {first && !mine && conv.kind === 'group' && <div className="mb-1 ml-3 text-xs font-medium text-mut">{userName(me, m.senderId)}</div>}
@@ -662,11 +659,11 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
         {queued.map((p) => (
           <div key={p.cid} className="mt-0.5 flex flex-col">
             {p.content.system ? (
-              <p className="mx-6 my-1 self-center text-center text-xs text-mut">{p.content.text}</p>
+              <SystemLine text={p.content.text} />
             ) : (
               <div className={`${column} self-end`}>
                 <Bubble
-                  m={{ id: 0, convId, senderId: me.user.id, body: p.body, createdAt: p.createdAt, content: p.content, forged: false }}
+                  m={{ id: 0, convId, senderId: me.user.id, body: p.body, createdAt: p.createdAt, content: p.content, forged: false, system: false }}
                   mine first last talk={talk} onZoom={setZoom}
                 />
               </div>
@@ -716,7 +713,7 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
           <div className="flex items-center gap-2 pb-2 pl-3">
             <div className="min-w-0 flex-1 border-l-[3px] border-accent pl-3">
               <p className="text-sm font-semibold">
-                {editing ? 'Editing' : reply!.senderId === me.user.id ? 'You' : userName(me, reply!.senderId)}
+                {editing ? 'Editing' : who(me, reply!.senderId)}
               </p>
               <p className="truncate text-sm text-mut">{preview((editing ?? reply)!.content, (editing ?? reply)!.senderId === me.user.id)}</p>
             </div>
@@ -789,7 +786,7 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
       )}
 
       {menu && (
-        <MessageMenu at={menu.at} mine={menu.mine} onClose={() => setMenu(null)}>
+        <MessageMenu at={menu.at} mine={menu.m.senderId === me.user.id} onClose={() => setMenu(null)}>
           {menu.m.content && (
             <div className="flex rounded-full bg-surface p-1 shadow-lg ring-1 ring-line">
               {EMOJI.map((e, i) => {
@@ -813,7 +810,7 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
             </div>
           )}
           <ul className="min-w-52 rounded-2xl bg-surface py-1 shadow-lg ring-1 ring-line">
-            {actions(menu.m, menu.mine).map(({ label, Icon, run, red }) => (
+            {actions(menu.m).map(({ label, Icon, run, red }) => (
               <li key={label}>
                 <button onClick={run} className={`flex min-h-11 w-full items-center justify-between gap-6 px-4 text-left hover:bg-raised ${red ? 'text-danger' : ''}`}>
                   {label}

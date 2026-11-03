@@ -140,13 +140,11 @@ const newPeer = (user: string, polite: boolean, kind: CallKind): Peer =>
 const tiles = (s: Session): Remote[] => [...s.peers.values()].map(({ user, stream, muted, camera }) => ({ user, stream, muted, camera }))
 const only = (s: Session) => [...s.peers.values()][0] // a DM's one peer
 
-export function useCall(onLog: (convId: string, kind: CallKind, ms: number, group: boolean) => void, isGroup: (convId: string) => boolean) {
+export function useCall(onLog: (convId: string, kind: CallKind, ms: number, group: boolean) => void) {
   const [call, setCall] = useState<CallView | null>(null)
   const ref = useRef<Session | null>(null)
   const logRef = useRef(onLog)
   logRef.current = onLog
-  const groupRef = useRef(isGroup)
-  groupRef.current = isGroup
   const patch = (p: Partial<CallView>) => setCall((v) => v && { ...v, ...p })
   const show = (s: Session) => ref.current === s && patch({ peers: tiles(s) })
 
@@ -374,8 +372,20 @@ export function useCall(onLog: (convId: string, kind: CallKind, ms: number, grou
     sendState(s)
   }, [])
 
-  // Off stops the camera (its light goes out); on starts it again. Turning it
-  // on in a voice call adds video, which renegotiates each connection.
+  // Our video on every connection, or none. Adding it where a voice call had
+  // none renegotiates that connection.
+  const setVideo = async (s: Session, t: MediaStreamTrack | null) => {
+    if (t) s.local.addTrack(t)
+    for (const p of s.peers.values()) {
+      if (p.video) await p.video.replaceTrack(t)
+      else if (t && p.pc) p.video = p.pc.addTrack(t, s.local)
+    }
+    s.camera = !!t
+    patch({ camera: s.camera, facing: s.facing, local: new MediaStream(s.local.getTracks()) })
+    sendState(s)
+  }
+
+  // Off stops the camera (its light goes out); on starts it again.
   const toggleCamera = useCallback(async () => {
     const s = ref.current
     if (!s) return
@@ -383,20 +393,11 @@ export function useCall(onLog: (convId: string, kind: CallKind, ms: number, grou
     if (cur) {
       cur.stop()
       s.local.removeTrack(cur)
-      for (const p of s.peers.values()) await p.video?.replaceTrack(null)
-      s.camera = false
-    } else {
-      const t = await getCamera(s.facing).catch(() => null)
-      if (!t || s.done) return t?.stop()
-      s.local.addTrack(t)
-      for (const p of s.peers.values()) {
-        if (p.video) await p.video.replaceTrack(t)
-        else if (p.pc) p.video = p.pc.addTrack(t, s.local)
-      }
-      s.camera = true
+      return setVideo(s, null)
     }
-    patch({ camera: s.camera, local: new MediaStream(s.local.getTracks()) })
-    sendState(s)
+    const t = await getCamera(s.facing).catch(() => null)
+    if (!t || s.done) return t?.stop()
+    await setVideo(s, t)
   }, [])
 
   const flip = useCallback(async () => {
@@ -410,21 +411,16 @@ export function useCall(onLog: (convId: string, kind: CallKind, ms: number, grou
     const t = await getCamera(want).catch(() => getCamera(s.facing)).catch(() => null)
     if (!t || s.done) {
       t?.stop()
-      for (const p of s.peers.values()) await p.video?.replaceTrack(null)
-      s.camera = false
-      patch({ camera: false, local: new MediaStream(s.local.getTracks()) })
-      return sendState(s)
+      return setVideo(s, null)
     }
     s.facing = t.getSettings().facingMode === 'environment' ? 'environment' : 'user'
-    s.local.addTrack(t)
-    for (const p of s.peers.values()) await p.video?.replaceTrack(t)
-    patch({ facing: s.facing, local: new MediaStream(s.local.getTracks()) })
+    await setVideo(s, t)
   }, [])
 
   useEffect(() => {
     const onRing = (r: CallRing) => {
       if (ref.current) return // the server won't ring someone in a call; this is a replay
-      const s = session(r.convId, r.kind, false, r.id, groupRef.current(r.convId) ? undefined : r.from)
+      const s = session(r.convId, r.kind, false, r.id, r.group ? undefined : r.from)
       ref.current = s
       s.stopTone = tone('ring')
       setCall(view(s, r.from, 'incoming'))

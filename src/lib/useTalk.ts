@@ -2,12 +2,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, ApiError, socket } from './api.ts'
 import * as c from './crypto.ts'
-import { userName } from './format.ts'
+import { names, userName } from './format.ts'
 import type { Conversation, FileRef, GroupCall, Me, Message, MessageBody, Reaction, ReactionBody, Voice } from '../../shared/types.ts'
 
 export interface Decrypted extends Message {
   content: MessageBody | null // null: could not decrypt
   forged: boolean // inner sender differs from the one the server claims
+  system: boolean // a group event line; a forged one shows as a plain (flagged) message
   reacts?: Record<string, string> // user id -> emoji, only reactions that check out
 }
 
@@ -109,14 +110,17 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
       try {
         const { key } = await keyFor(msg.convId)
         const content = await c.openMessage<MessageBody>(key, msg.convId, msg.body)
+        const list = msg.reactions ?? []
+        const emojis = await Promise.all(list.map((r) => openReaction(key, msg.convId, msg.id, r)))
         const reacts: Record<string, string> = {}
-        for (const r of msg.reactions ?? []) {
-          const emoji = await openReaction(key, msg.convId, msg.id, r)
+        list.forEach((r, i) => {
+          const emoji = emojis[i]
           if (emoji) reacts[r.userId] = emoji
-        }
-        return { ...msg, content, forged: content.from !== msg.senderId, reacts }
+        })
+        const forged = content.from !== msg.senderId
+        return { ...msg, content, forged, system: !!content.system && !forged, reacts }
       } catch {
-        return { ...msg, content: null, forged: false }
+        return { ...msg, content: null, forged: false, system: false }
       }
     },
     [keyFor],
@@ -137,6 +141,18 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
       if (!list?.some((m) => m.id === id)) return prev
       return { ...prev, [convId]: list.flatMap((m) => (m.id !== id ? [m] : (fn(m) ?? []))) }
     })
+
+  // An edit arrives without reactions; keep the ones we hold.
+  const applyEdit = useCallback(
+    async (msg: Message) => {
+      const d = await decrypt(msg)
+      update(msg.convId, msg.id, (x) => ({ ...d, reacts: x.reacts }))
+    },
+    [decrypt],
+  )
+
+  const patchConv = (convId: string, fn: (x: Conversation) => Conversation) =>
+    setMe((m) => m && { ...m, conversations: m.conversations.map((x) => (x.id === convId ? fn(x) : x)) })
 
   // Someone shows as typing for 6 s after their last signal, or until their message lands.
   const setTyper = (convId: string, userId: string, on: boolean) => {
@@ -170,7 +186,7 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
         const r = await socket.timeout(15_000).emitWithAck('send', { convId, body, quiet, seen, cid })
         if (r.error) patch(p, { sending: false, error: r.error })
         else {
-          merge(convId, [{ ...r.message, content, forged: false }])
+          merge(convId, [{ ...r.message, content, forged: false, system: !!content.system }])
           patch(p, null)
         }
       } catch {
@@ -198,12 +214,8 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
       merge(msg.convId, [d])
       setTyper(msg.convId, msg.senderId, false)
       const mine = msg.senderId === meRef.current?.user.id
-      const seen = (activeRef.current === msg.convId && !document.hidden) || !!d.content?.call?.ms || !!d.content?.system
+      const seen = (activeRef.current === msg.convId && !document.hidden) || !!d.content?.call?.ms || d.system
       setMe((m) => m && { ...m, conversations: bump(m.conversations, msg, !mine && !seen) })
-    }
-    const onEdit = async (msg: Message) => {
-      const d = await decrypt(msg)
-      update(msg.convId, msg.id, () => d)
     }
     const onReaction = async ({ messageId, convId, userId, body }: { messageId: number; convId: string; userId: string; body: string | null }) => {
       const emoji = body && (await openReaction((await keyFor(convId)).key, convId, messageId, { userId, body }))
@@ -211,11 +223,10 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
     }
     const onUnsend = ({ id, convId }: { id: number; convId: string }) => update(convId, id, () => null)
     const onRead = ({ convId, userId, upTo }: { convId: string; userId: string; upTo: number }) =>
-      setMe((m) => m && { ...m, conversations: m.conversations.map((x) => (x.id === convId ? { ...x, reads: { ...x.reads, [userId]: upTo } } : x)) })
+      patchConv(convId, (x) => ({ ...x, reads: { ...x.reads, [userId]: upTo } }))
     const onTyping = ({ convId, userId }: { convId: string; userId: string }) => setTyper(convId, userId, true)
     const onSync = () => void load().catch(() => {})
-    const onCall = ({ convId, call }: { convId: string; call: GroupCall | null }) =>
-      setMe((m) => m && { ...m, conversations: m.conversations.map((x) => (x.id === convId ? { ...x, call: call ?? undefined } : x)) })
+    const onCall = ({ convId, call }: { convId: string; call: GroupCall | null }) => patchConv(convId, (x) => ({ ...x, call: call ?? undefined }))
     // Reconnects (phones drop sockets constantly) refetch what we may have missed.
     const onConnect = () => {
       socket.emit('active', !document.hidden)
@@ -228,7 +239,7 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
     const onVisibility = () => socket.emit('active', !document.hidden)
 
     socket.on('message', onMessage)
-    socket.on('edit', onEdit)
+    socket.on('edit', applyEdit)
     socket.on('reaction', onReaction)
     socket.on('unsend', onUnsend)
     socket.on('read', onRead)
@@ -241,7 +252,7 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
     socket.connect()
     return () => {
       socket.off('message', onMessage)
-      socket.off('edit', onEdit)
+      socket.off('edit', applyEdit)
       socket.off('reaction', onReaction)
       socket.off('unsend', onUnsend)
       socket.off('read', onRead)
@@ -253,7 +264,7 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
       document.removeEventListener('visibilitychange', onVisibility)
       socket.disconnect()
     }
-  }, [load, keyFor, decrypt, fetchPage, drain, onSignedOut])
+  }, [load, keyFor, decrypt, applyEdit, fetchPage, drain, onSignedOut])
 
   // Mark the open conversation read whenever its newest message changes.
   const lastId = activeId ? messages[activeId]?.at(-1)?.id : undefined
@@ -262,7 +273,7 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
     const markRead = () => {
       if (document.hidden) return
       api('POST', `/api/conversations/${activeId}/read`, { upTo: lastId }).catch(() => {})
-      setMe((m) => m && { ...m, conversations: m.conversations.map((x) => (x.id === activeId ? { ...x, unread: 0 } : x)) })
+      patchConv(activeId, (x) => ({ ...x, unread: 0 }))
     }
     markRead()
     document.addEventListener('visibilitychange', markRead)
@@ -289,13 +300,18 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
     if (first) return fetchPage(convId, first.id)
   }
 
-  // Sealed and queued; resolves before the server hears, and a failure shows on the pending row.
-  const send = async (convId: string, content: Omit<MessageBody, 'from'>, quiet?: boolean, seen?: boolean) => {
+  const seal = async (convId: string, plain: MessageBody | ReactionBody) => {
     const { key } = await keyFor(convId)
-    const full = { ...content, from: meRef.current!.user.id }
-    const body = await c.sealMessage(key, convId, full)
+    const body = await c.sealMessage(key, convId, plain)
     // The server's limit; caught here, so the draft comes back instead of a row that can never send.
     if (body.length > 64 * 1024) throw new Error('That message is too long to send.')
+    return body
+  }
+
+  // Sealed and queued; resolves before the server hears, and a failure shows on the pending row.
+  const send = async (convId: string, content: Omit<MessageBody, 'from'>, quiet?: boolean, seen?: boolean) => {
+    const full = { ...content, from: meRef.current!.user.id }
+    const body = await seal(convId, full)
     const p: Pending = { cid: crypto.randomUUID(), convId, body, content: full, createdAt: Date.now(), quiet, seen, sending: socket.connected }
     setQueue([...queue.current, p])
     lastTyping.current = 0 // receivers drop us when this lands, so the next draft signals at once
@@ -358,39 +374,36 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
     return id
   }
 
-  const addMember = async (convId: string, userId: string) => {
-    const { raw } = await keyFor(convId)
-    const user = meRef.current!.users.find((u) => u.id === userId)!
-    const wrappedKey = await c.wrapConvKey(raw, privateKey, user.pubkey, convId, userId)
-    await api('POST', `/api/conversations/${convId}/members`, { userId, wrappedKey })
-    await load()
-  }
-
   // A group event as a centered line ("Alice added Bob"), sealed like any message.
   const announce = (convId: string, sentence: string) =>
     send(convId, { system: true, text: `${meRef.current!.user.name} ${sentence}` }, true, true)
+
+  const addMembers = async (convId: string, userIds: string[]) => {
+    const { raw } = await keyFor(convId)
+    const m = meRef.current!
+    for (const userId of userIds) {
+      const user = m.users.find((u) => u.id === userId)!
+      const wrappedKey = await c.wrapConvKey(raw, privateKey, user.pubkey, convId, userId)
+      await api('POST', `/api/conversations/${convId}/members`, { userId, wrappedKey })
+    }
+    await announce(convId, `added ${names(userIds.map((id) => userName(m, id)))}`)
+    await load()
+  }
 
   // Picking your current emoji again takes it off.
   const react = async (m: Decrypted, emoji: string) => {
     const myId = meRef.current!.user.id
     const off = m.reacts?.[myId] === emoji
     if (off) await api('DELETE', `/api/messages/${m.id}/reaction`)
-    else {
-      const { key } = await keyFor(m.convId)
-      const body = await c.sealMessage(key, m.convId, { from: myId, to: m.id, emoji } satisfies ReactionBody)
-      await api('PUT', `/api/messages/${m.id}/reaction`, { body })
-    }
+    else await api('PUT', `/api/messages/${m.id}/reaction`, { body: await seal(m.convId, { from: myId, to: m.id, emoji }) })
     update(m.convId, m.id, (x) => ({ ...x, reacts: withReaction(x.reacts, myId, off ? null : emoji) }))
   }
 
   // New text, everything else (reply, files, forwarded) kept.
   const edit = async (m: Decrypted, text: string) => {
-    const { key } = await keyFor(m.convId)
-    const body = await c.sealMessage(key, m.convId, { ...m.content, text, from: meRef.current!.user.id })
-    if (body.length > 64 * 1024) throw new Error('That message is too long to send.')
+    const body = await seal(m.convId, { ...m.content, text, from: meRef.current!.user.id })
     const { message } = await api<{ message: Message }>('PATCH', `/api/messages/${m.id}`, { body })
-    const d = await decrypt(message)
-    update(m.convId, m.id, () => d)
+    await applyEdit(message)
   }
 
   const unsend = async (m: Decrypted) => {
@@ -414,32 +427,32 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
     socket.emit('typing', { convId })
   }
 
+  // These endpoints send us `sync`, which reloads; local patches only make the change show at once.
   const setMine = async (convId: string, change: { muted?: boolean; pinned?: boolean }) => {
     await api('PATCH', `/api/conversations/${convId}/me`, change)
-    await load()
+    patchConv(convId, (x) => ({ ...x, ...change }))
   }
 
   const rename = async (convId: string, title: string) => {
     await api('PATCH', `/api/conversations/${convId}`, { title })
+    patchConv(convId, (x) => ({ ...x, title }))
     await announce(convId, `named the group “${title}”`)
-    await load()
   }
 
   const removeMember = async (convId: string, userId: string) => {
     await api('DELETE', `/api/conversations/${convId}/members/${userId}`)
+    patchConv(convId, (x) => ({ ...x, members: x.members.filter((u) => u !== userId) }))
     await announce(convId, `removed ${userName(meRef.current!, userId)}`)
-    await load()
   }
 
   // The line goes out first, since the server refuses a non-member's message. Emitted
   // directly (with a cid) instead of queued, so it has landed before we leave.
   const leave = async (convId: string) => {
     const m = meRef.current!
-    const { key } = await keyFor(convId)
-    const body = await c.sealMessage(key, convId, { from: m.user.id, system: true, text: `${m.user.name} left` })
+    const body = await seal(convId, { from: m.user.id, system: true, text: `${m.user.name} left` })
     await socket.timeout(15_000).emitWithAck('send', { convId, body, quiet: true, seen: true, cid: crypto.randomUUID() }).catch(() => {})
     await api('DELETE', `/api/conversations/${convId}/members/${m.user.id}`)
-    await load()
+    if (activeRef.current === convId) setActiveId(null)
   }
 
   // The server hides a blocked person's messages from now on; drop the ones on screen too.
@@ -451,20 +464,18 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
     if (on) hideFrom(userId)
     // shortcut: unblocking restores only the newest page of each loaded chat; older ones come back on scroll-up.
     else for (const id of loaded.current) fetchPage(id).catch(() => {})
-    await load()
   }
 
   // Reporting blocks too (server side).
   const report = async (userId: string, convId: string, note: string) => {
     await api('POST', '/api/reports', { userId, convId, note: note.trim() || undefined })
     hideFrom(userId)
-    await load()
   }
 
   return {
     me, messages, pending, hasOlder, activeId, totalUnread, typers,
-    open, loadOlder, send, retry, discard, sendWithFiles, fileUrl, createConversation, addMember,
-    announce, react, edit, unsend, forward, typing, setMine, rename, removeMember, leave, block, report,
+    open, loadOlder, send, retry, discard, sendWithFiles, fileUrl, createConversation, addMembers,
+    react, edit, unsend, forward, typing, setMine, rename, removeMember, leave, block, report,
   }
 }
 

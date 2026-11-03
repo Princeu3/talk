@@ -34,7 +34,6 @@ function Main({ ident, onSignOut }: { ident: StoredIdentity; onSignOut: () => vo
   const { open, me, send } = talk
   const calls = useCall(
     useCallback((convId, kind, ms, group) => void send(convId, { call: { kind, ms, group: group || undefined } }, true, ms > 0).catch(() => {}), [send]),
-    (convId) => me?.conversations.find((c) => c.id === convId)?.kind === 'group',
   )
   const { call } = calls
   const [minimized, setMinimized] = useState(false)
@@ -68,18 +67,18 @@ function Main({ ident, onSignOut }: { ident: StoredIdentity; onSignOut: () => vo
       </div>
     )
 
-  // In a group with a call on, the call buttons join it.
-  const startCall = (kind: CallKind) => {
-    const conv = me.conversations.find((c) => c.id === talk.activeId)
-    if (conv?.call) return calls.join(conv.id, conv.call)
-    const peer = conv?.members.find((u) => u !== me.user.id)
-    if (conv?.kind === 'group') calls.start(conv.id, kind)
-    else if (conv && peer) calls.start(conv.id, kind, peer)
-  }
   const joinCall = (convId: string) => {
     if (call?.convId === convId) return setMinimized(false)
     const live = me.conversations.find((c) => c.id === convId)?.call
     if (live) calls.join(convId, live)
+  }
+  // In a group with a call on, the call buttons join it.
+  const startCall = (kind: CallKind) => {
+    const conv = me.conversations.find((c) => c.id === talk.activeId)
+    if (conv?.call) return joinCall(conv.id)
+    const peer = conv?.members.find((u) => u !== me.user.id)
+    if (conv?.kind === 'group') calls.start(conv.id, kind)
+    else if (conv && peer) calls.start(conv.id, kind, peer)
   }
   const callConv = call && me.conversations.find((c) => c.id === call.convId)
   const callName = !call ? '' : call.group && callConv ? convName(me, callConv) : userName(me, call.peer)
@@ -100,7 +99,7 @@ function Main({ ident, onSignOut }: { ident: StoredIdentity; onSignOut: () => vo
               convId={talk.activeId}
               onBack={() => open(null)}
               onCall={call ? undefined : startCall}
-              onJoin={() => joinCall(talk.activeId!)}
+              onJoin={joinCall}
               onAddPeople={() => setSheet('add')}
             />
           ) : (

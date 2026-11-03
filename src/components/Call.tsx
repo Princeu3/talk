@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import type { Calls, CallView, Remote } from '../lib/useCall.ts'
 import { clock } from '../lib/voice.ts'
+import { callNoun } from '../lib/format.ts'
 import { Avatar } from './Sidebar.tsx'
 import { ChevronDown, Lock, Mic, MicOff, Phone, SwitchCamera, Video, VideoOff } from './icons.tsx'
 
@@ -11,7 +12,7 @@ const ACCEPT = 'bg-[#30a46c] text-white'
 
 export function status(c: CallView) {
   switch (c.phase) {
-    case 'incoming': return c.group ? `Group ${c.kind === 'video' ? 'video' : 'voice'} call` : c.kind === 'video' ? 'Video call' : 'Voice call'
+    case 'incoming': return callNoun(c.kind, c.group)
     case 'calling': return c.group ? 'Waiting for others…' : 'Calling…'
     case 'ringing': return c.group ? 'Waiting for others…' : 'Ringing…'
     case 'connecting': return 'Connecting…'
