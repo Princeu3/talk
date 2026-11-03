@@ -54,6 +54,11 @@ body {
   outline-offset: 2px;
 }
 
+/* WebKit draws its own blue clear button; the chat list draws one in the palette. */
+input[type='search']::-webkit-search-cancel-button {
+  appearance: none;
+}
+
 input::placeholder,
 textarea::placeholder {
   color: var(--color-mut);

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import type { Decrypted, Talk } from '../lib/useTalk.ts'
 import { convName, fold, preview, shortTime, snippet, typingLabel, userName } from '../lib/format.ts'
-import { BellOff, Compose, Lock, Phone, Pin, Search, Settings, Video } from './icons.tsx'
+import { BellOff, Close, Compose, Lock, Phone, Pin, Search, Settings, Video } from './icons.tsx'
 
 // Olive to soft white, so every avatar sits inside the app palette in both themes.
 const SHADES = ['#2e3d28', '#4f6340', '#7e9466', '#a9b887', '#cdd6b8', '#e8e9df']
@@ -206,8 +206,18 @@ export default function Sidebar({ talk, onNew, onSettings, onJoin }: { talk: Tal
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search"
             aria-label="Search chats and messages"
-            className="min-h-10 w-full rounded-xl bg-raised pl-10 pr-3 text-ink focus-visible:outline-offset-0"
+            className="min-h-10 w-full rounded-xl bg-raised pl-10 pr-10 text-ink focus-visible:outline-offset-0"
           />
+          {query && (
+            <button
+              type="button"
+              onClick={() => (setQuery(''), box.current?.focus())}
+              aria-label="Clear search"
+              className="absolute right-2 top-1/2 -mt-1 flex size-8 -translate-y-1/2 items-center justify-center rounded-full text-mut"
+            >
+              <Close size={16} />
+            </button>
+          )}
         </div>
       </header>
       {query.trim() && (
