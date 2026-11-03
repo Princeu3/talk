@@ -63,5 +63,40 @@ export function preview(body: MessageBody | null | undefined, mine = false) {
   return files.length === 1 ? files[0].name : `${files.length} files`
 }
 
+// Search text that ignores case and accents: "Café" finds "cafe" and back.
+export const fold = (s: string) => s.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase()
+
+// The line of `text` holding the folded query `q`, starting near the match: [before, match, after].
+// Folds one character at a time to remember where each folded character came from.
+export function snippet(text: string, q: string): [string, string, string] | null {
+  let folded = ''
+  const start: number[] = []
+  const end: number[] = []
+  for (let i = 0; i < text.length; ) {
+    const ch = String.fromCodePoint(text.codePointAt(i)!)
+    const f = fold(ch)
+    folded += f
+    for (let k = 0; k < f.length; k++) start.push(i), end.push(i + ch.length)
+    i += ch.length
+  }
+  const k = q ? folded.indexOf(q) : -1
+  if (k < 0) return null
+  const s = start[k]
+  let e = end[k + q.length - 1]
+  while (/\p{M}/u.test(text[e] ?? '')) e++ // a decomposed accent stays with its letter
+  const line = text.lastIndexOf('\n', s - 1) + 1
+  const stop = text.indexOf('\n', e)
+  const from = Math.max(line, s - 30)
+  return [(from > line ? '…' : '') + text.slice(from, s), text.slice(s, e), text.slice(e, stop < 0 ? undefined : stop)]
+}
+
+export const host = (url: string) => {
+  try {
+    return new URL(url).hostname.replace(/^www\./, '')
+  } catch {
+    return ''
+  }
+}
+
 export const fileSize = (n: number) =>
   n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(0)} KB` : `${(n / 1048576).toFixed(1)} MB`
