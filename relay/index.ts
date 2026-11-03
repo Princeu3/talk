@@ -103,7 +103,7 @@ const PRIVACY = page('Talk privacy policy', `
 <h2>What the server can see</h2>
 <p>Messages, photos, files and voice messages are encrypted on your phone before they leave it. The server stores only the encrypted bytes, your display name, your public key, which conversations you are in, and when messages were sent. It cannot read your messages.</p>
 <h2>Calls</h2>
-<p>Calls go directly between the two phones, encrypted. When a direct path is not possible, the call is relayed through a TURN server your Talk server chooses (usually Cloudflare). The relay passes encrypted media and cannot listen.</p>
+<p>Calls go directly between the phones in the call, encrypted. When a direct path is not possible, the call is relayed through a TURN server your Talk server chooses (usually Cloudflare). The relay passes encrypted media and cannot listen.</p>
 <h2>Notifications</h2>
 <p>To wake your phone, your Talk server sends this push relay your device's push token and a few ids: the conversation, the message or call, and the caller's account id. The relay passes them to Apple and keeps nothing. Notification text is decrypted on your phone.</p>
 <h2>What we don't do</h2>
