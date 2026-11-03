@@ -143,7 +143,7 @@ nonisolated enum Search {
   // `contains` of the folded query narrows the field; `hit` then finds the line.
   static func text(_ b: MessageBody) -> String {
     guard b.system != true, b.call == nil else { return "" }
-    return fold(([b.text, b.preview?.title].compactMap { $0 } + (b.files ?? []).map(\.name)).joined(separator: "\n"))
+    return fold(([b.text, b.preview?.title].compactMap { $0 } + (b.files ?? []).filter { $0.voice == nil }.map(\.name)).joined(separator: "\n"))
   }
 
   static func fold(_ s: String) -> String { s.folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: nil) }
@@ -152,7 +152,8 @@ nonisolated enum Search {
   static func hit(_ b: MessageBody, _ q: String) -> String? {
     guard b.system != true, b.call == nil else { return nil }
     let text = b.text?.split(whereSeparator: \.isNewline).map(String.init) ?? []
-    return (text + (b.files ?? []).map(\.name) + [b.preview?.title].compactMap { $0 }).first { $0.localizedStandardContains(q) }
+    // Not a voice message's file name: every one is "Voice message.m4a".
+    return (text + (b.files ?? []).filter { $0.voice == nil }.map(\.name) + [b.preview?.title].compactMap { $0 }).first { $0.localizedStandardContains(q) }
   }
 
   // The line from a little before the match, so a short row still shows it, with the match in bold.

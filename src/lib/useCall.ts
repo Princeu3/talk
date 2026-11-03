@@ -382,7 +382,7 @@ export function useCall(onLog: (convId: string, kind: CallKind, ms: number, grou
   // Rings a member of the group who isn't in the call (again, if they were). Resolves to the server's error, if any.
   const ring = useCallback(async (user: string) => {
     const s = ref.current
-    if (!s?.group || !s.id) return
+    if (!s?.group || !s.id) return 'This call has ended.'
     return (await ask('call:add', { id: s.id, users: [user] })).error
   }, [])
 

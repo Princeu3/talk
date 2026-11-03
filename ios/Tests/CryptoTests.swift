@@ -109,6 +109,7 @@ struct Vectors: Decodable {
   #expect(LinkPreview(url: "HTTP://a.org/x").fits("see a.org/x"))
   #expect(LinkPreview(url: "HTTPS://a.org").isWeb)
   #expect(!LinkPreview(url: "javascript:alert(1)").isWeb)
+  #expect(LinkPreview(url: "https://bücher.de").isWeb) // a link typed with non-ASCII still opens
   // A card keeps the link as typed: the detector's URL is percent-encoded or punycoded, which the text lacks.
   for text in ["lies https://de.wikipedia.org/wiki/Bücher", "bei https://bücher.de jetzt"] {
     let typed = try #require(LinkPreview.first(in: text)?.typed)
@@ -146,6 +147,8 @@ struct Vectors: Decodable {
   // The folded text search narrows with: the same case and accent rules, nothing from event lines.
   #expect(Search.text(text).contains(Search.fold("CAFÉ ZOË")))
   #expect(Search.text(MessageBody(from: "a", text: "Alice added Bob", system: true)).isEmpty)
+  let voice = MessageBody(from: "a", files: [FileRef(id: "f", name: "Voice message.m4a", type: "audio/mp4", size: 1, voice: Voice(duration: 1, peaks: [0.5]))])
+  #expect(Search.hit(voice, "voice") == nil && Search.text(voice).isEmpty)
 
   let s = Search.snippet("a long opening sentence that runs on before the word banana shows up", "BANANA")
   #expect(String(s.characters) == "…on before the word banana shows up") // trimmed to a whole word

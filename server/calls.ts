@@ -249,6 +249,7 @@ export function callHandlers(io: Server) {
       const g = group(p?.id)
       if (!g || g.peers.get(me) !== socket.id) return ack({ error: 'This call has ended.' })
       if (!Array.isArray(p.users)) return ack({ error: 'bad request' })
+      if (g.peers.size >= MAX_PEERS) return ack({ error: 'This call is full.' })
       const peers = [...g.peers.keys()]
       const users = (p.users.slice(0, 32) as unknown[]).filter(
         (u): u is string => typeof u === 'string' && !g.peers.has(u) && isMember(g.convId, u) && !inCall(u) && !peers.some((x) => apart(x, u)),
