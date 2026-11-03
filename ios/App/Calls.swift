@@ -299,6 +299,13 @@ final class Calls: NSObject {
     sendState(s)
   }
 
+  // Rings someone in the chat into the group call we're in; returns the server's refusal, if any.
+  func ring(_ userId: String) async -> String? {
+    guard let talk, let s = session, s.group, let id = s.id else { return "This call has ended." }
+    guard let r = try? await talk.socket.ack("call:add", ["id": id, "users": [userId]], timeout: 10) else { return "Couldn’t reach the server. Check your connection." }
+    return Self.json(r)?["error"] as? String
+  }
+
   func flip() {
     guard let s = session, s.camera else { return }
     s.front.toggle()
@@ -454,6 +461,23 @@ final class Calls: NSObject {
     p.pc?.close()
     p.events = nil // its closure holds the peer and session
     patch { $0.tiles.removeAll { $0.id == user } }
+    cap(s)
+  }
+
+  // A mesh sends each person their own copy of our video: in a group, cap every copy as the call grows
+  // (docs/chat-features.md, "Group call video"). New parameters, no renegotiation. DMs keep the defaults.
+  private func cap(_ s: Session) {
+    guard s.group, !s.done else { return }
+    let c = videoCap(s.peers.count)
+    for p in s.peers.values {
+      guard let sender = p.videoSender else { continue }
+      let params = sender.parameters
+      guard let e = params.encodings.first else { continue }
+      e.maxBitrateBps = NSNumber(value: c.bitrate)
+      e.scaleResolutionDownBy = NSNumber(value: c.scale)
+      e.maxFramerate = NSNumber(value: c.fps)
+      sender.parameters = params
+    }
   }
 
   private func connect(_ s: Session, _ p: Peer) async {
@@ -474,6 +498,7 @@ final class Calls: NSObject {
     s.audio = audio
     if let v = s.video { p.videoSender = pc.add(v, streamIds: ["talk"]) }
     else if s.camera { addVideo(s); startCamera(s) }
+    cap(s) // one more person: everyone's copy gets smaller
     patch { $0.local = s.video }
 
     // An offer can be lost while the other side's socket reconnects; resend it until answered.
@@ -495,6 +520,7 @@ final class Calls: NSObject {
     let track = factory.videoTrack(with: source, trackId: "video")
     s.video = track
     for p in s.peers.values { if let pc = p.pc { p.videoSender = pc.add(track, streamIds: ["talk"]) } }
+    cap(s)
   }
 
   private func startCamera(_ s: Session) {

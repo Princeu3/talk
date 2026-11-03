@@ -74,6 +74,9 @@ interface Session {
 const LOST_MS = 30_000
 const STUN: RTCIceServer[] = [{ urls: 'stun:stun.cloudflare.com:3478' }]
 const fetchIce = () => api<RTCIceServer[]>('GET', '/api/ice').catch(() => STUN)
+// A socket request that answers within 10 s, or reads as a lost connection.
+const ask = <T = object>(event: string, data: unknown): Promise<T & { error?: string }> =>
+  socket.timeout(10_000).emitWithAck(event, data).catch(() => ({ error: "Couldn't reach the server. Check your connection." }))
 
 const VIDEO = { width: { ideal: 1280 }, height: { ideal: 720 } }
 const getMedia = (video: boolean) =>
@@ -135,6 +138,22 @@ function tone(kind: 'ring' | 'back') {
   }
 }
 
+// A mesh sends each person their own copy of our video, so each copy shrinks as a group call grows
+// (docs/chat-features.md, "Group call video"). Rows: up to this many others, maxBitrate, scaleResolutionDownBy, maxFramerate.
+const CAPS = [[1, 1_500_000, 1, 30], [2, 900_000, 1, 30], [3, 600_000, 1.5, 30], [5, 400_000, 2, 24], [7, 250_000, 2.5, 15]] as const
+// Applied to every video sender without renegotiating; 1:1 calls keep the browser's defaults.
+function cap(s: Session) {
+  if (!s.group) return
+  const [, maxBitrate, scaleResolutionDownBy, maxFramerate] = CAPS.find(([n]) => s.peers.size <= n) ?? CAPS[CAPS.length - 1]
+  for (const p of s.peers.values()) {
+    if (!p.video) continue
+    const params = p.video.getParameters()
+    if (!params.encodings?.length) continue // not negotiated yet; capped again once connected
+    Object.assign(params.encodings[0], { maxBitrate, scaleResolutionDownBy, maxFramerate })
+    p.video.setParameters(params).catch(() => {})
+  }
+}
+
 const newPeer = (user: string, polite: boolean, kind: CallKind): Peer =>
   ({ user, polite, muted: false, camera: kind === 'video', queue: [], makingOffer: false, ignoreOffer: false })
 const tiles = (s: Session): Remote[] => [...s.peers.values()].map(({ user, stream, muted, camera }) => ({ user, stream, muted, camera }))
@@ -192,6 +211,7 @@ export function useCall(onLog: (convId: string, kind: CallKind, ms: number, grou
     clearTimeout(p.lost)
     p.pc?.close()
     s.peers.delete(user)
+    cap(s)
     show(s)
   }
   // Connect to someone in the group call, replacing any connection we had to them.
@@ -199,6 +219,7 @@ export function useCall(onLog: (convId: string, kind: CallKind, ms: number, grou
     drop(s, user)
     const p = newPeer(user, polite, s.kind)
     s.peers.set(user, p)
+    cap(s)
     show(s)
     void connect(s, p)
     return p
@@ -274,6 +295,7 @@ export function useCall(onLog: (convId: string, kind: CallKind, ms: number, grou
       if (st === 'connected') {
         clearTimeout(p.lost)
         p.lost = undefined
+        cap(s)
         s.since ??= Date.now()
         patch({ phase: 'live', since: s.since })
       } else if (st === 'disconnected' || st === 'failed') {
@@ -312,10 +334,7 @@ export function useCall(onLog: (convId: string, kind: CallKind, ms: number, grou
       }
       if (s.done) return s.local.getTracks().forEach((t) => t.stop())
       patch({ local: s.local })
-      const r: { id?: string; error?: string } = await socket
-        .timeout(10_000)
-        .emitWithAck('call:start', { convId, kind })
-        .catch(() => ({ error: "Couldn't reach the server. Check your connection." }))
+      const r = await ask<{ id?: string }>('call:start', { convId, kind })
       if (s.done) return void (r.id && socket.emit('call:hangup', { id: r.id }))
       if (!r.id) return finish(r.error)
       s.id = r.id
@@ -341,10 +360,7 @@ export function useCall(onLog: (convId: string, kind: CallKind, ms: number, grou
     }
     if (s.done) return s.local.getTracks().forEach((t) => t.stop())
     patch({ local: s.local })
-    const r: { id?: string; peers?: string[]; error?: string } = await socket
-      .timeout(10_000)
-      .emitWithAck(s.group ? 'call:join' : 'call:accept', { id: s.id })
-      .catch(() => ({ error: "Couldn't reach the server. Check your connection." }))
+    const r = await ask<{ id?: string; peers?: string[] }>(s.group ? 'call:join' : 'call:accept', { id: s.id })
     if (s.done) return
     if (!r.id) return finish(r.error)
     s.joined = true
@@ -363,6 +379,13 @@ export function useCall(onLog: (convId: string, kind: CallKind, ms: number, grou
     [accept],
   )
 
+  // Rings a member of the group who isn't in the call (again, if they were). Resolves to the server's error, if any.
+  const ring = useCallback(async (user: string) => {
+    const s = ref.current
+    if (!s?.group || !s.id) return 'This call has ended.'
+    return (await ask('call:add', { id: s.id, users: [user] })).error
+  }, [])
+
   const toggleMute = useCallback(() => {
     const s = ref.current
     if (!s) return
@@ -380,6 +403,7 @@ export function useCall(onLog: (convId: string, kind: CallKind, ms: number, grou
       if (p.video) await p.video.replaceTrack(t)
       else if (t && p.pc) p.video = p.pc.addTrack(t, s.local)
     }
+    cap(s)
     s.camera = !!t
     patch({ camera: s.camera, facing: s.facing, local: new MediaStream(s.local.getTracks()) })
     sendState(s)
@@ -501,7 +525,7 @@ export function useCall(onLog: (convId: string, kind: CallKind, ms: number, grou
     // connect and handle only read refs and stable setters
   }, [finish])
 
-  return { call, start, join, accept, hangup, toggleMute, toggleCamera, flip }
+  return { call, start, join, accept, hangup, ring, toggleMute, toggleCamera, flip }
 }
 
 export type Calls = ReturnType<typeof useCall>

@@ -1,6 +1,7 @@
 import CryptoKit
 import Foundation
 import Testing
+import UIKit
 
 // Opens what the web code sealed (vectors.json, from make-vectors.ts).
 struct Vectors: Decodable {
@@ -85,4 +86,73 @@ struct Vectors: Decodable {
   #expect(avatarSeed("Zoë") == 377293815)
   #expect(avatarSeed("Prince 🙂") == 578124735)
   #expect(avatarSeed("👩‍💻") == 2263806054)
+}
+
+@Test func oldAndNewMessagesDecode() throws {
+  // Older apps and servers send neither field; both must still decode.
+  let old = try JSONDecoder().decode(MessageBody.self, from: Data(#"{"from":"a","text":"hi"}"#.utf8))
+  #expect(old.preview == nil)
+  let new = try JSONDecoder().decode(MessageBody.self, from: Data(#"{"from":"a","text":"see https://x.org","preview":{"url":"https://x.org","title":"X"}}"#.utf8))
+  #expect(new.preview == LinkPreview(url: "https://x.org", title: "X"))
+  #expect(try JSONDecoder().decode(GroupCall.self, from: Data(#"{"id":"c","kind":"audio","from":"a","peers":["a"]}"#.utf8)).ringing == nil)
+  #expect(try JSONDecoder().decode(GroupCall.self, from: Data(#"{"id":"c","kind":"audio","from":"a","peers":["a"],"ringing":["b"]}"#.utf8)).ringing == ["b"])
+  // Unset fields stay off the wire, so older apps see the body they know.
+  #expect(!String(decoding: try JSONEncoder().encode(old), as: UTF8.self).contains("preview"))
+}
+
+@Test func linksAreWebOnlyAndCardsFollowThem() throws {
+  #expect(LinkPreview.links(in: "a https://a.org/x b mailto:z@y.org c ftp://f.org www.b.org").map(\.absoluteString) == ["https://a.org/x", "http://www.b.org"])
+  let card = LinkPreview(url: "https://a.org/x")
+  #expect(card.fits("now https://a.org/x"))
+  #expect(!card.fits("now https://a.org/y"))
+  #expect(card.fits("now a.org/x")) // scheme optional, as on the web
+  #expect(LinkPreview(url: "HTTP://a.org/x").fits("see a.org/x"))
+  #expect(LinkPreview(url: "HTTPS://a.org").isWeb)
+  #expect(!LinkPreview(url: "javascript:alert(1)").isWeb)
+  #expect(LinkPreview(url: "https://bücher.de").isWeb) // a link typed with non-ASCII still opens
+  // A card keeps the link as typed: the detector's URL is percent-encoded or punycoded, which the text lacks.
+  for text in ["lies https://de.wikipedia.org/wiki/Bücher", "bei https://bücher.de jetzt"] {
+    let typed = try #require(LinkPreview.first(in: text)?.typed)
+    #expect(text.contains(typed))
+    #expect(LinkPreview(url: typed).fits(text))
+  }
+  #expect(LinkPreview.first(in: "see www.b.org/x now")?.typed == "http://www.b.org/x")
+}
+
+@Test func thumbnailsFitTheWireLimit() throws {
+  // Noise compresses badly, so this has to step down in size and quality.
+  let format = UIGraphicsImageRendererFormat()
+  format.scale = 1
+  let big = UIGraphicsImageRenderer(size: CGSize(width: 1600, height: 900), format: format).image { ctx in
+    for x in stride(from: 0, to: 1600, by: 8) {
+      for y in stride(from: 0, to: 900, by: 8) {
+        UIColor(red: .random(in: 0...1), green: .random(in: 0...1), blue: .random(in: 0...1), alpha: 1).setFill()
+        ctx.fill(CGRect(x: x, y: y, width: 8, height: 8))
+      }
+    }
+  }
+  let data = try #require(LinkPreview.thumb(big).flatMap { Data(base64Encoded: $0) })
+  let img = try #require(UIImage(data: data))
+  #expect(data.count <= 24 * 1024)
+  #expect(max(img.size.width, img.size.height) <= 320)
+}
+
+@Test func searchMatchesWhatPeopleSee() {
+  let text = MessageBody(from: "a", text: "First line\nWe met at the Café Zoë yesterday")
+  #expect(Search.hit(text, "cafe zoe") == "We met at the Café Zoë yesterday") // case and accents ignored, the matching line only
+  #expect(Search.hit(MessageBody(from: "a", files: [FileRef(id: "f", name: "Lease.pdf", type: "application/pdf", size: 1)]), "lease") == "Lease.pdf")
+  #expect(Search.hit(MessageBody(from: "a", text: "look", preview: LinkPreview(url: "https://a.org", title: "Trail map")), "trail") == "Trail map")
+  #expect(Search.hit(MessageBody(from: "a", text: "Alice added Bob", system: true), "alice") == nil)
+  #expect(Search.hit(MessageBody(from: "a", call: CallLog(kind: "audio", ms: 0)), "call") == nil)
+  // The folded text search narrows with: the same case and accent rules, nothing from event lines.
+  #expect(Search.text(text).contains(Search.fold("CAFÉ ZOË")))
+  #expect(Search.text(MessageBody(from: "a", text: "Alice added Bob", system: true)).isEmpty)
+  let voice = MessageBody(from: "a", files: [FileRef(id: "f", name: "Voice message.m4a", type: "audio/mp4", size: 1, voice: Voice(duration: 1, peaks: [0.5]))])
+  #expect(Search.hit(voice, "voice") == nil && Search.text(voice).isEmpty)
+
+  let s = Search.snippet("a long opening sentence that runs on before the word banana shows up", "BANANA")
+  #expect(String(s.characters) == "…on before the word banana shows up") // trimmed to a whole word
+  let bold = s.runs.filter { $0.inlinePresentationIntent == .stronglyEmphasized }.map { String(s[$0.range].characters) }
+  #expect(bold == ["banana"])
+  #expect(String(Search.snippet("short banana", "banana").characters) == "short banana")
 }

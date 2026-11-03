@@ -1,6 +1,7 @@
-import type { Talk } from '../lib/useTalk.ts'
-import { convName, preview, shortTime, typingLabel, userName } from '../lib/format.ts'
-import { BellOff, Compose, Lock, Phone, Pin, Settings, Video } from './icons.tsx'
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
+import type { Decrypted, Talk } from '../lib/useTalk.ts'
+import { convName, fold, preview, shortTime, snippet, typingLabel, userName } from '../lib/format.ts'
+import { BellOff, Close, Compose, Lock, Phone, Pin, Search, Settings, Video } from './icons.tsx'
 
 // Olive to soft white, so every avatar sits inside the app palette in both themes.
 const SHADES = ['#2e3d28', '#4f6340', '#7e9466', '#a9b887', '#cdd6b8', '#e8e9df']
@@ -29,10 +30,151 @@ export function Avatar({ name, size = 44 }: { name: string; size?: number }) {
 
 export const iconButton = 'pressable flex h-11 w-11 shrink-0 items-center justify-center rounded-full text-accent hover:bg-raised'
 
+const MAX_HITS = 200
+const hitRow = 'flex w-full items-center gap-3 rounded-2xl px-3 py-2.5 text-left transition-colors duration-150 hover:bg-raised/60 active:bg-raised'
+
+// What search looks through in a message: text, file names, link titles; not system lines, call logs or voice notes.
+const folded = new WeakMap<Decrypted, string>()
+function searchable(m: Decrypted) {
+  let f = folded.get(m)
+  if (f === undefined) {
+    const c = m.content
+    f = !c || m.system || c.call ? '' : fold(fields(m).join('\n'))
+    folded.set(m, f)
+  }
+  return f
+}
+const fields = ({ content: c }: Decrypted) =>
+  [c?.text, ...(c?.files ?? []).filter((x) => !x.voice).map((x) => x.name), c?.preview?.title].filter((s): s is string => !!s)
+
+function SearchResults({ talk, q }: { talk: Talk; q: string }) {
+  const me = talk.me!
+  const [tick, setTick] = useState(0)
+  const [busy, setBusy] = useState(false)
+  const words = q.length >= 2
+  const { backfill } = talk
+  const convs = useRef(me.conversations)
+
+  // Page every chat's older history; results re-run as pages land.
+  useEffect(() => {
+    if (!words) return
+    setBusy(true)
+    return backfill(
+      convs.current.map((c) => c.id),
+      (finished) => {
+        setTick((n) => n + 1)
+        if (finished) setBusy(false)
+      },
+    )
+  }, [words, backfill])
+
+  const chats = me.conversations.filter(
+    (conv) => fold(convName(me, conv)).includes(q) || conv.members.some((u) => u !== me.user.id && fold(userName(me, u)).includes(q)),
+  )
+  const { messages, history } = talk
+  const hits = useMemo(() => {
+    if (!words) return []
+    const all: Decrypted[] = []
+    for (const conv of me.conversations) {
+      let n = 0
+      for (const m of history(conv.id).list) {
+        if (!searchable(m).includes(q)) continue
+        all.push(m)
+        if (++n >= MAX_HITS) break
+      }
+    }
+    return all
+      .sort((a, b) => b.id - a.id)
+      .slice(0, MAX_HITS)
+      .map((m) => ({ m, parts: fields(m).reduce<ReturnType<typeof snippet>>((hit, s) => hit ?? snippet(s, q), null) }))
+  }, [q, words, me, messages, history, tick]) // tick: a page landed in the archive, which isn't state
+
+  return (
+    <>
+      {chats.length > 0 && (
+        <section aria-label="Chats">
+          <h2 className="px-3 pb-1 pt-2 text-sm font-semibold text-mut">Chats</h2>
+          <ul>
+            {chats.map((conv) => (
+              <li key={conv.id}>
+                <button data-hit onClick={() => talk.open(conv.id)} className={hitRow}>
+                  <Avatar name={convName(me, conv)} size={40} />
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate font-medium">{convName(me, conv)}</span>
+                    {conv.kind === 'group' && (
+                      <span className="block truncate text-sm text-mut">{conv.members.filter((u) => u !== me.user.id).map((u) => userName(me, u)).join(', ')}</span>
+                    )}
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+      {hits.length > 0 && (
+        <section aria-label="Messages">
+          <h2 className="px-3 pb-1 pt-3 text-sm font-semibold text-mut">Messages</h2>
+          <ul>
+            {hits.map(({ m, parts }) => {
+              const conv = me.conversations.find((c) => c.id === m.convId)!
+              const name = convName(me, conv)
+              const who = m.senderId === me.user.id ? 'You: ' : conv.kind === 'group' ? `${userName(me, m.senderId)}: ` : ''
+              return (
+                <li key={m.id}>
+                  <button data-hit onClick={() => talk.openAt(conv.id, m.id)} className={hitRow}>
+                    <Avatar name={name} size={40} />
+                    <span className="min-w-0 flex-1">
+                      <span className="flex items-baseline justify-between gap-2">
+                        <span className="truncate font-medium">{name}</span>
+                        <time className="shrink-0 text-xs tabular-nums text-mut">{shortTime(m.createdAt)}</time>
+                      </span>
+                      <span className="block truncate text-sm text-mut">
+                        {who}
+                        {parts ? <>{parts[0]}<b className="font-semibold text-ink">{parts[1]}</b>{parts[2]}</> : preview(m.content)}
+                      </span>
+                    </span>
+                  </button>
+                </li>
+              )
+            })}
+          </ul>
+        </section>
+      )}
+      <p role="status" className="px-3 py-4 text-center text-sm text-mut">
+        {busy && words ? 'Searching older messages…' : !chats.length && !hits.length ? 'No results' : ''}
+      </p>
+    </>
+  )
+}
+
 export default function Sidebar({ talk, onNew, onSettings, onJoin }: { talk: Talk; onNew: () => void; onSettings: () => void; onJoin: (convId: string) => void }) {
   const me = talk.me!
+  const [query, setQuery] = useState('')
+  const [q, setQ] = useState('') // folded, a beat behind the typing
+  const box = useRef<HTMLInputElement>(null)
+  useEffect(() => {
+    const t = setTimeout(() => setQ(fold(query.trim())), 150)
+    return () => clearTimeout(t)
+  }, [query])
+
+  // Escape clears; arrows move between the field and the results.
+  const onKey = (e: KeyboardEvent<HTMLElement>) => {
+    if (e.key === 'Escape' && query) {
+      e.preventDefault()
+      setQuery('')
+      box.current!.focus()
+    }
+    if ((e.key !== 'ArrowDown' && e.key !== 'ArrowUp') || !query.trim()) return
+    const hits = [...e.currentTarget.querySelectorAll<HTMLElement>('[data-hit]')]
+    const i = hits.indexOf(document.activeElement as HTMLElement)
+    const next = e.key === 'ArrowDown' ? hits[i + 1] : i > 0 ? hits[i - 1] : box.current
+    if (!next) return
+    e.preventDefault()
+    next.focus()
+  }
+
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex h-full flex-col" onKeyDown={onKey}>
       <header className="pt-safe px-2">
         <div className="flex items-center justify-between">
           <button onClick={onSettings} aria-label="Settings and invites" className={iconButton}>
@@ -43,8 +185,36 @@ export default function Sidebar({ talk, onNew, onSettings, onJoin }: { talk: Tal
           </button>
         </div>
         <h1 className="px-3 pb-2 pt-1 text-[2rem] font-bold leading-tight tracking-tight">Chats</h1>
+        <div role="search" className="relative px-1 pb-2 text-mut">
+          <span className="pointer-events-none absolute left-4 top-1/2 -mt-1 -translate-y-1/2"><Search size={18} /></span>
+          <input
+            ref={box}
+            type="search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search"
+            aria-label="Search chats and messages"
+            className="min-h-10 w-full rounded-xl bg-raised pl-10 pr-10 text-ink focus-visible:outline-offset-0"
+          />
+          {query && (
+            <button
+              type="button"
+              onClick={() => (setQuery(''), box.current?.focus())}
+              aria-label="Clear search"
+              className="absolute right-2 top-1/2 -mt-1 flex size-8 -translate-y-1/2 items-center justify-center rounded-full text-mut"
+            >
+              <Close size={16} />
+            </button>
+          )}
+        </div>
       </header>
-      <nav aria-label="Chats" className="pb-safe flex-1 overflow-y-auto px-2">
+      {query.trim() && (
+        <nav aria-label="Search results" className="pb-safe flex-1 overflow-y-auto px-2">
+          {q && <SearchResults talk={talk} q={q} />}
+        </nav>
+      )}
+      {/* Hidden, not unmounted, during a search so it keeps its scroll position */}
+      <nav aria-label="Chats" className={`pb-safe flex-1 overflow-y-auto px-2 ${query.trim() ? 'hidden' : ''}`}>
         {me.conversations.length === 0 && (
           <div className="flex flex-col items-start gap-3 px-3 py-6">
             <p className="text-mut">

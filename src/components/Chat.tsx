@@ -3,18 +3,17 @@ import {
   type ClipboardEvent, type CSSProperties, type FormEvent, type KeyboardEvent, type MouseEvent, type PointerEvent, type ReactNode,
 } from 'react'
 import type { Talk, Decrypted } from '../lib/useTalk.ts'
-import type { CallKind, FileRef, Voice } from '../../shared/types.ts'
-import { callNoun, callSummary, convName, dayLabel, fileSize, preview, typingLabel, userName, who } from '../lib/format.ts'
+import { AUTO_LOAD, unfurl } from '../lib/useTalk.ts'
+import type { CallKind, FileRef, LinkPreview, Voice } from '../../shared/types.ts'
+import { callNoun, callSummary, convName, dayLabel, fileSize, host, preview, typingLabel, URL_RE, userName, who } from '../lib/format.ts'
 import { canRecord, startRecording, type Recording } from '../lib/voice.ts'
 import { Avatar } from './Sidebar.tsx'
-import { Back, Check, Clip, Close, Copy, FileIcon, Flag, Forward, Lock, Mic, More, Pencil, Phone, Reply, Send, Trash, Video } from './icons.tsx'
+import { Back, Check, Clip, Close, Copy, FileIcon, Flag, Forward, LinkIcon, Lock, Mic, More, Pencil, Phone, Reply, Send, Trash, Video } from './icons.tsx'
 import { iconButton } from './Sidebar.tsx'
 import { VoicePlayer, VoiceRecorder } from './Voice.tsx'
 import { Confirm, ForwardSheet, Report, Sheet, useEscape } from './Sheets.tsx'
 import ChatInfo from './ChatInfo.tsx'
 
-const AUTO_LOAD = 25 * 1024 * 1024
-const URL_RE = /(https?:\/\/[^\s<]+[^\s<.,:;"')\]!?])/g
 const RUN_GAP = 5 * 60_000
 const EDIT_MS = 15 * 60_000 // the server's window
 const EMOJI = ['👍', '❤️', '😂', '😮', '😢', '🙏']
@@ -26,6 +25,15 @@ const breaks = (a: Decrypted, b: Decrypted) =>
   a.senderId !== b.senderId || b.createdAt - a.createdAt > RUN_GAP || day(a.createdAt) !== day(b.createdAt) || a.system || b.system
 
 const SystemLine = ({ text }: { text?: string }) => <p className="mx-6 my-1 self-center text-center text-xs text-mut">{text}</p>
+
+// Scroll a message into view and flash it, if it's loaded.
+function jump(id: number) {
+  const el = document.getElementById(`m-${id}`)
+  if (!el) return
+  el.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  el.classList.add('flash')
+  el.addEventListener('animationend', () => el.classList.remove('flash'), { once: true })
+}
 
 function FileChip({ file, onRemove }: { file: File; onRemove: () => void }) {
   const [thumb, setThumb] = useState<string>()
@@ -70,6 +78,19 @@ function Linkified({ text }: { text: string }) {
         ),
       )}
     </>
+  )
+}
+
+// A link's card, sealed in the message by the sender's device (decrypt() lets only http(s) links through).
+function LinkCard({ p }: { p: LinkPreview }) {
+  return (
+    <a href={p.url} target="_blank" rel="noopener noreferrer" className="block w-72 max-w-full overflow-hidden whitespace-normal rounded-xl bg-ink/8">
+      {p.image && <img src={`data:image/jpeg;base64,${p.image}`} alt="" className="max-h-44 w-full object-cover" />}
+      <span className="block px-3 py-2">
+        {(p.title || p.description) && <span className="line-clamp-2 text-sm font-semibold">{p.title || p.description}</span>}
+        <span className="block truncate text-xs text-ink/80">{p.site || host(p.url)}</span>
+      </span>
+    </a>
   )
 }
 
@@ -192,6 +213,7 @@ function Bubble({ m, mine, first, last, talk, onCall, onZoom, onJump }: {
       )}
       {c.files?.map((f) => <Attachment key={f.id} talk={talk} convId={m.convId} file={f} onZoom={onZoom} />)}
       {c.text && <span><Linkified text={c.text} /></span>}
+      {c.preview && <LinkCard p={c.preview} />}
       {m.forged && <span className={`text-xs ${mine ? '' : 'text-danger'}`}>Warning: the sender could not be verified</span>}
     </div>
   )
@@ -294,7 +316,8 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
   const [files, setFiles] = useState<File[]>([])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  const [zoom, setZoom] = useState<string>()
+  const [zoom, setZoom] = useState<{ url: string; video?: boolean }>()
+  const zoomTo = (url: string, video?: boolean) => setZoom({ url, video })
   const [rec, setRec] = useState<Recording | null>(null)
   const [unsent, setUnsent] = useState<{ file: File; voice: Voice } | null>(null) // kept so a failed send isn't lost
   const [reply, setReply] = useState<Decrypted | null>(null)
@@ -302,6 +325,8 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
   const [menu, setMenu] = useState<{ m: Decrypted; at: DOMRect } | null>(null)
   const [act, setAct] = useState<{ kind: 'delete' | 'forward' | 'report' | 'reactions'; m: Decrypted } | null>(null)
   const [info, setInfo] = useState(false)
+  const [card, setCard] = useState<LinkPreview | null>(null) // the composer's link card, for card.url
+  const [dropped, setDropped] = useState<string>() // the link whose card was dismissed
   const recRef = useRef<Recording | null>(null)
   recRef.current = rec
   const starting = useRef(false)
@@ -324,9 +349,14 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
 
   useEffect(() => {
     if (!zoom) return
-    const onKey = (e: globalThis.KeyboardEvent) => e.key === 'Escape' && setZoom(undefined)
-    addEventListener('keydown', onKey)
-    return () => removeEventListener('keydown', onKey)
+    // Captured and stopped, so a sheet under the viewer (shared media) stays open.
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      e.stopPropagation()
+      setZoom(undefined)
+    }
+    addEventListener('keydown', onKey, true)
+    return () => removeEventListener('keydown', onKey, true)
   }, [zoom])
 
   useEffect(() => {
@@ -341,8 +371,34 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
     setMenu(null)
     setAct(null)
     setInfo(false)
+    setCard(null)
+    setDropped(undefined)
     return () => recRef.current?.cancel()
   }, [convId])
+
+  // The first link typed gets a card once typing pauses. Failures (a link the server won't read, the rate limit) mean no card.
+  const link = editing ? undefined : text.match(URL_RE)?.[0]
+  const shown = card && card.url === link && link !== dropped ? card : null
+  useEffect(() => {
+    if (!link || card?.url === link || link === dropped) return
+    let live = true
+    const t = setTimeout(() => unfurl(link).then((p) => live && setCard(p), () => {}), 500)
+    return () => {
+      live = false
+      clearTimeout(t)
+    }
+  }, [link, card, dropped])
+
+  // Opened at a message (search, shared media): scroll to it once it's rendered, and after the chat's
+  // first page is in, or that page lands above it and pushes it out of view.
+  const { focus, setFocus } = talk
+  const loaded = talk.hasOlder[convId] !== undefined
+  useEffect(() => {
+    if (focus?.convId !== convId || !loaded || !document.getElementById(`m-${focus.id}`)) return
+    stick.current = false
+    jump(focus.id)
+    setFocus(null)
+  }, [focus, setFocus, convId, loaded, list.length])
 
   // The body fields that make a message a reply to `r`.
   const quote = (r: Decrypted | null) =>
@@ -426,14 +482,15 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
     if ((!t && !files.length) || busy) return
     setBusy(true)
     setError('')
-    const sending = { t: text, f: files, r: reply }
+    // A card goes along only if it's ready by now: sending never waits for one.
+    const sending = { t: text, f: files, r: reply, extra: { ...quote(reply), preview: shown ?? undefined } }
     setText('')
     setFiles([])
     setReply(null)
     stick.current = true
     try {
-      if (sending.f.length) await talk.sendWithFiles(convId, t, sending.f, undefined, quote(sending.r))
-      else await talk.send(convId, { text: t, ...quote(sending.r) })
+      if (sending.f.length) await talk.sendWithFiles(convId, t, sending.f, undefined, sending.extra)
+      else await talk.send(convId, { text: t, ...sending.extra })
     } catch (err) {
       setText(sending.t)
       setFiles(sending.f)
@@ -488,15 +545,6 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
         ? { label: 'Delete', Icon: Trash, run: go(() => setAct({ kind: 'delete', m })), red: true }
         : { label: 'Report', Icon: Flag, run: go(() => setAct({ kind: 'report', m })), red: true },
     ].filter((x) => !!x)
-  }
-
-  // Scroll a reply's original into view and flash it, if it's loaded.
-  const jump = (id: number) => {
-    const el = document.getElementById(`m-${id}`)
-    if (!el) return
-    el.scrollIntoView({ block: 'center', behavior: 'smooth' })
-    el.classList.add('flash')
-    el.addEventListener('animationend', () => el.classList.remove('flash'), { once: true })
   }
 
   const typers = talk.typers[convId] ?? []
@@ -631,7 +679,7 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
                     {...menuHandlers(m)}
                     className={`group relative ${column} ${mine ? 'items-end self-end' : 'items-start self-start'} [-webkit-touch-callout:none] pointer-coarse:select-none`}
                   >
-                    <Bubble m={m} mine={mine} first={first} last={last} talk={talk} onCall={onCall} onZoom={setZoom} onJump={jump} />
+                    <Bubble m={m} mine={mine} first={first} last={last} talk={talk} onCall={onCall} onZoom={zoomTo} onJump={jump} />
                     {m.reacts && Object.keys(m.reacts).length > 0 && (
                       <ReactionPill reacts={m.reacts} myId={me.user.id} onClick={() => setAct({ kind: 'reactions', m })} />
                     )}
@@ -664,7 +712,7 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
               <div className={`${column} self-end`}>
                 <Bubble
                   m={{ id: 0, convId, senderId: me.user.id, body: p.body, createdAt: p.createdAt, content: p.content, forged: false, system: false }}
-                  mine first last talk={talk} onZoom={setZoom}
+                  mine first last talk={talk} onZoom={zoomTo}
                 />
               </div>
             )}
@@ -718,6 +766,22 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
               <p className="truncate text-sm text-mut">{preview((editing ?? reply)!.content, (editing ?? reply)!.senderId === me.user.id)}</p>
             </div>
             <button type="button" onClick={cancelCompose} aria-label={editing ? 'Cancel editing' : 'Cancel reply'} className={`${iconButton} text-mut`}>
+              <Close size={18} />
+            </button>
+          </div>
+        )}
+        {shown && (
+          <div className="flex items-center gap-3 pb-2 pl-3">
+            {shown.image ? (
+              <img src={`data:image/jpeg;base64,${shown.image}`} alt="" className="h-11 w-11 shrink-0 rounded-lg object-cover" />
+            ) : (
+              <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-raised text-mut"><LinkIcon size={18} /></span>
+            )}
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-sm font-semibold">{shown.title || shown.description}</p>
+              <p className="truncate text-sm text-mut">{shown.site || host(shown.url)}</p>
+            </div>
+            <button type="button" onClick={() => setDropped(shown.url)} aria-label="Remove link preview" className={`${iconButton} text-mut`}>
               <Close size={18} />
             </button>
           </div>
@@ -777,11 +841,15 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
       </form>
 
       {zoom && (
-        <div role="dialog" aria-label="Photo" onClick={() => setZoom(undefined)} className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 p-4">
-          <button onClick={() => setZoom(undefined)} aria-label="Close photo" className="pressable pt-safe absolute right-3 top-0 flex h-11 w-11 items-center justify-center rounded-full text-white">
+        <div role="dialog" aria-label={zoom.video ? 'Video' : 'Photo'} onClick={() => setZoom(undefined)} className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 p-4">
+          <button onClick={() => setZoom(undefined)} aria-label={zoom.video ? 'Close video' : 'Close photo'} className="pressable pt-safe absolute right-3 top-0 flex h-11 w-11 items-center justify-center rounded-full text-white">
             <Close />
           </button>
-          <img src={zoom} alt="" className="max-h-full max-w-full object-contain" />
+          {zoom.video ? (
+            <video src={zoom.url} controls autoPlay playsInline onClick={(e) => e.stopPropagation()} className="max-h-full max-w-full" />
+          ) : (
+            <img src={zoom.url} alt="" className="max-h-full max-w-full object-contain" />
+          )}
         </div>
       )}
 
@@ -822,7 +890,7 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
         </MessageMenu>
       )}
 
-      {info && <ChatInfo talk={talk} convId={convId} onClose={() => setInfo(false)} onCall={onCall} onAddPeople={onAddPeople} />}
+      {info && <ChatInfo talk={talk} convId={convId} onClose={() => setInfo(false)} onCall={onCall} onAddPeople={onAddPeople} onZoom={zoomTo} />}
       {act?.kind === 'delete' && (
         <Confirm
           title="Delete for everyone?"

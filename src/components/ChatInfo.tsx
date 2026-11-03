@@ -1,12 +1,136 @@
-import { useState, type FormEvent, type ReactNode } from 'react'
-import type { Talk } from '../lib/useTalk.ts'
-import type { CallKind } from '../../shared/types.ts'
-import { convName, userName } from '../lib/format.ts'
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { AUTO_LOAD, type Talk } from '../lib/useTalk.ts'
+import type { CallKind, FileRef } from '../../shared/types.ts'
+import { convName, fileSize, host, shortTime, URL_RE, userName } from '../lib/format.ts'
 import { Avatar } from './Sidebar.tsx'
-import { Confirm, danger, primary, Report, SafetyCode, Sheet } from './Sheets.tsx'
-import { Ban, BellOff, Flag, Lock, LogOut, Pencil, Phone, Pin, UserPlus, Video } from './icons.tsx'
+import { Confirm, danger, primary, Report, SafetyCode, segment, Sheet } from './Sheets.tsx'
+import { Ban, BellOff, FileIcon, Flag, ImageIcon, LinkIcon, Lock, LogOut, Pencil, Phone, Pin, UserPlus, Video } from './icons.tsx'
 
 const row = 'flex min-h-12 w-full items-center gap-3 rounded-2xl px-2 text-left font-medium hover:bg-raised'
+const TABS = ['Media', 'Links', 'Docs'] as const
+const isMedia = (f: FileRef) => /^(image|video)\//.test(f.type)
+
+// A photo in the grid, decrypted once it scrolls into view; videos and big files wait for a tap.
+function Thumb({ talk, convId, file, onOpen }: { talk: Talk; convId: string; file: FileRef; onOpen: (url: string, video: boolean) => void }) {
+  const ref = useRef<HTMLButtonElement>(null)
+  const [url, setUrl] = useState<string>()
+  const video = file.type.startsWith('video/')
+  useEffect(() => {
+    if (url || video || file.size > AUTO_LOAD) return
+    const io = new IntersectionObserver(([e]) => {
+      if (!e.isIntersecting) return
+      io.disconnect()
+      talk.fileUrl(convId, file).then(setUrl, () => {})
+    })
+    io.observe(ref.current!)
+    return () => io.disconnect()
+  }, [convId, file, url, video]) // not talk: a new object each render, and fileUrl only reads refs
+  const open = async () => onOpen(url ?? (await talk.fileUrl(convId, file)), video)
+  return (
+    <button ref={ref} type="button" onClick={() => void open().catch(() => {})} aria-label={`Open ${file.name}`} className="relative block aspect-square w-full overflow-hidden rounded-lg bg-raised">
+      {video ? <span className="flex h-full items-center justify-center text-mut"><Video size={24} /></span> : url && <img src={url} alt="" className="h-full w-full object-cover" />}
+    </button>
+  )
+}
+
+// Photos and videos, links, and other files in a chat, newest first, from the history archive.
+function SharedMedia({ talk, convId, onZoom, onClose }: { talk: Talk; convId: string; onZoom: (url: string, video?: boolean) => void; onClose: () => void }) {
+  const [tab, setTab] = useState<(typeof TABS)[number]>('Media')
+  const [, setTick] = useState(0)
+  const [done, setDone] = useState(false)
+  const { backfill } = talk
+  useEffect(
+    () =>
+      backfill([convId], (finished) => {
+        setTick((n) => n + 1)
+        if (finished) setDone(true)
+      }),
+    [backfill, convId],
+  )
+
+  // Only the open tab's list is built.
+  const msgs = talk.history(convId).list.filter((m) => m.content && !m.system && !m.content.call)
+  const files = tab === 'Links' ? [] : msgs.flatMap((m) => (m.content!.files ?? []).filter((f) => !f.voice && isMedia(f) === (tab === 'Media')).map((f) => ({ m, f })))
+  const links =
+    tab !== 'Links'
+      ? []
+      : msgs.flatMap((m) => {
+          const p = m.content!.preview
+          const url = p?.url ?? m.content!.text?.match(URL_RE)?.[0]
+          return url ? [{ m, url, p }] : []
+        })
+  const count = files.length + links.length
+
+  const save = async (f: FileRef) => {
+    const a = document.createElement('a')
+    a.href = await talk.fileUrl(convId, f)
+    a.download = f.name
+    a.click()
+  }
+
+  return (
+    <Sheet title="Media, links and docs" onClose={onClose}>
+      <fieldset className="mb-3">
+        <legend className="sr-only">Show</legend>
+        <div className="flex gap-1 rounded-full bg-raised p-1">
+          {TABS.map((t) => (
+            <label key={t} className={segment}>
+              <input type="radio" name="shared" value={t} checked={tab === t} onChange={() => setTab(t)} className="sr-only" />
+              {t}
+            </label>
+          ))}
+        </div>
+      </fieldset>
+      {/* A steady height, so the tabs don't jump when one tab's list is shorter */}
+      <div className="min-h-[60dvh]">
+        {tab === 'Media' && (
+          <ul className="grid grid-cols-3 gap-1">
+            {files.map(({ f }) => (
+              <li key={f.id}><Thumb talk={talk} convId={convId} file={f} onOpen={onZoom} /></li>
+            ))}
+          </ul>
+        )}
+        {tab === 'Links' && (
+          <ul>
+            {links.map(({ m, url, p }) => (
+              <li key={m.id}>
+                <a href={url} target="_blank" rel="noopener noreferrer" className={`${row} py-1.5`}>
+                  {p?.image ? (
+                    <img src={`data:image/jpeg;base64,${p.image}`} alt="" className="h-11 w-11 shrink-0 rounded-lg object-cover" />
+                  ) : (
+                    <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-raised text-accent"><LinkIcon size={18} /></span>
+                  )}
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate">{p?.title || url}</span>
+                    <span className="block truncate text-sm font-normal text-mut">{p?.site || host(url)} · {shortTime(m.createdAt)}</span>
+                  </span>
+                </a>
+              </li>
+            ))}
+          </ul>
+        )}
+        {tab === 'Docs' && (
+          <ul>
+            {files.map(({ m, f }) => (
+              <li key={f.id}>
+                <button onClick={() => void save(f).catch(() => {})} className={`${row} py-1.5`}>
+                  <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-raised text-accent"><FileIcon size={18} /></span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate">{f.name}</span>
+                    <span className="block truncate text-sm font-normal text-mut">{fileSize(f.size)} · {shortTime(m.createdAt)}</span>
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+        <p role="status" className="py-6 text-center text-sm text-mut">
+          {!done ? 'Loading older messages…' : !count ? `No ${tab.toLowerCase()} yet` : ''}
+        </p>
+      </div>
+    </Sheet>
+  )
+}
 
 function Toggle({ icon, label, checked, onChange }: { icon: ReactNode; label: string; checked: boolean; onChange: (on: boolean) => void }) {
   return (
@@ -19,15 +143,17 @@ function Toggle({ icon, label, checked, onChange }: { icon: ReactNode; label: st
 }
 
 // One sheet at a time (info, a member, a confirm), so Escape steps back one level.
-export default function ChatInfo({ talk, convId, onClose, onCall, onAddPeople }: {
+export default function ChatInfo({ talk, convId, onClose, onCall, onAddPeople, onZoom }: {
   talk: Talk
   convId: string
   onClose: () => void
   onCall?: (kind: CallKind) => void // unset while a call is on
   onAddPeople: () => void
+  onZoom: (url: string, video?: boolean) => void // the chat's photo viewer
 }) {
   const me = talk.me!
   const conv = me.conversations.find((c) => c.id === convId)
+  const [media, setMedia] = useState(false)
   const [member, setMember] = useState<string | null>(null)
   const [ask, setAsk] = useState<'leave' | 'remove' | 'report' | null>(null)
   const [title, setTitle] = useState<string | null>(null) // set while renaming
@@ -54,6 +180,7 @@ export default function ChatInfo({ talk, convId, onClose, onCall, onAddPeople }:
     }
   }
 
+  if (media) return <SharedMedia talk={talk} convId={convId} onZoom={onZoom} onClose={() => setMedia(false)} />
   if (ask === 'leave')
     return <Confirm title="Leave this group?" body="You won't get its messages anymore. Someone in it can add you back." action="Leave group" onConfirm={() => talk.leave(convId)} onClose={() => setAsk(null)} />
   if (ask === 'report') return <Report talk={talk} userId={other} convId={convId} onClose={() => setAsk(null)} />
@@ -142,6 +269,11 @@ export default function ChatInfo({ talk, convId, onClose, onCall, onAddPeople }:
           </button>
         ))}
       </div>
+
+      <button onClick={() => setMedia(true)} className={`${row} mb-5`}>
+        <span className="text-accent"><ImageIcon size={20} /></span>
+        Media, links and docs
+      </button>
 
       {group ? (
         <section className="mb-5">

@@ -1,5 +1,6 @@
 import AVFoundation
 import ImageIO
+import LinkPresentation
 import PhotosUI
 import SwiftUI
 import UniformTypeIdentifiers
@@ -9,6 +10,7 @@ struct ChatView: View {
   @Environment(Calls.self) private var calls
   @Environment(\.dismiss) private var dismiss
   let convId: String
+  var at: Int? = nil // opened from a search result: scroll to this message and flash it
   @State private var text = ""
   @State private var photos: [PhotosPickerItem] = []
   @State private var pickingPhotos = false
@@ -26,6 +28,9 @@ struct ChatView: View {
   @State private var forwarding: Decrypted?
   @State private var reactionsOf: Decrypted?
   @State private var flash: Int? // a quoted message just scrolled to
+  @State private var jumped = false // to `at`, once
+  @State private var card: LinkPreview? // the first link's card, once LinkPresentation has made it
+  @State private var unwanted: String? // a link whose card was dismissed
   @State private var info = false
   @FocusState private var focused: Bool
   @Environment(\.scenePhase) private var scenePhase
@@ -55,6 +60,15 @@ struct ChatView: View {
         .padding(.horizontal, 12)
         .padding(.bottom, 8)
       }
+      // Opened at a search hit: jump once its row is in and the chat's first page has landed (landing later, it
+      // would push the hit out of view), a moment after the push so the flash is seen.
+      .task(id: canJump) {
+        guard canJump, let at else { return }
+        try? await Task.sleep(for: .milliseconds(400))
+        guard !Task.isCancelled else { return }
+        jumped = true
+        jump(at, proxy)
+      }
     }
     .defaultScrollAnchor(.bottom)
     .scrollDismissesKeyboard(.interactively)
@@ -71,6 +85,7 @@ struct ChatView: View {
     thread
     .onAppear {
       shown = true
+      if let at, !jumped { talk.reveal(convId, at) }
       talk.open(convId)
     }
     .onDisappear {
@@ -81,6 +96,7 @@ struct ChatView: View {
     // Left the group or removed from it: nothing to show here any more.
     .onChange(of: conv == nil) { _, gone in if gone { dismiss() } }
     .onChange(of: text) { _, t in if editing == nil, !t.isEmpty { talk.sendTyping(convId) } }
+    .task(id: link?.typed) { await makeCard(link) }
     // A recording never outlives the open, foreground chat, so the 600 s limit can't send one unseen.
     .onChange(of: scenePhase) { _, p in if p != .active { cancelRecording() } }
     // A call owns the audio session: stop our voice audio the moment one starts or rings.
@@ -119,13 +135,7 @@ struct ChatView: View {
     .fileImporter(isPresented: $pickingFiles, allowedContentTypes: [.item], allowsMultipleSelection: true) { r in
       if case .success(let urls) = r { sendFiles(urls) }
     }
-    .fullScreenCover(item: Binding(get: { zoom.map(Zoomed.init) }, set: { zoom = $0?.image })) { z in
-      Image(uiImage: z.image).resizable().scaledToFit()
-        .frame(maxWidth: .infinity, maxHeight: .infinity).background(.black)
-        .overlay(alignment: .topTrailing) {
-          Button("Close", systemImage: "xmark") { zoom = nil }.labelStyle(.iconOnly).font(.title2).padding().tint(.white)
-        }
-    }
+    .photoViewer($zoom)
   }
 
   @ToolbarContentBuilder private var toolbar: some ToolbarContent {
@@ -160,6 +170,7 @@ struct ChatView: View {
   private var composer: some View {
     VStack(spacing: 4) {
       if let d = editing ?? replying { bar(d) }
+      if let card { cardBar(card) }
       HStack(alignment: .bottom, spacing: 8) {
         if let recorder { recording(recorder) } else { editor }
       }
@@ -182,6 +193,54 @@ struct ChatView: View {
     }
     .fixedSize(horizontal: false, vertical: true)
     .padding(.leading, 12)
+  }
+
+  // Above the composer once a link's card is ready: image, title, site, and an X to send without it.
+  private func cardBar(_ p: LinkPreview) -> some View {
+    HStack(spacing: 10) {
+      if let img = p.picture {
+        Image(uiImage: img).resizable().scaledToFill().frame(width: 44, height: 44).clipShape(.rect(cornerRadius: 8))
+      }
+      VStack(alignment: .leading, spacing: 2) {
+        Text(p.title ?? p.label).font(.subheadline.weight(.semibold)).lineLimit(1)
+        Text(p.label).font(.caption).foregroundStyle(Color.mut).lineLimit(1)
+      }
+      Spacer()
+      Button("Remove link preview", systemImage: "xmark") {
+        unwanted = p.url
+        card = nil
+      }
+      .labelStyle(.iconOnly).frame(width: 44, height: 44).foregroundStyle(Color.mut)
+    }
+    .padding(.leading, 12)
+  }
+
+  // The draft's first link, while writing a new message: as typed (the card's url) and as detected (to fetch).
+  private var link: (typed: String, url: URL)? { editing == nil ? LinkPreview.first(in: text) : nil }
+
+  // Half a second after a link appears, its card; never one dismissed for that link.
+  private func makeCard(_ link: (typed: String, url: URL)?) async {
+    if card?.url != link?.typed { card = nil }
+    guard let link, link.typed != unwanted, card == nil else { return }
+    try? await Task.sleep(for: .milliseconds(500))
+    guard !Task.isCancelled else { return }
+    let p = await Self.preview(link.typed, link.url)
+    if !Task.isCancelled, link.typed == self.link?.typed { card = p } // a late answer for a link typed past (example.co on the way to .com) stays out
+  }
+
+  // Made on the phone, so the server never sees the link: one provider per request, kept until it answers.
+  private static func preview(_ link: String, _ url: URL) async -> LinkPreview? {
+    let provider = LPMetadataProvider()
+    provider.timeout = 5
+    guard let meta = try? await provider.startFetchingMetadata(for: url) else { return nil }
+    var p = LinkPreview(url: link, title: meta.title.map { String($0.prefix(200)) }, site: Format.host(meta.url ?? url))
+    if let images = meta.imageProvider {
+      let img: UIImage? = await withCheckedContinuation { c in
+        _ = images.loadObject(ofClass: UIImage.self) { obj, _ in c.resume(returning: obj as? UIImage) }
+      }
+      p.image = img.flatMap(LinkPreview.thumb)
+    }
+    return p.title == nil && p.image == nil ? nil : p
   }
 
   @ViewBuilder private var editor: some View {
@@ -269,9 +328,12 @@ struct ChatView: View {
       }
     }
     let reply = takeReply()
+    let preview = card // never waited for: sent only if ready (and `send` drops it if the text lost its link)
+    card = nil
+    unwanted = nil
     run {
       // Network trouble leaves it queued; only a failure to seal puts the text back.
-      do { try await talk.send(convId, text: t, reply: reply) } catch { if text.isEmpty { text = t }; throw error }
+      do { try await talk.send(convId, text: t, reply: reply, preview: preview) } catch { if text.isEmpty { text = t }; throw error }
     }
   }
 
@@ -401,18 +463,24 @@ struct ChatView: View {
     case .forward: forwarding = m
     case .delete: deleting = m
     case .report: reported = m
-    case .quote(let id):
-      guard isLoaded(id) else { return } // not loaded (or unsent): the quote is all there is
-      withAnimation { proxy.scrollTo(id, anchor: .center) }
-      flash = id
-      Task {
-        try? await Task.sleep(for: .seconds(1.2))
-        if flash == id { flash = nil }
-      }
+    case .quote(let id): jump(id, proxy)
+    }
+  }
+
+  // Scrolls to a message and flashes it: a tapped quote, a search result.
+  private func jump(_ id: Int, _ proxy: ScrollViewProxy) {
+    guard isLoaded(id) else { return } // not loaded (or unsent): the quote is all there is
+    withAnimation { proxy.scrollTo(id, anchor: .center) }
+    flash = id
+    Task {
+      try? await Task.sleep(for: .seconds(1.2))
+      if flash == id { flash = nil }
     }
   }
 
   private func isLoaded(_ id: Int) -> Bool { talk.messages[convId]?.contains { $0.id == id } == true }
+
+  private var canJump: Bool { at.map { !jumped && talk.hasOlder[convId] != nil && isLoaded($0) } ?? false }
 
   // Under your newest message: whether, or by whom, it's been read.
   private func receipt(_ m: Decrypted) -> String {
@@ -471,6 +539,53 @@ private struct Zoomed: Identifiable {
   var id: ObjectIdentifier { ObjectIdentifier(image) }
 }
 
+extension View {
+  // The photo viewer: the picture on black, with a close button (chat, shared media).
+  func photoViewer(_ zoom: Binding<UIImage?>) -> some View {
+    fullScreenCover(item: Binding(get: { zoom.wrappedValue.map(Zoomed.init) }, set: { zoom.wrappedValue = $0?.image })) { z in
+      Image(uiImage: z.image).resizable().scaledToFit()
+        .frame(maxWidth: .infinity, maxHeight: .infinity).background(.black)
+        .overlay(alignment: .topTrailing) {
+          Button("Close", systemImage: "xmark") { zoom.wrappedValue = nil }.labelStyle(.iconOnly).font(.title2).padding().tint(.white)
+        }
+    }
+  }
+}
+
+extension LinkPreview {
+  var picture: UIImage? { image.flatMap { Data(base64Encoded: $0) }.flatMap(UIImage.init(data:)) }
+  var label: String { site ?? URL(string: url).flatMap(Format.host) ?? url } // the site, else the link's host
+}
+
+// A link's card under its bubble; a tap opens the link (http(s) only: `Talk.decrypt` drops the rest).
+private struct LinkCard: View {
+  @Environment(\.openURL) private var openURL
+  let p: LinkPreview
+  let mine: Bool
+
+  var body: some View {
+    Button { if let link = URL(string: p.url) { openURL(link) } } label: {
+      VStack(alignment: .leading, spacing: 0) {
+        if let img = p.picture {
+          Color.clear.frame(height: 140).overlay { Image(uiImage: img).resizable().scaledToFill() }.clipped()
+        }
+        VStack(alignment: .leading, spacing: 2) {
+          if let t = p.title { Text(t).font(.subheadline.weight(.semibold)).lineLimit(2) }
+          if let d = p.description { Text(d).font(.caption).lineLimit(2) }
+          Text(p.label).font(.caption).foregroundStyle(Color.mut).lineLimit(1)
+        }
+        .padding(.horizontal, 12).padding(.vertical, 8)
+      }
+      .frame(width: 260, alignment: .leading)
+      .background(mine ? Color.mine : Color.bubble)
+      .clipShape(.rect(cornerRadius: 16))
+    }
+    .buttonStyle(.plain)
+    .foregroundStyle(Color.ink)
+    .accessibilityLabel("Link: \(p.title ?? p.label)")
+  }
+}
+
 // A group call on now, under the header: join it, or go back to it.
 private struct CallBanner: View {
   @Environment(Calls.self) private var calls
@@ -485,7 +600,7 @@ private struct CallBanner: View {
       Text("\(Format.callNoun(call.kind, group: true)) · \(n) \(n == 1 ? "person" : "people")")
         .font(.subheadline).lineLimit(1)
       Spacer()
-      JoinPill(label: inIt ? "Return to call" : "Join") { calls.start(convId: convId, kind: call.kind) }
+      JoinPill(label: inIt ? "Return to call" : "Join", kind: call.kind) { calls.start(convId: convId, kind: call.kind) }
     }
     .padding(.horizontal, 12).padding(.vertical, 8)
     .background(.bar)
@@ -577,6 +692,7 @@ private struct MessageRow: View {
               .background(mine ? Color.mine : Color.bubble, in: .rect(cornerRadius: 20))
               .foregroundStyle(Color.ink)
           }
+          if let p = c.preview { LinkCard(p: p, mine: mine) }
           if !m.reactions.isEmpty { pills }
           if m.message.editedAt != nil {
             Text("Edited").font(.caption).foregroundStyle(Color.mut).padding(.horizontal, 12)
@@ -688,11 +804,9 @@ private struct MessageRow: View {
     .accessibilityHint("Shows who reacted")
   }
 
-  private static let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
-
   private func linked(_ s: String) -> AttributedString {
     var a = AttributedString(s)
-    for match in Self.detector?.matches(in: s, range: NSRange(s.startIndex..., in: s)) ?? [] {
+    for match in LinkPreview.detector?.matches(in: s, range: NSRange(s.startIndex..., in: s)) ?? [] {
       guard let url = match.url, let r = Range(match.range, in: s), let ar = Range(r, in: a) else { continue }
       a[ar].link = url
       a[ar].underlineStyle = .single
@@ -810,7 +924,7 @@ private struct ReactionsSheet: View {
   }
 }
 
-private struct Attachment: View {
+struct Attachment: View {
 
   @Environment(Talk.self) private var talk
   @Environment(Calls.self) private var calls
@@ -921,7 +1035,7 @@ private struct Attachment: View {
       } else if saved == nil {
         let url = try await talk.save(convId, file)
         guard !Task.isCancelled else { return } // off screen: decode once when it comes back
-        if file.type.hasPrefix("image/") { preview = await Self.downsample(url) }
+        if file.type.hasPrefix("image/") { preview = await Self.downsample(CGImageSourceCreateWithURL(url as CFURL, nil)) }
         saved = url
       }
     } catch {
@@ -930,10 +1044,10 @@ private struct Attachment: View {
     }
   }
 
-  // A full 48 MP photo decodes to about 190 MB; the bubble and the zoom need only screen size.
-  @concurrent nonisolated private static func downsample(_ url: URL) async -> UIImage? {
-    let opts = [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceCreateThumbnailWithTransform: true, kCGImageSourceThumbnailMaxPixelSize: 2048] as CFDictionary
-    guard let src = CGImageSourceCreateWithURL(url as CFURL, nil), let img = CGImageSourceCreateThumbnailAtIndex(src, 0, opts) else { return nil }
+  // A full 48 MP photo decodes to about 190 MB; the bubble and the zoom need only screen size, a grid square less.
+  @concurrent nonisolated static func downsample(_ src: CGImageSource?, max: Int = 2048) async -> UIImage? {
+    let opts = [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceCreateThumbnailWithTransform: true, kCGImageSourceThumbnailMaxPixelSize: max] as CFDictionary
+    guard let src, let img = CGImageSourceCreateThumbnailAtIndex(src, 0, opts) else { return nil }
     return UIImage(cgImage: img)
   }
 

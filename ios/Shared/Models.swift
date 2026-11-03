@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 
 // Wire types, mirroring shared/types.ts. The server only ever sees
 // ciphertext for message bodies, attachments and conversation keys.
@@ -32,6 +33,7 @@ nonisolated struct GroupCall: Codable, Hashable, Sendable {
   let kind: String // "audio" | "video"
   let from: String // who started it
   let peers: [String]
+  var ringing: [String]? // rung and not yet in, declined or timed out
 }
 
 nonisolated struct Message: Codable, Identifiable, Hashable, Sendable {
@@ -65,6 +67,105 @@ nonisolated struct MessageBody: Codable, Hashable, Sendable {
   var reply: Reply?
   var forwarded: Bool?
   var system: Bool? // a group event ("Alice added Bob"); `text` holds it, so older apps show it as a message
+  var preview: LinkPreview?
+}
+
+// A link's card. The sender's device makes it and seals it with the message,
+// so readers never contact the site.
+nonisolated struct LinkPreview: Codable, Hashable, Sendable {
+  let url: String
+  var title: String? // at most 200 chars
+  var description: String? // at most 300 chars
+  var site: String?
+  var image: String? // JPEG thumbnail, base64, longest side ≤ 320 px, ≤ 24 KB
+}
+
+nonisolated extension LinkPreview {
+  static let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) // also links bubble text
+
+  // The http(s) links in some text, in order, each with where it sits in the text.
+  private static func found(in s: String) -> [(range: Range<String.Index>, url: URL)] {
+    (detector?.matches(in: s, range: NSRange(s.startIndex..., in: s)) ?? []).compactMap { m in
+      guard let url = m.url, ["http", "https"].contains(url.scheme?.lowercased()), let r = Range(m.range, in: s) else { return nil }
+      return (r, url)
+    }
+  }
+
+  static func links(in s: String) -> [URL] { found(in: s).map(\.url) }
+
+  // The text's first link: as typed, for a card's url (with `http://` when typed without a scheme), and the
+  // detector's URL to fetch. That URL may be percent-encoded or punycoded, which the text doesn't contain.
+  static func first(in s: String) -> (typed: String, url: URL)? {
+    guard let (r, url) = found(in: s).first else { return nil }
+    let t = String(s[r])
+    return (bare(t).startIndex == t.startIndex ? "http://" + t : t, url)
+  }
+
+  // A link without its leading http:// or https://, any case.
+  private static func bare(_ link: String) -> Substring {
+    link[(link.range(of: "^https?://", options: [.regularExpression, .caseInsensitive])?.upperBound ?? link.startIndex)...]
+  }
+
+  // The card stays only while the text holds its link, scheme optional (the web's rule too).
+  func fits(_ text: String) -> Bool { text.contains(Self.bare(url)) }
+
+  // The sender picks the link, so a received card keeps it only if it's http(s).
+  var isWeb: Bool { ["http", "https"].contains(URL(string: url)?.scheme?.lowercased()) }
+
+  // The card's image as JPEG: longest side ≤ 320 px, ≤ 24 KB, smaller and rougher until it fits, else none.
+  static func thumb(_ img: UIImage) -> String? {
+    let w = img.size.width * img.scale, h = img.size.height * img.scale
+    var side = min(320, max(w, h))
+    let format = UIGraphicsImageRendererFormat()
+    format.scale = 1
+    format.opaque = true
+    while side >= 80 {
+      let k = side / max(w, h)
+      let size = CGSize(width: max(1, (w * k).rounded()), height: max(1, (h * k).rounded()))
+      let small = UIGraphicsImageRenderer(size: size, format: format).image { ctx in
+        UIColor.white.setFill() // JPEG has no transparency: logos go on white, not black
+        ctx.fill(CGRect(origin: .zero, size: size))
+        img.draw(in: CGRect(origin: .zero, size: size))
+      }
+      for q in [0.7, 0.5, 0.3] {
+        if let d = small.jpegData(compressionQuality: q), d.count <= 24 * 1024 { return d.base64EncodedString() }
+      }
+      side *= 0.7
+    }
+    return nil
+  }
+}
+
+// Chat search (docs/chat-features.md): ignores case and accents; covers text, file names and link titles,
+// never event lines or call logs.
+nonisolated enum Search {
+  // What search looks through, folded once per message: its text, file names and link title. A plain
+  // `contains` of the folded query narrows the field; `hit` then finds the line.
+  static func text(_ b: MessageBody) -> String {
+    guard b.system != true, b.call == nil else { return "" }
+    return fold(([b.text, b.preview?.title].compactMap { $0 } + (b.files ?? []).filter { $0.voice == nil }.map(\.name)).joined(separator: "\n"))
+  }
+
+  static func fold(_ s: String) -> String { s.folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: nil) }
+
+  // The line that matched: one of the text's lines, a file name, or the link's title.
+  static func hit(_ b: MessageBody, _ q: String) -> String? {
+    guard b.system != true, b.call == nil else { return nil }
+    let text = b.text?.split(whereSeparator: \.isNewline).map(String.init) ?? []
+    // Not a voice message's file name: every one is "Voice message.m4a".
+    return (text + (b.files ?? []).filter { $0.voice == nil }.map(\.name) + [b.preview?.title].compactMap { $0 }).first { $0.localizedStandardContains(q) }
+  }
+
+  // The line from a little before the match, so a short row still shows it, with the match in bold.
+  static func snippet(_ line: String, _ q: String) -> AttributedString {
+    guard let r = line.range(of: q, options: [.caseInsensitive, .diacriticInsensitive], locale: .current) else { return AttributedString(line) }
+    var start = line.distance(from: line.startIndex, to: r.lowerBound) > 30 ? line.index(r.lowerBound, offsetBy: -20) : line.startIndex
+    // Start on a whole word when one begins before the match.
+    if start > line.startIndex, let sp = line[start..<r.lowerBound].firstIndex(of: " ") { start = line.index(after: sp) }
+    var match = AttributedString(line[r])
+    match.inlinePresentationIntent = .stronglyEmphasized
+    return AttributedString((start > line.startIndex ? "…" : "") + line[start..<r.lowerBound]) + match + AttributedString(line[r.upperBound...])
+  }
 }
 
 // Quoted in a reply, so it shows even when the original isn't loaded or was unsent.

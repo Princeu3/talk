@@ -81,4 +81,13 @@ struct GroupCallTests {
     #expect(grid(4) == "2x2")
     for n in 5...7 { #expect(grid(n) == "2x3 scrolls") } // a full call is 8, so 7 others
   }
+
+  @Test func videoShrinksAsTheCallGrows() {
+    // docs/chat-features.md, "Group call video"
+    #expect(videoCap(1) == (1_500_000, 1, 30))
+    #expect(videoCap(2) == (900_000, 1, 30))
+    #expect(videoCap(3) == (600_000, 1.5, 30))
+    #expect(videoCap(4) == (400_000, 2, 24) && videoCap(5) == (400_000, 2, 24))
+    #expect(videoCap(6) == (250_000, 2.5, 15) && videoCap(7) == (250_000, 2.5, 15))
+  }
 }

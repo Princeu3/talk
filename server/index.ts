@@ -9,6 +9,7 @@ import { db, BLOB_DIR, setting, isMember, memberIds, mutedIds, audience, dmRefus
 import { authMatches, hashAuth, setSession, clearSession, userFromCookie, requireUser, throttled, recordFail } from './auth.ts'
 import { vapidPublicKey, saveSubscription, notifyIfAway, toUsers } from './push.ts'
 import { callHandlers, callState, groupCall } from './calls.ts'
+import { allow, unfurl } from './unfurl.ts'
 import type { Conversation, Me, Message, Reaction, SendPayload, User } from '../shared/types.ts'
 
 const PORT = Number(process.env.PORT ?? 3000)
@@ -360,10 +361,21 @@ app.get('/api/conversations/:id/messages', (req, res) => {
   const convId = req.params.id
   if (!isMember(convId, req.userId)) return void res.status(404).json({ error: 'not found' })
   const before = Number(req.query.before) || Number.MAX_SAFE_INTEGER
+  const limit = Math.min(500, Math.max(1, Math.trunc(Number(req.query.limit)) || 50)) // search pages with 500
   const rows = db
-    .prepare(`select ${MESSAGE} from messages where conv_id = ? and id < ? and ${NOT_BLOCKED} order by id desc limit 50`)
-    .all(convId, before, req.userId) as unknown as Message[]
+    .prepare(`select ${MESSAGE} from messages where conv_id = ? and id < ? and ${NOT_BLOCKED} order by id desc limit ?`)
+    .all(convId, before, req.userId, limit) as unknown as Message[]
   res.json(shaped(rows.reverse(), req.userId))
+})
+
+// Link previews for the web app (server/unfurl.ts). POST, so links stay out of request logs.
+app.post('/api/unfurl', async (req, res) => {
+  if (!allow(req.userId)) return void res.status(429).json({ error: 'Too many link previews. Try again in a minute.' })
+  try {
+    res.json(await unfurl(String(req.body?.url ?? '')))
+  } catch {
+    res.status(400).json({ error: 'No preview for that link.' })
+  }
 })
 
 // Also the read receipt: the chat's other members hear how far I've read.
