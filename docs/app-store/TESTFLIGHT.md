@@ -1,6 +1,6 @@
 # TestFlight upload
 
-How to put the next Talk build on TestFlight from `master`. It is written for Abhishek, the Account Holder of team `34XFNGD2MY`, and for his Claude. Abhishek does step 1, the Xcode sign-in in step 2, and the App Store Connect parts of step 5, since they need his account. Claude can do the rest. Prince's Mac can stand in for steps 2 and 4: see [From Prince's Mac](#from-princes-mac).
+How to put the next Talk build on TestFlight from `master`. It is written for Abhishek, the Account Holder of team `34XFNGD2MY`, and for his Claude. Abhishek or Prince (Admin) does step 1. Abhishek does the Xcode sign-in in step 2 and the App Store Connect parts of step 5, since they need his account. Claude can do the rest. Prince's Mac can stand in for steps 2 and 4: see [From Prince's Mac](#from-princes-mac).
 
 State on 2026-11-03:
 
@@ -11,7 +11,7 @@ State on 2026-11-03:
 - Builds 1 to 6 are on TestFlight (6 is version 1.1). Builds 1 to 4 were recorded as using no non-exempt encryption. The app sets no `ITSAppUsesNonExemptEncryption` key: with YES and no code, the upload is refused with error 90592, and App Store Connect only issues an `ITSEncryptionExportComplianceCode` after it reviews an uploaded export document (the "App Encryption Documentation" dialog under App Information is the gate in front of that upload, and saves nothing on its own). With the key absent, TestFlight shows each new build as "Missing Compliance" and asks the questions per build instead. Build 5 went through that way on 2026-11-01.
 - Version 1.0 with build 4 is Waiting for Review since 2026-10-31. Swapping in a newer build means cancelling that submission and queueing again.
 
-## 1. Encryption questions (Abhishek, per build)
+## 1. Encryption questions (Abhishek or Prince, per build)
 
 The bundled WebRTC library brings its own encryption for calls, so the app can't honestly say NO, and YES needs a code Apple only gives for a reviewed export document. So the app carries neither key, and whoever has the Account Holder, Admin or App Manager role answers in App Store Connect once per build. The answers are legal statements about the app, so a person clicks them, not Claude.
 
