@@ -1,5 +1,5 @@
 import { api } from './api.ts'
-import { unb64 } from './crypto.ts'
+import { b64, unb64 } from './crypto.ts'
 
 export const pushSupported = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window
 
@@ -9,9 +9,14 @@ export const needsInstall = () =>
 
 export async function subscribe(vapidPublicKey: string) {
   const reg = await navigator.serviceWorker.ready
-  const sub =
-    (await reg.pushManager.getSubscription()) ??
-    (await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: unb64(vapidPublicKey) }))
+  let sub = await reg.pushManager.getSubscription()
+  // A subscription made under another server key gets 403 on every push: replace it.
+  const key = sub?.options.applicationServerKey
+  if (sub && key && b64(new Uint8Array(key)) !== b64(unb64(vapidPublicKey))) {
+    await sub.unsubscribe()
+    sub = null
+  }
+  sub ??= await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: unb64(vapidPublicKey) })
   await api('POST', '/api/push', { subscription: sub.toJSON() })
 }
 

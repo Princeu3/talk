@@ -54,9 +54,11 @@ export async function notify(userId: string, payload: Payload, ttl = 3600) {
       try {
         await webpush.sendNotification(JSON.parse(sub), JSON.stringify(payload), { TTL: ttl, urgency: 'high' })
       } catch (e) {
-        const code = (e as { statusCode?: number }).statusCode
-        if (code === 404 || code === 410) db.prepare('delete from push_subs where endpoint = ?').run(endpoint)
-        else console.error('[push]', code, (e as Error).message)
+        const { statusCode: code, body } = e as { statusCode?: number; body?: string }
+        if (code !== 404 && code !== 410) console.error('[push]', code, new URL(endpoint).host, String(body ?? (e as Error).message).slice(0, 200))
+        // 403: the subscription was made with another VAPID key (or our JWT is bad), so it fails on every
+        // push. Drop it; an open client posts a fresh one on its next load (src/lib/push.ts).
+        if (code === 403 || code === 404 || code === 410) db.prepare('delete from push_subs where endpoint = ?').run(endpoint)
       }
     }),
   )
