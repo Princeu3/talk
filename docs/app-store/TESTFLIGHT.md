@@ -2,14 +2,14 @@
 
 How to put the next Talk build on TestFlight from `master`. It is written for Abhishek, the Account Holder of team `34XFNGD2MY`, and for his Claude. Abhishek or Prince (Admin) does step 1. Abhishek does the Xcode sign-in in step 2 and the App Store Connect parts of step 5, since they need his account. Claude can do the rest. Prince's Mac can stand in for steps 2 and 4: see [From Prince's Mac](#from-princes-mac).
 
-State on 2026-11-03:
+State on 2026-11-08:
 
 - The App Store Connect record "Talk: Private Calls & Chat" (app id 6828441266, bundle ID `com.abhishekshekhar.talk`).
 - App IDs `com.abhishekshekhar.talk` (Push Notifications, Communication Notifications), `com.abhishekshekhar.talk.notifications` and `com.abhishekshekhar.talk.share` (no capabilities).
 - The team has one registered iPhone. Keep at least one: Xcode signs the archive with a development profile, which needs a device.
 - The push relay sends for team `34XFNGD2MY` and bundle `com.abhishekshekhar.talk`.
 - Builds 1 to 7 are on TestFlight (6 and 7 are version 1.1). Builds 8 to 10 are version 1.1.1 (2026-11-07), since 1.1 was approved and its train closed. Build 9 adds the speaker button in calls, build 10 Picture in Picture for video calls. Builds 1 to 4 were recorded as using no non-exempt encryption. The app sets no `ITSAppUsesNonExemptEncryption` key: with YES and no code, the upload is refused with error 90592, and App Store Connect only issues an `ITSEncryptionExportComplianceCode` after it reviews an uploaded export document (the "App Encryption Documentation" dialog under App Information is the gate in front of that upload, and saves nothing on its own). With the key absent, TestFlight shows each new build as "Missing Compliance" and asks the questions per build instead. Build 5 went through that way on 2026-11-01.
-- Version 1.0 with build 4 is Waiting for Review since 2026-10-31. Swapping in a newer build means cancelling that submission and queueing again.
+- Version 1.1.1 with build 10 is Waiting for Review since 2026-11-08, set to release once approved. Build 10 is the first with Picture in Picture, which the Simulator can't run, so it still needs a test on two phones. Swapping in a newer build means pulling the submission (Remove from Review), attaching the build, and submitting again, which puts it at the back of the queue.
 
 ## 1. Encryption questions (Abhishek or Prince, per build)
 
@@ -33,7 +33,7 @@ The build then reads "Ready to Submit".
 
 In `ios/project.yml`:
 
-- Set `CURRENT_PROJECT_VERSION` one above the higher of its value on `master` and the newest build under App Store Connect → TestFlight. App Store Connect refuses a number it has seen. On 2026-11-03 build 7 went up, so the next is 8.
+- Set `CURRENT_PROJECT_VERSION` one above the higher of its value on `master` and the newest build under App Store Connect → TestFlight. App Store Connect refuses a number it has seen. On 2026-11-08 build 10 went up, so the next is 11.
 
 ## 4. Archive and upload
 
@@ -83,7 +83,7 @@ Prince's Mac signs by hand, so it needs no Apple ID in Xcode. Only that Mac has 
 
 Builds 1 to 4 came from Abhishek's Mac. The one upload from Prince's Mac, on 2026-10-31, was refused with 90592 (no compliance code) and 90474 (iPad orientations, fixed since: the app is iPhone only). Build 6 (version 1.1) went up this way on 2026-11-03, the first upload from this path that App Store Connect accepted, and build 7 the same day.
 
-Step 1 still needs Abhishek after every upload: the compliance questions in TestFlight. Start from an up-to-date `master` with a clean `ios/` folder, do step 3, then run these from `ios/`:
+Step 1 still needs a person after every upload: Abhishek or Prince answers the compliance questions in TestFlight. Start from an up-to-date `master` with a clean `ios/` folder, do step 3, then run these from `ios/`:
 
 ```bash
 rm -rf build && xcodegen
@@ -104,3 +104,5 @@ xcodebuild -exportArchive -archivePath build/Talk.xcarchive -exportOptionsPlist 
 Then do step 5, except its last bullet: commit `ios/project.yml` and `ios/App/Info.plist` together on `master` and push, so the next build starts from this number. Pushing `master` also redeploys the push relay and the demo server.
 
 The certificate and the three profiles expire at 02:45 UTC on 2027-09-12, the evening of 2027-09-11 in the US. By the end of August 2027, make a new Apple Distribution certificate from this Mac and remake the three profiles with it under the same names. The API key can do this: it registered the share App ID and made its profile on 2026-11-01.
+
+The same API key also does the App Store Connect clicks after an upload, apart from the compliance answers. On 2026-11-08 it added build 10 to the Talk Team group (`POST /v1/betaGroups/{id}/relationships/builds`), set What to Test (`PATCH /v1/betaBuildLocalizations/{id}`), and attached build 10 to version 1.1.1 (`PATCH /v1/appStoreVersions/{id}/relationships/build`).
