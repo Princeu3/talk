@@ -34,6 +34,40 @@ nonisolated func videoCap(_ others: Int) -> (bitrate: Int, scale: Double, fps: I
   }
 }
 
+// What a call's stats summary keeps, by stats type (w3.org/TR/webrtc-stats). Same table as PICK in src/lib/useCall.ts.
+nonisolated private let statFields: [String: [String]] = [
+  "outbound-rtp": ["frameWidth", "frameHeight", "framesPerSecond", "qualityLimitationReason", "qualityLimitationDurations", "encoderImplementation", "packetsSent", "retransmittedPacketsSent", "nackCount", "pliCount", "targetBitrate"],
+  "inbound-rtp": ["frameWidth", "frameHeight", "framesPerSecond", "packetsReceived", "packetsLost", "jitter", "freezeCount", "totalFreezesDuration", "framesDropped", "concealedSamples", "totalSamplesReceived", "jitterBufferDelay", "jitterBufferEmittedCount"],
+  "remote-inbound-rtp": ["packetsLost", "fractionLost", "roundTripTime"],
+]
+
+// One connection's end-of-call numbers, keyed like "inbound-rtp video", plus the network path. No addresses.
+nonisolated func callStats(_ r: RTCStatisticsReport) -> [String: Any] {
+  let all = r.statistics
+  func get(_ id: NSObject?) -> [String: NSObject]? { (id as? String).flatMap { all[$0]?.values } }
+  var out: [String: Any] = [:]
+  for st in all.values {
+    guard let fields = statFields[st.type] else { continue }
+    var o: [String: Any] = [:]
+    for f in fields { if let x = st.values[f] { o[f] = x } }
+    if let codec = get(st.values["codecId"])?["mimeType"] { o["codec"] = codec }
+    out["\(st.type) \(st.values["kind"] as? String ?? "")"] = o
+  }
+  let pair = get(all.values.first { $0.type == "transport" }?.values["selectedCandidatePairId"])
+    ?? all.values.first { $0.type == "candidate-pair" && $0.values["nominated"] as? Bool == true && $0.values["state"] as? String == "succeeded" }?.values
+  if let pair {
+    let l = get(pair["localCandidateId"])
+    var path: [String: Any] = [:]
+    path["local"] = l.map { l in ["candidateType", "protocol", "relayProtocol", "networkType"].compactMap { l[$0] as? String }.joined(separator: "/") }
+    path["remote"] = get(pair["remoteCandidateId"])?["candidateType"]
+    path["rtt"] = pair["currentRoundTripTime"]
+    if let n = (pair["responsesReceived"] as? NSNumber)?.doubleValue, n > 0, let t = (pair["totalRoundTripTime"] as? NSNumber)?.doubleValue { path["rttAvg"] = t / n }
+    path["outBitrate"] = pair["availableOutgoingBitrate"]
+    out["path"] = path
+  }
+  return out
+}
+
 // Call tiles for n other people (docs/chat-features.md): 1 fills the screen, 2 stack,
 // 3–4 make 2×2, 5–8 go in two columns that scroll, three rows to a screen.
 nonisolated func callGrid(_ n: Int) -> (columns: Int, rows: Int, scrolls: Bool) {

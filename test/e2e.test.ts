@@ -259,6 +259,12 @@ test('three people: accounts, DM, group, realtime, attachments, access', async (
   assert.equal((await api(bob, 'DELETE', `/api/blocks/${alice.id}`)).status, 200)
   assert.equal(await groupFor(bob), 1)
 
+  // call stats: one object per call, logged
+  assert.equal((await api(carol, 'POST', '/api/call-stats', { id: 'x', platform: 'web', peers: [] })).status, 200)
+  assert.equal((await api(carol, 'POST', '/api/call-stats', [1])).status, 400)
+  assert.equal((await api(carol, 'POST', '/api/call-stats', { big: 'x'.repeat(20_000) })).status, 400)
+  assert.equal((await api(null, 'POST', '/api/call-stats', { id: 'x' })).status, 401)
+
   // report: stored, and blocks
   assert.equal((await api(carol, 'POST', '/api/reports', { userId: alice.id, convId: dm.id })).status, 400, 'not my chat')
   assert.equal((await api(carol, 'POST', '/api/reports', { userId: alice.id, convId: ca.id, note: 'spam' })).status, 200)

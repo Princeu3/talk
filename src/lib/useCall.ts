@@ -141,9 +141,9 @@ function tone(kind: 'ring' | 'back') {
 // A mesh sends each person their own copy of our video, so each copy shrinks as a group call grows
 // (docs/chat-features.md, "Group call video"). Rows: up to this many others, maxBitrate, scaleResolutionDownBy, maxFramerate.
 const CAPS = [[1, 1_500_000, 1, 30], [2, 900_000, 1, 30], [3, 600_000, 1.5, 30], [5, 400_000, 2, 24], [7, 250_000, 2.5, 15]] as const
-// Applied to every video sender without renegotiating; 1:1 calls keep the browser's defaults.
+// Applied to every video sender without renegotiating. A 1:1 call gets the first row too: uncapped, a 720p
+// sender climbs to ~2.5 Mbps and overshoots a cellular upload, which costs audio as well as video.
 function cap(s: Session) {
-  if (!s.group) return
   const [, maxBitrate, scaleResolutionDownBy, maxFramerate] = CAPS.find(([n]) => s.peers.size <= n) ?? CAPS[CAPS.length - 1]
   for (const p of s.peers.values()) {
     if (!p.video) continue
@@ -152,6 +152,43 @@ function cap(s: Session) {
     Object.assign(params.encodings[0], { maxBitrate, scaleResolutionDownBy, maxFramerate })
     p.video.setParameters(params).catch(() => {})
   }
+}
+
+// What a call's stats summary keeps, by stats type (w3.org/TR/webrtc-stats). Same table as callStats in ios/App/PeerConfig.swift.
+const PICK: Record<string, string[]> = {
+  'outbound-rtp': ['frameWidth', 'frameHeight', 'framesPerSecond', 'qualityLimitationReason', 'qualityLimitationDurations', 'encoderImplementation', 'packetsSent', 'retransmittedPacketsSent', 'nackCount', 'pliCount', 'targetBitrate'],
+  'inbound-rtp': ['frameWidth', 'frameHeight', 'framesPerSecond', 'packetsReceived', 'packetsLost', 'jitter', 'freezeCount', 'totalFreezesDuration', 'framesDropped', 'concealedSamples', 'totalSamplesReceived', 'jitterBufferDelay', 'jitterBufferEmittedCount'],
+  'remote-inbound-rtp': ['packetsLost', 'fractionLost', 'roundTripTime'],
+}
+// One connection's end-of-call numbers, keyed like "inbound-rtp video", plus the network path. No addresses.
+function summarize(r: RTCStatsReport) {
+  const all = [...r.values()] as Record<string, any>[]
+  const get = (id?: string) => (id ? r.get(id) : undefined)
+  const out: Record<string, unknown> = {}
+  for (const o of all) {
+    const fields = PICK[o.type]
+    if (fields) out[`${o.type} ${o.kind}`] = { codec: get(o.codecId)?.mimeType, ...Object.fromEntries(fields.filter((f) => o[f] !== undefined).map((f) => [f, o[f]])) }
+  }
+  const pair = get(all.find((o) => o.type === 'transport')?.selectedCandidatePairId) ?? all.find((o) => o.type === 'candidate-pair' && o.nominated && o.state === 'succeeded')
+  if (pair) {
+    const l = get(pair.localCandidateId)
+    out.path = {
+      local: l && [l.candidateType, l.protocol, l.relayProtocol, l.networkType].filter(Boolean).join('/'),
+      remote: get(pair.remoteCandidateId)?.candidateType,
+      rtt: pair.currentRoundTripTime,
+      rttAvg: pair.responsesReceived ? pair.totalRoundTripTime / pair.responsesReceived : undefined,
+      outBitrate: pair.availableOutgoingBitrate,
+    }
+  }
+  return out
+}
+// Posts every connection's summary in one log line, so a bad call can be read later.
+async function report(s: Session) {
+  const pcs = [...s.peers.values()].flatMap((p) => (p.pc ? [p.pc] : []))
+  if (!s.id || !pcs.length) return
+  const peers = await Promise.all(pcs.map((pc) => pc.getStats().then(summarize)))
+  const secs = s.since ? Math.round((Date.now() - s.since) / 1000) : 0
+  await api('POST', '/api/call-stats', { id: s.id, kind: s.kind, group: s.group, platform: 'web', secs, peers })
 }
 
 const newPeer = (user: string, polite: boolean, kind: CallKind): Peer =>
@@ -188,8 +225,10 @@ export function useCall(onLog: (convId: string, kind: CallKind, ms: number, grou
     ref.current = null
     s.stopTone?.()
     s.timers.forEach(clearInterval)
-    s.peers.forEach((p) => (clearTimeout(p.lost), p.pc?.close()))
+    s.peers.forEach((p) => clearTimeout(p.lost))
     s.local.getTracks().forEach((t) => t.stop())
+    // A closed connection has no stats, so read them first; it closes either way.
+    void report(s).catch(() => {}).finally(() => s.peers.forEach((p) => p.pc?.close()))
     void s.wake?.then((w) => w?.release().catch(() => {}))
     if (s.outgoing && s.id) logRef.current(s.convId, s.kind, s.since ? Date.now() - s.since : 0, s.group)
     if (!note) return setCall(null)
@@ -291,6 +330,7 @@ export function useCall(onLog: (convId: string, kind: CallKind, ms: number, grou
     }
     pc.onicecandidate = ({ candidate }) => candidate && signal(s, p, { candidate: candidate.toJSON() })
     pc.onconnectionstatechange = () => {
+      if (s.done) return // still open for a moment after hangup, while finish reads its stats
       const st = pc.connectionState
       if (st === 'connected') {
         clearTimeout(p.lost)

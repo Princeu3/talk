@@ -236,6 +236,16 @@ app.post('/api/reports', (req, res) => {
   res.json({ ok: true })
 })
 
+// Each app posts one summary of its WebRTC stats when a call ends (path type, RTT,
+// loss, freezes; no addresses or content), so a bad call can be read in the logs.
+app.post('/api/call-stats', (req, res) => {
+  const line = JSON.stringify(req.body ?? null)
+  if (typeof req.body !== 'object' || !req.body || Array.isArray(req.body) || line.length > 16_000)
+    return void res.status(400).json({ error: 'bad request' })
+  console.log(`[call-stats] ${req.userId} ${line}`)
+  res.json({ ok: true })
+})
+
 app.get('/api/calls/:id', (req, res) => {
   const call = callState(req.params.id, req.userId)
   if (!call) return void res.status(404).json({ error: 'This call has ended.' })

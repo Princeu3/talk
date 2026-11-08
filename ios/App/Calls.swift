@@ -401,7 +401,11 @@ final class Calls: NSObject {
     guard !s.done else { return }
     s.done = true
     stopRingback()
+    // A closed connection has no stats: take the connections out, read them, then close them.
+    let pcs = s.peers.values.compactMap(\.pc)
+    s.peers.values.forEach { $0.pc = nil }
     for u in s.peers.keys { closePeer(s, u) }
+    Task { await report(s, pcs); pcs.forEach { $0.close() } }
     s.capturer?.stopCapture()
     // The one who started it logs it, joiners don't.
     if s.outgoing, s.join == nil, s.id != nil, let talk {
@@ -415,6 +419,21 @@ final class Calls: NSObject {
       try? await Task.sleep(for: .seconds(1.6))
       if current?.phase == .ended { current = nil }
     }
+  }
+
+  // Posts every connection's stats summary in one server log line, so a bad call can be read later.
+  private func report(_ s: Session, _ pcs: [RTCPeerConnection]) async {
+    guard let id = s.id, !pcs.isEmpty, let talk else { return }
+    var peers: [[String: Any]] = []
+    for pc in pcs {
+      let r = await withCheckedContinuation { (c: CheckedContinuation<Box, Never>) in pc.statistics { c.resume(returning: Box(value: $0)) } }
+      peers.append(callStats(r.value as! RTCStatisticsReport))
+    }
+    let secs = s.since.map { Int(Date().timeIntervalSince($0)) } ?? 0
+    let body: [String: Any] = ["id": id, "kind": s.kind, "group": s.group, "platform": "ios", "secs": secs, "peers": peers]
+    // API.call force-encodes its body; NaN or infinite stats would crash it.
+    guard JSONSerialization.isValidJSONObject(body) else { return }
+    let _: OK? = try? await talk.api.call("POST", "/api/call-stats", body)
   }
 
   // MARK: - WebRTC
@@ -465,10 +484,11 @@ final class Calls: NSObject {
     cap(s)
   }
 
-  // A mesh sends each person their own copy of our video: in a group, cap every copy as the call grows
-  // (docs/chat-features.md, "Group call video"). New parameters, no renegotiation. DMs keep the defaults.
+  // A mesh sends each person their own copy of our video: cap every copy as the call grows
+  // (docs/chat-features.md, "Group call video"). New parameters, no renegotiation. A DM gets the
+  // one-person cap: uncapped, 720p climbs to ~2.5 Mbps and overshoots a cellular upload.
   private func cap(_ s: Session) {
-    guard s.group, !s.done else { return }
+    guard !s.done else { return }
     let c = videoCap(s.peers.count)
     for p in s.peers.values {
       guard let sender = p.videoSender else { continue }

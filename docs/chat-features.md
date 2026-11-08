@@ -91,7 +91,7 @@ Older apps keep working: every new field is optional, DM calls keep the 1:1 prot
 
 ## Group call video
 
-A mesh sends a separate copy of your video to each person, so each phone caps every video sender (`RTCRtpSender.setParameters`, no renegotiation) whenever the number of others changes. Group calls only; 1:1 calls keep the defaults. Read the sender's parameters, change `encodings[0]`, set them back.
+A mesh sends a separate copy of your video to each person, so each phone caps every video sender (`RTCRtpSender.setParameters`, no renegotiation) whenever the number of others changes. 1:1 calls get the first row: uncapped, a 720p sender climbs to about 2.5 Mbps and overshoots a cellular upload, which breaks audio too. Read the sender's parameters, change `encodings[0]`, set them back.
 
 | Others in the call | maxBitrate | scaleResolutionDownBy | maxFramerate |
 | --- | --- | --- | --- |
