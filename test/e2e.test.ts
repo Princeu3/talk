@@ -252,8 +252,11 @@ test('three people: accounts, DM, group, realtime, attachments, access', async (
   late.connect()
   assert.equal((await rungAgain).id, lateCall)
   const declined = new Promise((r) => sa.once('call:end', r))
+  // The app keeps answering rings with its hangup till its own call:end shows the server has it.
+  const confirmed = new Promise((r) => late.once('call:end', r))
   late.emit('call:hangup', { id: lateCall })
   assert.deepEqual(await declined, { id: lateCall, reason: 'declined' })
+  assert.deepEqual(await confirmed, { id: lateCall, reason: 'declined' })
   late.disconnect()
 
   // an away phone gets an ids-only alert push for a new message
