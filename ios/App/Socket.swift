@@ -66,6 +66,13 @@ final class Socket {
   // the "connect" handlers send what's current.
   func emit(_ event: String, _ data: Any) { if connected { send("42", event, data) } }
 
+  // For what the server must hear even if sent while the socket is still connecting, like a decline
+  // right after a push launched the app: waits up to 10 s for the server's "40", then emits.
+  func emitWhenConnected(_ event: String, _ data: Any) async {
+    for _ in 0..<40 where !connected { try? await Task.sleep(for: .milliseconds(250)) }
+    emit(event, data)
+  }
+
   // Emits and waits for the server's ack, as JSON of its first argument.
   func ack(_ event: String, _ data: Any, timeout: Double = 15) async throws -> Data {
     guard connected else { throw APIError(status: 0, message: "Not connected. Check your connection.") }

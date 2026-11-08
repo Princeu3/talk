@@ -2,30 +2,50 @@ import Foundation
 import Network
 import Testing
 
-// At launch the app emits "active" while its socket is still connecting. Socket.IO closes any
-// connection whose first event comes before the client's "40", so every launch lost its first socket.
+// The iPhone app's Socket.IO client against a fake server that records each frame it gets.
 @MainActor
 struct SocketTests {
+  // At launch the app emits "active" while its socket is still connecting. Socket.IO closes any
+  // connection whose first event comes before the client's "40", so every launch lost its first socket.
   @Test func sendsNoEventBeforeTheServerConnectsIt() async throws {
-    let server = try FakeIO()
-    defer { server.stop() }
-    try await until { server.port > 0 }
-    let socket = Socket(account: Account(server: URL(string: "http://127.0.0.1:\(server.port)")!, userId: "u", name: "U", cookie: "", key: Data()))
-    defer { socket.disconnect() }
+    let (server, socket) = try await pair()
+    defer { server.stop(); socket.disconnect() }
 
     socket.connect()
     socket.emit("active", true) // what setActive does at launch, mid-handshake
-    try await until { server.frames.contains("40") }
+    try #require(await until { server.frames.contains("40") })
     server.send(#"40{"sid":"a"}"#)
-    try await until { socket.connected }
+    try #require(await until { socket.connected })
     socket.emit("active", false)
-    try await until { server.frames.last?.hasPrefix("42") == true }
+    await until { server.frames.last?.hasPrefix("42") == true }
     #expect(server.frames == ["40", #"42["active",false]"#])
   }
 
-  private func until(_ done: () -> Bool) async throws {
-    for _ in 0..<500 where !done() { try await Task.sleep(for: .milliseconds(10)) }
-    try #require(done())
+  // A decline right after a push launched the app comes before the socket connects, and the server
+  // hears hangups only over the socket: it has to wait for the "40", not be dropped.
+  @Test func emitWhenConnectedWaitsForTheServer() async throws {
+    let (server, socket) = try await pair()
+    defer { server.stop(); socket.disconnect() }
+
+    socket.connect()
+    let hangup = Task { await socket.emitWhenConnected("call:hangup", ["id": "c"]) }
+    try #require(await until { server.frames.contains("40") })
+    server.send(#"40{"sid":"a"}"#)
+    await hangup.value
+    await until { server.frames.count > 1 }
+    #expect(server.frames == ["40", #"42["call:hangup",{"id":"c"}]"#])
+  }
+
+  private func pair() async throws -> (FakeIO, Socket) {
+    let server = try FakeIO()
+    try #require(await until { server.port > 0 })
+    return (server, Socket(account: Account(server: URL(string: "http://127.0.0.1:\(server.port)")!, userId: "u", name: "U", cookie: "", key: Data())))
+  }
+
+  @discardableResult
+  private func until(_ done: () -> Bool) async -> Bool {
+    for _ in 0..<500 where !done() { try? await Task.sleep(for: .milliseconds(10)) }
+    return done()
   }
 }
 

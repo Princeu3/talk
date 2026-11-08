@@ -2,6 +2,7 @@ import AVFoundation
 import CallKit
 import Observation
 import PushKit
+import UIKit
 import WebRTC
 
 // Phone-style calls: PushKit wakes the phone, CallKit rings it (lock screen,
@@ -418,13 +419,24 @@ final class Calls: NSObject {
   }
 
   private func fail(_ s: Session, _ note: String) {
-    if let id = s.id { talk?.socket.emit("call:hangup", ["id": id]) }
+    if let id = s.id { sendHangup(id) }
     end(s, note: note, reason: .failed)
   }
 
   private func endLocally(_ s: Session) {
-    if let id = s.id { talk?.socket.emit("call:hangup", ["id": id]) }
+    if let id = s.id { sendHangup(id) }
     finish(s, note: s.outgoing || s.since != nil ? "Call ended" : nil)
+  }
+
+  // A decline right after a push launched the app can come before the socket connects, and the server
+  // hears hangups only over the socket: keep the app awake until it's sent, or the caller rings on.
+  private func sendHangup(_ id: String) {
+    guard let talk else { return }
+    let bg = UIApplication.shared.beginBackgroundTask(expirationHandler: nil)
+    Task {
+      await talk.socket.emitWhenConnected("call:hangup", ["id": id])
+      UIApplication.shared.endBackgroundTask(bg)
+    }
   }
 
   // The call ended without a CallKit action of ours: tell CallKit.
