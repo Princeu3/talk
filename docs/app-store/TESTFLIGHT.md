@@ -8,7 +8,7 @@ State on 2026-11-03:
 - App IDs `com.abhishekshekhar.talk` (Push Notifications, Communication Notifications), `com.abhishekshekhar.talk.notifications` and `com.abhishekshekhar.talk.share` (no capabilities).
 - The team has one registered iPhone. Keep at least one: Xcode signs the archive with a development profile, which needs a device.
 - The push relay sends for team `34XFNGD2MY` and bundle `com.abhishekshekhar.talk`.
-- Builds 1 to 7 are on TestFlight (6 and 7 are version 1.1). Builds 1 to 4 were recorded as using no non-exempt encryption. The app sets no `ITSAppUsesNonExemptEncryption` key: with YES and no code, the upload is refused with error 90592, and App Store Connect only issues an `ITSEncryptionExportComplianceCode` after it reviews an uploaded export document (the "App Encryption Documentation" dialog under App Information is the gate in front of that upload, and saves nothing on its own). With the key absent, TestFlight shows each new build as "Missing Compliance" and asks the questions per build instead. Build 5 went through that way on 2026-11-01.
+- Builds 1 to 7 are on TestFlight (6 and 7 are version 1.1). Build 8 is version 1.1.1 (2026-11-07), since 1.1 was approved and its train closed. Builds 1 to 4 were recorded as using no non-exempt encryption. The app sets no `ITSAppUsesNonExemptEncryption` key: with YES and no code, the upload is refused with error 90592, and App Store Connect only issues an `ITSEncryptionExportComplianceCode` after it reviews an uploaded export document (the "App Encryption Documentation" dialog under App Information is the gate in front of that upload, and saves nothing on its own). With the key absent, TestFlight shows each new build as "Missing Compliance" and asks the questions per build instead. Build 5 went through that way on 2026-11-01.
 - Version 1.0 with build 4 is Waiting for Review since 2026-10-31. Swapping in a newer build means cancelling that submission and queueing again.
 
 ## 1. Encryption questions (Abhishek or Prince, per build)
@@ -59,6 +59,7 @@ If the archive works but the export can't sign or upload, run `open build/Talk.x
 | --- | --- |
 | 90592, "Invalid Export Compliance Code" | `ITSAppUsesNonExemptEncryption` crept back into `ios/project.yml`. Remove it and rerun `xcodegen` |
 | The bundle version must be higher | Raise `CURRENT_PROJECT_VERSION` again |
+| 90186 "train version is closed" or 90062 | That version was approved. Raise `MARKETING_VERSION` (1.1 to 1.1.1), rerun `xcodegen` and archive again |
 | "Your team has no devices from which to generate a provisioning profile" | Register an iPhone under Certificates, IDs & Profiles → Devices, then rerun the archive |
 | "No Accounts" or no signing certificate | Sign in to Xcode as in step 2; Xcode makes an Apple Distribution certificate on the first export |
 
