@@ -89,6 +89,7 @@ private final class Session {
   var since: Date?
   var muted = false
   var camera: Bool
+  var paused = false // iOS stopped our camera: locked, or in the background without PiP
   var front = true
   var done = false
   var ice: Task<[IceServer], Never>? // fetched once, for every peer connection
@@ -144,6 +145,14 @@ final class Calls: NSObject {
     // Headphones and the lock screen's call controls change the route too; keep the speaker button true to it.
     NotificationCenter.default.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main) { [weak self] _ in
       MainActor.assumeIsolated { self?.syncSpeaker() }
+    }
+    // iOS stops the camera when we can't use it (locked, background without PiP, another app took it).
+    let interruptions: [(Notification.Name, Bool)] = [(AVCaptureSession.wasInterruptedNotification, true), (AVCaptureSession.interruptionEndedNotification, false)]
+    for (name, paused) in interruptions {
+      NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] n in
+        let from = (n.object as AnyObject?).map(ObjectIdentifier.init)
+        MainActor.assumeIsolated { self?.cameraPaused(paused, from: from) }
+      }
     }
   }
 
@@ -293,6 +302,13 @@ final class Calls: NSObject {
     patch { $0.speaker = on }
   }
 
+  // Tell the others our camera is off while it's paused, so they see who it is instead of a frozen frame.
+  private func cameraPaused(_ paused: Bool, from id: ObjectIdentifier?) {
+    guard let s = session, let cs = s.capturer?.captureSession, id == ObjectIdentifier(cs), s.paused != paused else { return }
+    s.paused = paused
+    sendState(s)
+  }
+
   private func syncSpeaker() {
     let on = AVAudioSession.sharedInstance().currentRoute.outputs.contains { $0.portType == .builtInSpeaker }
     patch { $0.speaker = on }
@@ -428,6 +444,7 @@ final class Calls: NSObject {
     for u in s.peers.keys { closePeer(s, u) }
     Task { await report(s, pcs); pcs.forEach { $0.close() } }
     s.capturer?.stopCapture()
+    CallPiP.shared.stop()
     // The one who started it logs it, joiners don't.
     if s.outgoing, s.join == nil, s.id != nil, let talk {
       let ms = s.since.map { Date().timeIntervalSince($0) * 1000 } ?? 0
@@ -466,7 +483,7 @@ final class Calls: NSObject {
   }
 
   private func sendState(_ s: Session) { s.peers.values.forEach { sendState(s, $0) } }
-  private func sendState(_ s: Session, _ p: Peer) { sendSignal(s, p, ["state": ["muted": s.muted, "camera": s.camera]]) }
+  private func sendState(_ s: Session, _ p: Peer) { sendSignal(s, p, ["state": ["muted": s.muted, "camera": s.camera && !s.paused]]) }
 
   private func description(_ d: RTCSessionDescription) -> [String: Any] {
     ["type": RTCSessionDescription.string(for: d.type), "sdp": d.sdp]
@@ -558,7 +575,10 @@ final class Calls: NSObject {
 
   private func addVideo(_ s: Session) {
     let source = factory.videoSource()
-    s.capturer = RTCCameraVideoCapturer(delegate: source)
+    let capturer = RTCCameraVideoCapturer(delegate: source)
+    // Keeps the camera on while the call shows in PiP; iOS 18+ needs only the voip background mode for it.
+    if capturer.captureSession.isMultitaskingCameraAccessSupported { capturer.captureSession.isMultitaskingCameraAccessEnabled = true }
+    s.capturer = capturer
     let track = factory.videoTrack(with: source, trackId: "video")
     s.video = track
     for p in s.peers.values { if let pc = p.pc { p.videoSender = pc.add(track, streamIds: ["talk"]) } }

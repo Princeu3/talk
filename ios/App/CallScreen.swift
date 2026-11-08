@@ -18,6 +18,7 @@ struct CallScreen: View {
     let showLocal = call.phase != .ended && call.camera && call.local != nil
     ZStack {
       Color.black.ignoresSafeArea()
+      PiPAnchor(call: call, full: true).ignoresSafeArea()
       if showRemote, let t = call.remote { VideoView(track: t, mirror: false).ignoresSafeArea() }
       if showLocal, let t = call.local {
         if showRemote || grid || call.since != nil {
@@ -36,6 +37,7 @@ struct CallScreen: View {
           Button("Back to chat", systemImage: "chevron.down") {
             calls.minimized = true
             calls.openChat = call.convId
+            CallPiP.shared.startSoon()
           }
           .labelStyle(.iconOnly).font(.title2).frame(width: 44, height: 44)
           Spacer()
@@ -159,6 +161,7 @@ struct CallBar: View {
         }
       }
       .padding(.horizontal, 12).padding(.vertical, 6)
+      .background(PiPAnchor(call: call, full: false))
       .background(Color.fill)
       .foregroundStyle(Color.onFill)
     }
