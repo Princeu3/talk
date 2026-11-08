@@ -21,21 +21,6 @@ struct SocketTests {
     #expect(server.frames == ["40", #"42["active",false]"#])
   }
 
-  // A decline right after a push launched the app comes before the socket connects, and the server
-  // hears hangups only over the socket: it has to wait for the "40", not be dropped.
-  @Test func emitWhenConnectedWaitsForTheServer() async throws {
-    let (server, socket) = try await pair()
-    defer { server.stop(); socket.disconnect() }
-
-    socket.connect()
-    let hangup = Task { await socket.emitWhenConnected("call:hangup", ["id": "c"]) }
-    try #require(await until { server.frames.contains("40") })
-    server.send(#"40{"sid":"a"}"#)
-    await hangup.value
-    await until { server.frames.count > 1 }
-    #expect(server.frames == ["40", #"42["call:hangup",{"id":"c"}]"#])
-  }
-
   private func pair() async throws -> (FakeIO, Socket) {
     let server = try FakeIO()
     try #require(await until { server.port > 0 })

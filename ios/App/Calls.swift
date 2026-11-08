@@ -124,6 +124,7 @@ final class Calls: NSObject {
   @ObservationIgnored private let controller = CXCallController()
   @ObservationIgnored private var registry: PKPushRegistry?
   @ObservationIgnored private var ringback: AVAudioPlayer?
+  @ObservationIgnored private var declined: [String: UIBackgroundTaskIdentifier] = [:] // hung up while the socket was down
   @ObservationIgnored private lazy var factory: RTCPeerConnectionFactory = {
     RTCInitializeSSL()
     return RTCPeerConnectionFactory(encoderFactory: RTCDefaultVideoEncoderFactory(), decoderFactory: RTCDefaultVideoDecoderFactory())
@@ -172,8 +173,13 @@ final class Calls: NSObject {
     if let token = registry?.pushToken(for: .voIP) { talk.registerDevice(token: token, kind: "voip") }
     let s = talk.socket
     s.on("call:ring") { [weak self] d in
-      guard let r = try? JSONDecoder().decode(CallRing.self, from: d) else { return }
-      self?.incoming(id: r.id, convId: r.convId, from: r.from, kind: r.kind, group: r.group == true)
+      guard let self, let r = try? JSONDecoder().decode(CallRing.self, from: d) else { return }
+      // The server rings again on connect while a call still rings us: one we hung up on meanwhile gets its hangup now.
+      if declined[r.id] != nil {
+        self.talk?.socket.emit("call:hangup", ["id": r.id])
+        return settle(r.id)
+      }
+      incoming(id: r.id, convId: r.convId, from: r.from, kind: r.kind, group: r.group == true)
     }
     s.on("call:accepted") { [weak self] d in
       guard let self, case let (s, _)? = ours(d), s.peers.isEmpty else { return }
@@ -428,15 +434,19 @@ final class Calls: NSObject {
     finish(s, note: s.outgoing || s.since != nil ? "Call ended" : nil)
   }
 
-  // A decline right after a push launched the app can come before the socket connects, and the server
-  // hears hangups only over the socket: keep the app awake until it's sent, or the caller rings on.
+  // A decline right after a push launched the app can come before the socket connects. The server rings
+  // again on connect only while the call still rings us, and the "call:ring" handler hangs up then, so a
+  // call answered on our other phone meanwhile stays up. Till then the app stays awake, while iOS allows.
   private func sendHangup(_ id: String) {
     guard let talk else { return }
-    let bg = UIApplication.shared.beginBackgroundTask(expirationHandler: nil)
-    Task {
-      await talk.socket.emitWhenConnected("call:hangup", ["id": id])
-      UIApplication.shared.endBackgroundTask(bg)
-    }
+    if talk.socket.connected { return talk.socket.emit("call:hangup", ["id": id]) }
+    guard declined[id] == nil else { return }
+    declined[id] = UIApplication.shared.beginBackgroundTask { [weak self] in self?.settle(id) }
+  }
+
+  // Ends the wait for a declined call's ring, once, from whichever comes first: the ring or iOS's time limit.
+  private func settle(_ id: String) {
+    if let bg = declined.removeValue(forKey: id) { UIApplication.shared.endBackgroundTask(bg) }
   }
 
   // The call ended without a CallKit action of ours: tell CallKit.
