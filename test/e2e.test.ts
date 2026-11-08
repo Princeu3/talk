@@ -239,7 +239,25 @@ test('three people: accounts, DM, group, realtime, attachments, access', async (
   assert.equal((await ended).reason, 'hangup')
   const { id: carolCall } = await sc.emitWithAck('call:start', { convId: ca.id, kind: 'audio' })
   assert.ok(carolCall, 'free again after hangup')
+  const carolGone = new Promise((r) => sa.once('call:end', r))
   sc.emit('call:hangup', { id: carolCall })
+  await carolGone
+
+  // A phone woken by the call push connects while it still rings: that socket is rung again, and its hangup
+  // declines. The iPhone app declines that way when the decline came before its socket was up.
+  const late = connect(BASE, { extraHeaders: { cookie: bob.cookie }, transports: ['websocket'], query: { v: '2' }, autoConnect: false })
+  sockets.push(late)
+  const rungAgain = new Promise<{ id: string }>((r) => late.once('call:ring', r))
+  const { id: lateCall } = await sa.emitWithAck('call:start', { convId: dm.id, kind: 'audio' })
+  late.connect()
+  assert.equal((await rungAgain).id, lateCall)
+  const declined = new Promise((r) => sa.once('call:end', r))
+  // The app keeps answering rings with its hangup till its own call:end shows the server has it.
+  const confirmed = new Promise((r) => late.once('call:end', r))
+  late.emit('call:hangup', { id: lateCall })
+  assert.deepEqual(await declined, { id: lateCall, reason: 'declined' })
+  assert.deepEqual(await confirmed, { id: lateCall, reason: 'declined' })
+  late.disconnect()
 
   // an away phone gets an ids-only alert push for a new message
   sb.emit('active', false)

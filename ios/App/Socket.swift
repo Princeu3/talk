@@ -5,6 +5,7 @@ import Network
 // Talk: events both ways and acks for what we emit. socket.io-client-swift
 // is barely maintained, and the protocol is a handful of prefixes:
 // 0 open, 2/3 ping/pong, 40 connected, 44 refused, 42 event, 43 ack.
+@MainActor // the app's default isolation, spelled out for TalkTests, which has none
 final class Socket {
   var onSignedOut: () -> Void = {}
   var onDrop: () -> Void = {}
@@ -61,7 +62,9 @@ final class Socket {
     drop()
   }
 
-  func emit(_ event: String, _ data: Any) { send("42", event, data) }
+  // Socket.IO closes a connection that sends an event before its "40", so drop those;
+  // the "connect" handlers send what's current.
+  func emit(_ event: String, _ data: Any) { if connected { send("42", event, data) } }
 
   // Emits and waits for the server's ack, as JSON of its first argument.
   func ack(_ event: String, _ data: Any, timeout: Double = 15) async throws -> Data {

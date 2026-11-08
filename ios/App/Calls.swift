@@ -2,6 +2,7 @@ import AVFoundation
 import CallKit
 import Observation
 import PushKit
+import UIKit
 import WebRTC
 
 // Phone-style calls: PushKit wakes the phone, CallKit rings it (lock screen,
@@ -123,6 +124,7 @@ final class Calls: NSObject {
   @ObservationIgnored private let controller = CXCallController()
   @ObservationIgnored private var registry: PKPushRegistry?
   @ObservationIgnored private var ringback: AVAudioPlayer?
+  @ObservationIgnored private var declined: [String: UIBackgroundTaskIdentifier] = [:] // hung up, till the server's "call:end" confirms it
   @ObservationIgnored private lazy var factory: RTCPeerConnectionFactory = {
     RTCInitializeSSL()
     return RTCPeerConnectionFactory(encoderFactory: RTCDefaultVideoEncoderFactory(), decoderFactory: RTCDefaultVideoDecoderFactory())
@@ -171,8 +173,14 @@ final class Calls: NSObject {
     if let token = registry?.pushToken(for: .voIP) { talk.registerDevice(token: token, kind: "voip") }
     let s = talk.socket
     s.on("call:ring") { [weak self] d in
-      guard let r = try? JSONDecoder().decode(CallRing.self, from: d) else { return }
-      self?.incoming(id: r.id, convId: r.convId, from: r.from, kind: r.kind, group: r.group == true)
+      guard let self, let r = try? JSONDecoder().decode(CallRing.self, from: d) else { return }
+      // The server rings again on connect while a call still rings us: one we hung up on meanwhile gets its hangup now,
+      // and again on each ring till "call:end" shows the server has it (a send can die with the socket).
+      if declined[r.id] != nil {
+        self.talk?.socket.emit("call:hangup", ["id": r.id])
+        return
+      }
+      incoming(id: r.id, convId: r.convId, from: r.from, kind: r.kind, group: r.group == true)
     }
     s.on("call:accepted") { [weak self] d in
       guard let self, case let (s, _)? = ours(d), s.peers.isEmpty else { return }
@@ -196,7 +204,9 @@ final class Calls: NSObject {
       if p.pc != nil { Task { await self.handle(s, p, data) } } else { p.queue.append(data) }
     }
     s.on("call:end") { [weak self] d in
-      guard let self, case let (s, o)? = ours(d) else { return }
+      guard let self else { return }
+      if let id = Self.json(d)?["id"] as? String { settle(id) } // the server has our decline, or the call is over
+      guard case let (s, o)? = ours(d) else { return }
       remoteEnded(s, reason: o["reason"] as? String ?? "hangup")
     }
     // Our socket came back (phones drop it): tell the server which device we are again.
@@ -418,13 +428,29 @@ final class Calls: NSObject {
   }
 
   private func fail(_ s: Session, _ note: String) {
-    if let id = s.id { talk?.socket.emit("call:hangup", ["id": id]) }
+    if let id = s.id { sendHangup(id) }
     end(s, note: note, reason: .failed)
   }
 
   private func endLocally(_ s: Session) {
-    if let id = s.id { talk?.socket.emit("call:hangup", ["id": id]) }
+    if let id = s.id { sendHangup(id) }
     finish(s, note: s.outgoing || s.since != nil ? "Call ended" : nil)
+  }
+
+  // A hangup can miss the server: a decline right after a push launched the app can come before the socket
+  // connects, and a send can die with a dropping socket. The server rings again on connect only while the
+  // call still rings us, and the "call:ring" handler hangs up then, so a call answered on our other phone
+  // before that stays up. Till the server's "call:end" confirms the hangup, the app stays awake, while iOS allows.
+  private func sendHangup(_ id: String) {
+    guard let talk else { return }
+    talk.socket.emit("call:hangup", ["id": id]) // dropped while the socket is down
+    guard declined[id] == nil else { return }
+    declined[id] = UIApplication.shared.beginBackgroundTask { [weak self] in self?.settle(id) }
+  }
+
+  // Ends the wait for a declined call, once, from whichever comes first: its "call:end" or iOS's time limit.
+  private func settle(_ id: String) {
+    if let bg = declined.removeValue(forKey: id) { UIApplication.shared.endBackgroundTask(bg) }
   }
 
   // The call ended without a CallKit action of ours: tell CallKit.
