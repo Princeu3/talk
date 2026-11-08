@@ -124,7 +124,7 @@ final class Calls: NSObject {
   @ObservationIgnored private let controller = CXCallController()
   @ObservationIgnored private var registry: PKPushRegistry?
   @ObservationIgnored private var ringback: AVAudioPlayer?
-  @ObservationIgnored private var declined: [String: UIBackgroundTaskIdentifier] = [:] // hung up while the socket was down
+  @ObservationIgnored private var declined: [String: UIBackgroundTaskIdentifier] = [:] // hung up, till the server's "call:end" confirms it
   @ObservationIgnored private lazy var factory: RTCPeerConnectionFactory = {
     RTCInitializeSSL()
     return RTCPeerConnectionFactory(encoderFactory: RTCDefaultVideoEncoderFactory(), decoderFactory: RTCDefaultVideoDecoderFactory())
@@ -437,13 +437,13 @@ final class Calls: NSObject {
     finish(s, note: s.outgoing || s.since != nil ? "Call ended" : nil)
   }
 
-  // A decline right after a push launched the app can come before the socket connects. The server rings
-  // again on connect only while the call still rings us, and the "call:ring" handler hangs up then, so a
-  // call answered on our other phone meanwhile stays up. Till the server's "call:end" confirms the hangup,
-  // the app stays awake, while iOS allows.
+  // A hangup can miss the server: a decline right after a push launched the app can come before the socket
+  // connects, and a send can die with a dropping socket. The server rings again on connect only while the
+  // call still rings us, and the "call:ring" handler hangs up then, so a call answered on our other phone
+  // before that stays up. Till the server's "call:end" confirms the hangup, the app stays awake, while iOS allows.
   private func sendHangup(_ id: String) {
     guard let talk else { return }
-    if talk.socket.connected { return talk.socket.emit("call:hangup", ["id": id]) }
+    talk.socket.emit("call:hangup", ["id": id]) // dropped while the socket is down
     guard declined[id] == nil else { return }
     declined[id] = UIApplication.shared.beginBackgroundTask { [weak self] in self?.settle(id) }
   }
