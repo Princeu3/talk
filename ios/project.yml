@@ -124,6 +124,7 @@ targets:
       - Shared
       - App/PeerConfig.swift
       - App/PiPFeed.swift
+      - App/Socket.swift
     dependencies:
       - package: WebRTC
     settings:
