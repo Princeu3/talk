@@ -23,6 +23,7 @@ struct CallView {
   var since: Date?
   var note: String?
   var muted = false
+  var speaker = false // sound comes out of the phone's loudspeaker
   var camera: Bool
   var front = true
   var local: RTCVideoTrack?
@@ -140,6 +141,10 @@ final class Calls: NSObject {
     // CallKit owns the audio session; WebRTC starts audio only once CallKit activates it.
     RTCAudioSession.sharedInstance().useManualAudio = true
     RTCAudioSession.sharedInstance().isAudioEnabled = false
+    // Headphones and the lock screen's call controls change the route too; keep the speaker button true to it.
+    NotificationCenter.default.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main) { [weak self] _ in
+      MainActor.assumeIsolated { self?.syncSpeaker() }
+    }
   }
 
   // Must run at launch: a VoIP push that wakes the app is delivered right after.
@@ -275,6 +280,22 @@ final class Calls: NSObject {
   func toggleMute() {
     guard let s = session else { return }
     controller.request(CXTransaction(action: CXSetMutedCallAction(call: s.uuid, muted: !s.muted))) { _ in }
+  }
+
+  // Video calls start on the loudspeaker (videoChat), voice calls on the earpiece (voiceChat).
+  func toggleSpeaker() {
+    guard let on = current.map({ !$0.speaker }) else { return }
+    let rtc = RTCAudioSession.sharedInstance()
+    rtc.lockForConfiguration()
+    try? rtc.setMode(on ? .videoChat : .voiceChat)
+    try? rtc.overrideOutputAudioPort(on ? .speaker : .none)
+    rtc.unlockForConfiguration()
+    patch { $0.speaker = on }
+  }
+
+  private func syncSpeaker() {
+    let on = AVAudioSession.sharedInstance().currentRoute.outputs.contains { $0.portType == .builtInSpeaker }
+    patch { $0.speaker = on }
   }
 
   // Off stops the camera (its light goes out); on starts it, adding video to a voice call.
@@ -782,6 +803,7 @@ extension Calls: CXProviderDelegate {
   func provider(_ provider: CXProvider, didActivate audioSession: AVAudioSession) {
     RTCAudioSession.sharedInstance().audioSessionDidActivate(audioSession)
     RTCAudioSession.sharedInstance().isAudioEnabled = true
+    syncSpeaker()
     if let s = session, s.outgoing, s.peers.isEmpty { playRingback() }
   }
 

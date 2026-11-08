@@ -68,8 +68,9 @@ struct CallScreen: View {
         }
 
         if call.phase != .ended {
-          HStack(spacing: 16) {
+          HStack(spacing: 12) {
             round(call.muted ? "Unmute" : "Mute", call.muted ? "mic.slash.fill" : "mic.fill", pressed: call.muted) { calls.toggleMute() }
+            round(call.speaker ? "Turn speaker off" : "Turn speaker on", "speaker.wave.2.fill", pressed: call.speaker) { calls.toggleSpeaker() }
             round(call.camera ? "Turn camera off" : "Turn camera on", call.camera ? "video.fill" : "video.slash.fill", pressed: !call.camera) { calls.toggleCamera() }
             if showLocal { round("Switch camera", "arrow.triangle.2.circlepath.camera") { calls.flip() } }
             round("End call", "phone.down.fill", tone: .endCall) { calls.hangup() }
