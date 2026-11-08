@@ -123,6 +123,7 @@ targets:
       - Tests
       - Shared
       - App/PeerConfig.swift
+      - App/PiPFeed.swift
     dependencies:
       - package: WebRTC
     settings:

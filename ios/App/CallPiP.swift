@@ -15,8 +15,7 @@ final class CallPiP: NSObject, AVPictureInPictureControllerDelegate {
   private let fallback = UIHostingController(rootView: PiPFallback(name: ""))
   private var controller: AVPictureInPictureController?
   private var anchor: UIView?
-  private var track: RTCVideoTrack? // what PiP shows: the first person with their camera on
-  private var shown: RTCVideoTrack? // what the renderer is on, only while PiP is up
+  private lazy var feed = PiPFeed(video.renderer) // its track: the first person with their camera on
   private var pending = false // Back to chat: start once the call bar is the source
   private var possible: AnyCancellable?
 
@@ -64,14 +63,12 @@ final class CallPiP: NSObject, AVPictureInPictureControllerDelegate {
     guard enabled else { return stop() }
     fallback.rootView = PiPFallback(name: name)
     video.isHidden = track == nil
-    guard self.track !== track else { return }
-    self.track = track
-    if shown != nil { attach() }
+    feed.track = track
   }
 
   // Float the other person's video over the chat list, as the call goes to the bar.
   func startSoon() {
-    guard track != nil else { return }
+    guard feed.track != nil else { return }
     pending = true
   }
 
@@ -80,27 +77,14 @@ final class CallPiP: NSObject, AVPictureInPictureControllerDelegate {
     pending = false
     controller?.canStartPictureInPictureAutomaticallyFromInline = false
     if controller?.isPictureInPictureActive == true { controller?.stopPictureInPicture() }
-    track = nil
-    detach()
+    feed.track = nil
   }
 
-  // Frames are converted only while the window shows.
-  private func attach() {
-    detach()
-    track?.add(video.renderer)
-    shown = track
-  }
-
-  private func detach() {
-    shown?.remove(video.renderer)
-    shown = nil
-  }
-
-  func pictureInPictureControllerWillStartPictureInPicture(_ c: AVPictureInPictureController) { attach() }
-  func pictureInPictureControllerDidStopPictureInPicture(_ c: AVPictureInPictureController) { detach() }
+  func pictureInPictureControllerWillStartPictureInPicture(_ c: AVPictureInPictureController) { feed.up = true }
+  func pictureInPictureControllerDidStopPictureInPicture(_ c: AVPictureInPictureController) { feed.up = false }
   func pictureInPictureController(_ c: AVPictureInPictureController, failedToStartPictureInPictureWithError error: Error) {
     print("[pip]", error)
-    detach()
+    feed.up = false
   }
   // Tapped to go back: open the full call screen.
   func pictureInPictureController(_ c: AVPictureInPictureController, restoreUserInterfaceForPictureInPictureStopWithCompletionHandler done: @escaping (Bool) -> Void) {
