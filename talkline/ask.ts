@@ -29,9 +29,14 @@ interface Answer {
   at: number
 }
 
-export const TYPED = /^\s*(yes|no)[\s,.:;!-]+([a-km-z]{5})\b[\s,.:;!-]*(.*)$/is // "yes kxqzm", "Yes, kxqzm.", "no kxqzm use staging"
+const TYPED = /^\s*(yes|no)[\s,.:;!-]+([a-km-z]{5})\b[\s,.:;!-]*(.*)$/is // "yes kxqzm", "Yes, kxqzm.", "no kxqzm use staging"
 // What follows the code. "yes kxqzm 👍" has no note; "yes kxqzm?" has one.
-export const noteOf = (rest: string) => (/[\p{L}\p{N}?]/u.test(rest) ? rest.trim() : '')
+const noteOf = (rest: string) => (/[\p{L}\p{N}?]/u.test(rest) ? rest.trim() : '')
+// A typed answer, its word and code in lower case, or null. The ask and the Stop hook both read answers through this.
+export const typed = (text: string) => {
+  const t = TYPED.exec(text)
+  return t && { word: t[1].toLowerCase() as 'yes' | 'no', code: t[2].toLowerCase(), note: noteOf(t[3]) }
+}
 // A whole-message yes or no with no code. It answers only as a swipe-reply; otherwise it gets ❓ and a reminder.
 export const PLAIN = /^\s*(?:(y|yes|yep|yeah|yup|ok|okay|sure|approve|approved|👍[\u{1F3FB}-\u{1F3FF}]?)|n|no|nope|nah|deny|denied|👎[\u{1F3FB}-\u{1F3FF}]?)\u{FE0F}?[\s.!]*$/iu
 
@@ -101,12 +106,10 @@ export async function ask(p: Paired, o: AskOptions): Promise<{ verdict: Verdict;
       const body = await gate(p, key, m)
       if (!body) continue
       const said = String(body.text ?? '')
-      const typed = TYPED.exec(said)
-      if (typed && typed[2].toLowerCase() === code) {
-        const verdict = typed[1].toLowerCase() as Verdict
-        const note = noteOf(typed[3])
+      const t = typed(said)
+      if (t?.code === code) {
         // A yes can't carry a note: an allow or an exit code would drop it, and with it any condition ("but not on prod").
-        if (!note || verdict === 'no') return settle(verdict, 'typed', m.id, note)
+        if (!t.note || t.word === 'no') return settle(t.word, 'typed', m.id, t.note)
         puzzled(m.id, 'note', `Not taken: a yes can't carry a note. Reply yes ${code} alone, or no ${code} and your note`)
         continue
       }
@@ -207,7 +210,9 @@ export async function ask(p: Paired, o: AskOptions): Promise<{ verdict: Verdict;
   }
 
   // Listen before sending, so no answer slips past. Reconnects catch up too (the first connect came before this).
-  for (const ev of ['message', 'edit', 'reaction', 'connect']) s.on(ev, check)
+  // Talk echoes the agent's own sends, edits and reactions back to it; none can be an answer, so they read nothing.
+  for (const ev of ['message', 'edit', 'reaction']) s.on(ev, (x?: { senderId?: string; userId?: string }) => (x?.senderId ?? x?.userId) !== p.agent.id && check())
+  s.on('connect', check)
   s.on('call:accepted', (c: { id: string }) => queue(() => accepted(c.id)))
   s.on('call:end', (c: { id: string; reason: string }) => queue(() => ended(c.id, c.reason)))
 

@@ -2,8 +2,9 @@ import type { CallKind, CallLog, Conversation, LinkPreview, Me, MessageBody } fr
 
 export const userName = (me: Me, id: string) => me.users.find((u) => u.id === id)?.name ?? 'Someone'
 export const who = (me: Me, id: string) => (id === me.user.id ? 'You' : userName(me, id))
-// A helper (talkline). Only the server sets `owner`, so it, not an " AI" name, earns the AI badge.
-export const isHelper = (me: Me, id?: string) => !!me.users.find((u) => u.id === id)?.owner
+// A DM with a helper (talkline). Only the server sets `owner`, so it, not an " AI" name, earns the AI badge.
+export const isHelper = (me: Me, conv: Conversation) =>
+  conv.kind === 'dm' && !!me.users.find((u) => u.id === conv.members.find((m) => m !== me.user.id))?.owner
 
 export const convName = (me: Me, conv: Conversation) =>
   conv.title ?? userName(me, conv.members.find((m) => m !== me.user.id) ?? me.user.id)

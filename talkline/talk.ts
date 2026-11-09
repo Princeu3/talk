@@ -62,6 +62,11 @@ export function log(ev: string, fields: Record<string, unknown> = {}) {
 
 export const hhmm = (t: number) => new Date(t).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
 
+// A Claude Code session id, safe as a file name.
+export const sessionId = (v: unknown) => String(v ?? '').replace(/[^A-Za-z0-9_-]/g, '')
+// What a session sent the owner, a message id a line, so the Stop inbox gives a swipe-reply to it back to that session.
+export const noteSent = (sid: string, id: number) => (home(), appendFileSync(file(`sessions/${sid}.sent`), `${id}\n`, { mode: 0o600 }))
+
 // --- HTTP ---
 
 // Per request and per socket connect. The Stop and Notification hooks lower it, so a dead network can't hold up Claude Code.

@@ -1,11 +1,11 @@
 // Settings > Agents: link a helper (talkline), check and Allow a pending one, then Pause or Remove it.
 import { useEffect, useState, type ReactNode } from 'react'
 import type { Agent, Conversation } from '../../shared/types.ts'
-import type { Talk } from '../lib/useTalk.ts'
+import { checkAgent, linkSecret, type Talk } from '../lib/useTalk.ts'
 import { api } from '../lib/api.ts'
 import { shortTime } from '../lib/format.ts'
 import { AiBadge, Avatar } from './Sidebar.tsx'
-import { danger, primary, SafetyCode } from './Sheets.tsx'
+import { CopyLink, danger, primary, SafetyCode, useSubmit } from './Sheets.tsx'
 import { Pause, Play } from './icons.tsx'
 
 type Run = (f: () => Promise<unknown>) => void
@@ -16,7 +16,7 @@ const PAIR = ['node', 'talkline/cli.ts', 'pair', `'<link>'`, '--name', `'Claude 
 // Deny and Remove are one call. The server's sync reloads `me`, which drops the row.
 async function remove(a: Agent) {
   await api('DELETE', `/api/agents/${a.id}`)
-  localStorage.removeItem(`talk:agent-link:${a.invite}`)
+  localStorage.removeItem(linkSecret(a.invite))
 }
 
 function Who({ a, children }: { a: Agent; children: ReactNode }) {
@@ -37,8 +37,7 @@ function Who({ a, children }: { a: Agent; children: ReactNode }) {
 // Waiting for Allow. Only the browser that made the link holds the secret the helper's proof is checked with.
 function Pending({ talk, a, busy, run }: { talk: Talk; a: Agent; busy: boolean; run: Run }) {
   const [check, setCheck] = useState<'no secret' | 'bad proof' | 'ok'>()
-  const { checkAgent } = talk
-  useEffect(() => void checkAgent(a).then(setCheck, () => setCheck('no secret')), [checkAgent, a])
+  useEffect(() => void checkAgent(a).then(setCheck, () => setCheck('no secret')), [a])
   const deny = <button onClick={() => run(() => remove(a))} disabled={busy} className={danger}>Deny</button>
   return (
     <li className="py-2">
@@ -97,34 +96,12 @@ export default function Agents({ talk }: { talk: Talk }) {
   const me = talk.me!
   const agents = me.agents ?? []
   const [made, setMade] = useState<{ code: string; link: string; expiresAt: number }>()
-  const [copied, setCopied] = useState(false)
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState('')
+  const { busy, error, run } = useSubmit(undefined, 'That didn’t work. Try again.')
   // The link works once: its box goes when its helper shows up, pending or allowed.
   useEffect(() => {
     if (made && agents.some((a) => a.invite === made.code)) setMade(undefined)
   }, [made, agents])
-  const run: Run = async (f) => {
-    setBusy(true)
-    setError('')
-    try {
-      await f()
-    } catch (e) {
-      setError((e as Error).message || 'That didn’t work. Try again.')
-    } finally {
-      setBusy(false)
-    }
-  }
-  const link = () =>
-    run(async () => {
-      setMade(await talk.linkAgent())
-      setCopied(false)
-    })
-  // Copy only: never the share sheet, since the link's fragment holds the secret.
-  const copy = async () => {
-    await navigator.clipboard.writeText(made!.link)
-    setCopied(true)
-  }
+  const link = () => run(async () => setMade(await talk.linkAgent()))
 
   return (
     <section className="mb-7">
@@ -142,10 +119,8 @@ export default function Agents({ talk }: { talk: Talk }) {
       <button onClick={link} disabled={busy} className={primary}>Link a helper</button>
       {made && (
         <>
-          <div className="mt-2 flex items-center gap-2 rounded-2xl bg-surface py-2 pl-4 pr-2">
-            <span className="min-w-0 flex-1 select-all truncate text-sm">{made.link}</span>
-            <button onClick={copy} className="min-h-11 shrink-0 rounded-full px-3 text-sm font-semibold text-accent hover:bg-raised">{copied ? 'Copied' : 'Copy'}</button>
-          </div>
+          {/* Copy only: never the share sheet, since the link's fragment holds the secret. */}
+          <CopyLink key={made.link} link={made.link} />
           <p className="mt-2 text-sm text-mut">Works once, until {new Date(made.expiresAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}.</p>
           <p className="mt-1 text-sm text-mut">
             On your Mac:{' '}

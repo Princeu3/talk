@@ -23,7 +23,7 @@ export function status(c: CallView) {
   }
 }
 
-function useSecondTick(on: boolean) {
+export function useSecondTick(on: boolean) {
   const [, tick] = useState(0)
   useEffect(() => {
     if (!on) return

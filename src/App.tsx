@@ -76,7 +76,7 @@ function Main({ ident, onSignOut }: { ident: StoredIdentity; onSignOut: () => vo
   // was deleted has nobody to call, and a helper takes no calls, so neither gets buttons.
   const active = me.conversations.find((c) => c.id === talk.activeId)
   const peer = active?.members.find((u) => u !== me.user.id)
-  const startCall = !active || (active.kind !== 'group' && (!peer || isHelper(me, peer))) ? undefined : (kind: CallKind) => {
+  const startCall = !active || (active.kind !== 'group' && !peer) || isHelper(me, active) ? undefined : (kind: CallKind) => {
     if (active.call) return joinCall(active.id)
     if (active.kind === 'group') calls.start(active.id, kind)
     else calls.start(active.id, kind, peer)

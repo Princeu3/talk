@@ -18,16 +18,18 @@ export function useEscape(onClose: () => void) {
 }
 
 // Busy while an action runs; then `onDone`, or the error with the sheet left open.
-function useSubmit(onDone?: () => void, fallback = '') {
+export function useSubmit(onDone?: () => void, fallback = '') {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const run = async (f: () => Promise<unknown>) => {
     setBusy(true)
+    setError('')
     try {
       await f()
       onDone?.()
     } catch (e) {
       setError((e as Error).message || fallback)
+    } finally {
       setBusy(false)
     }
   }
@@ -235,10 +237,24 @@ export function SafetyCode({ pubkey }: { pubkey: string }) {
   return <span className="font-mono text-sm tracking-wider text-mut">{code}</span>
 }
 
+// A link to select or copy. Key it by the link, so a new one starts at Copy.
+export function CopyLink({ link }: { link: string }) {
+  const [copied, setCopied] = useState(false)
+  const copy = async () => {
+    await navigator.clipboard.writeText(link)
+    setCopied(true)
+  }
+  return (
+    <div className="mt-2 flex items-center gap-2 rounded-2xl bg-surface py-2 pl-4 pr-2">
+      <span className="min-w-0 flex-1 select-all truncate text-sm">{link}</span>
+      <button onClick={copy} className="min-h-11 shrink-0 rounded-full px-3 text-sm font-semibold text-accent hover:bg-raised">{copied ? 'Copied' : 'Copy'}</button>
+    </div>
+  )
+}
+
 export function Settings({ talk, onClose, onSignOut }: { talk: Talk; onClose: () => void; onSignOut: () => void }) {
   const me = talk.me!
   const [link, setLink] = useState('')
-  const [copied, setCopied] = useState(false)
   const [push, setPush] = useState(pushSupported() ? Notification.permission : 'unsupported')
 
   const invite = async () => {
@@ -247,22 +263,13 @@ export function Settings({ talk, onClose, onSignOut }: { talk: Talk; onClose: ()
     setLink(url)
     if (navigator.share) navigator.share({ title: 'Join me on Talk', url }).catch(() => {})
   }
-  const copy = async () => {
-    await navigator.clipboard.writeText(link)
-    setCopied(true)
-  }
 
   return (
     <Sheet title="Settings" onClose={onClose}>
       <section className="mb-7">
         <h3 className="mb-2 font-semibold">Invite someone</h3>
         <button onClick={invite} className={primary}>Create invite link</button>
-        {link && (
-          <div className="mt-2 flex items-center gap-2 rounded-2xl bg-surface py-2 pl-4 pr-2">
-            <span className="min-w-0 flex-1 select-all truncate text-sm">{link}</span>
-            <button onClick={copy} className="min-h-11 shrink-0 rounded-full px-3 text-sm font-semibold text-accent hover:bg-raised">{copied ? 'Copied' : 'Copy'}</button>
-          </div>
-        )}
+        {link && <CopyLink key={link} link={link} />}
         <p className="mt-2 text-sm text-mut">The link works once and expires in 7 days. Send it over a channel you trust.</p>
       </section>
 

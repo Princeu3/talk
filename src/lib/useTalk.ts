@@ -79,10 +79,13 @@ async function shrink(b64: string, type?: string) {
   }
 }
 
+// Where this browser keeps the secret of a helper link it made, by the link's code.
+export const linkSecret = (code: string) => `talk:agent-link:${code}`
+
 // A pending helper proved its key with the secret from a link this browser made: HMAC-SHA256 of
 // 'talk-pair-v1:' + its key. 'no secret': the link came from another browser (or was used here already).
-async function checkAgent(a: Agent): Promise<'no secret' | 'bad proof' | 'ok'> {
-  const s = localStorage.getItem(`talk:agent-link:${a.invite}`)
+export async function checkAgent(a: Agent): Promise<'no secret' | 'bad proof' | 'ok'> {
+  const s = localStorage.getItem(linkSecret(a.invite))
   if (!s) return 'no secret'
   const key = await crypto.subtle.importKey('raw', c.unb64(s), { name: 'HMAC', hash: 'SHA-256' }, false, ['verify'])
   return (await crypto.subtle.verify('HMAC', key, c.unb64(a.proof), new TextEncoder().encode(`talk-pair-v1:${a.pubkey}`))) ? 'ok' : 'bad proof'
@@ -523,7 +526,7 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
     const { code, expiresAt } = await api<{ code: string; expiresAt: number }>('POST', '/api/invites', { agent: true, tz })
     const s = c.b64(crypto.getRandomValues(new Uint8Array(32)))
     // shortcut: only the browser that made the link can Allow, and unused entries stay; sync the secret across devices if owners link on one and allow on another.
-    localStorage.setItem(`talk:agent-link:${code}`, s)
+    localStorage.setItem(linkSecret(code), s)
     return { code, link: `${location.origin}/?agent=${code}#o=${m.user.id}&k=${k}&s=${s}`, expiresAt }
   }
 
@@ -532,7 +535,7 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
   const allowAgent = async (a: Agent) => {
     if ((await checkAgent(a)) !== 'ok') throw new Error('This helper didn’t prove it has your link. Deny it.')
     await createConversation([a.id], undefined, { [meRef.current!.user.id]: await ownPubkey(), [a.id]: a.pubkey })
-    localStorage.removeItem(`talk:agent-link:${a.invite}`)
+    localStorage.removeItem(linkSecret(a.invite))
   }
 
   // A group event as a centered line ("Alice added Bob"), sealed like any message.
@@ -639,7 +642,7 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
   return {
     me, messages, pending, hasOlder, activeId, totalUnread, typers, focus, setFocus,
     open, loadOlder, backfill, history, openAt, send, retry, discard, sendWithFiles, fileUrl, createConversation, addMembers,
-    react, edit, unsend, forward, typing, setMine, rename, removeMember, leave, block, report, linkAgent, checkAgent, allowAgent,
+    react, edit, unsend, forward, typing, setMine, rename, removeMember, leave, block, report, linkAgent, allowAgent,
   }
 }
 

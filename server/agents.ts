@@ -1,10 +1,11 @@
 // Helpers (talkline): a helper is a user with owner_id set, and its owner is always a person.
 // Here: when a helper may ring its owner, and how often its sends may buzz them.
 import { db, mutedIds } from './db.ts'
-import type { SendPayload } from '../shared/types.ts'
+import { hit } from './unfurl.ts'
+import type { Agent, SendPayload } from '../shared/types.ts'
 
 // users.agent, as JSON. proof and invite are kept so the owner's browser can check the pairing.
-export type AgentInfo = { where: string; proof: string; invite: string }
+export type AgentInfo = Pick<Agent, 'where' | 'proof' | 'invite'>
 
 const MIN = 60_000
 const DAY = 24 * 60 * MIN
@@ -36,12 +37,6 @@ const rings = new Map<string, Ring[]>() // per owner: all their helpers' rings, 
 const declines = new Map<string, number>() // caller id -> when a ring of theirs was last declined or went unanswered
 const sends = new Map<string, number[]>() // per helper
 const loud = new Map<string, number[]>(), urgent = new Map<string, number[]>() // per owner
-// Same idea as unfurl.ts allow(), with a window and a cap.
-const hit = (m: Map<string, number[]>, id: string, ms: number, max: number, now = Date.now()) => {
-  const recent = (m.get(id) ?? []).filter((t) => now - t < ms)
-  m.set(id, recent.length < max ? [...recent, now] : recent)
-  return recent.length < max
-}
 
 export const noteDecline = (caller: string) => void declines.set(caller, Date.now())
 
@@ -58,9 +53,8 @@ export function ringRule(r: { ask: number; tz: string | null; rings: Ring[]; dec
   if (day.length >= 6) return 'Your owner’s helpers rang 6 times in the last day.'
 }
 
-// Why a helper's ring can't start, or undefined, and then the ring counts. People ring as before.
-export function ringRefusal(me: string, convId: string, ask: unknown) {
-  const owner = ownerOf(me)
+// Why a helper's ring can't start, or undefined, and then the ring counts. People (owner null) ring as before.
+export function ringRefusal(owner: string | null, me: string, convId: string, ask: unknown) {
   if (!owner) return
   if (mutedIds(convId).has(owner)) return 'Paused in Talk: no rings.'
   if (!Number.isSafeInteger(ask)) return 'Say which ask this ring is for.'

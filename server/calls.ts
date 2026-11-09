@@ -188,7 +188,7 @@ export function callHandlers(io: Server) {
       if (blocks(to, me)) return ack({ error: `${nameOf(to)} isn't taking calls from you.` })
       if (inCall(me)) return ack({ error: 'You are already in a call.' })
       if (inCall(to)) return ack({ error: `${nameOf(to)} is on another call.` })
-      const refused = ringRefusal(me, convId as string, p.ask)
+      const refused = ringRefusal(socket.data.owner, me, convId as string, p.ask)
       if (refused) return ack({ error: refused })
       const c: Call = { id: randomUUID(), convId: convId as string, from: me, kind, to, device: { [me]: socket.id, [to]: null }, answered: false, until: Date.now() + RING_MS }
       calls.set(c.id, c)

@@ -6,7 +6,8 @@ import type { Talk, Decrypted } from '../lib/useTalk.ts'
 import { AUTO_LOAD, unfurl } from '../lib/useTalk.ts'
 import type { CallKind, FileRef, LinkPreview, Voice } from '../../shared/types.ts'
 import { callNoun, callSummary, convName, dayLabel, fileSize, host, isHelper, preview, typingLabel, URL_RE, userName, who } from '../lib/format.ts'
-import { canRecord, startRecording, type Recording } from '../lib/voice.ts'
+import { canRecord, clock, startRecording, type Recording } from '../lib/voice.ts'
+import { useSecondTick } from './Call.tsx'
 import { AiBadge, Avatar } from './Sidebar.tsx'
 import { Back, Check, Clip, Close, Copy, FileIcon, Flag, Forward, LinkIcon, Lock, Mic, More, Pencil, Phone, Reply, Send, Trash, Video } from './icons.tsx'
 import { iconButton } from './Sidebar.tsx'
@@ -148,16 +149,10 @@ function Attachment({ talk, convId, file, onZoom }: { talk: Talk; convId: string
 // the ask expires, or when talkline's closing edit ("Approved 14:03") drops `ask`. A removed helper
 // reads no answer and sends no closing edit, so its asks get no buttons.
 function AskButtons({ talk, convId, code, expires }: { talk: Talk; convId: string; code: string; expires: number }) {
-  const [now, setNow] = useState(Date.now)
   const [sent, setSent] = useState(false)
-  const left = Math.ceil((expires - now) / 1000)
-  const open = left > 0
-  useEffect(() => {
-    if (!open) return
-    const t = setInterval(() => setNow(Date.now()), 1000)
-    return () => clearInterval(t)
-  }, [open])
-  if (!open) return null
+  const left = Math.ceil((expires - Date.now()) / 1000)
+  useSecondTick(left > 0)
+  if (left <= 0) return null
   const answer = (word: 'yes' | 'no') => {
     setSent(true)
     talk.send(convId, { text: `${word} ${code}` }).catch(() => setSent(false))
@@ -170,7 +165,7 @@ function AskButtons({ talk, convId, code, expires }: { talk: Talk; convId: strin
       <button onClick={() => answer('no')} disabled={sent} className="pressable min-h-9 rounded-full bg-raised px-3.5 text-sm font-semibold text-danger disabled:opacity-40">
         Deny
       </button>
-      <span className="text-xs tabular-nums text-ink/80">{Math.floor(left / 60)}:{String(left % 60).padStart(2, '0')} left</span>
+      <span className="text-xs tabular-nums text-ink/80">{clock(left)} left</span>
     </div>
   )
 }
@@ -476,7 +471,7 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
 
   if (!conv) return null
   const name = convName(me, conv)
-  const helper = conv.kind === 'dm' && isHelper(me, conv.members.find((u) => u !== me.user.id))
+  const helper = isHelper(me, conv)
 
   const cancelCompose = () => {
     if (editing) setText('')

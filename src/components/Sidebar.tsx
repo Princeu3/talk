@@ -245,7 +245,7 @@ export default function Sidebar({ talk, onNew, onSettings, onJoin }: { talk: Tal
             const who = !last || last.system ? '' : last.senderId === me.user.id ? 'You: ' : conv.kind === 'group' ? `${userName(me, last.senderId)}: ` : ''
             const join = conv.call && !conv.call.peers.includes(me.user.id) ? conv.call : null
             const typers = talk.typers[conv.id] ?? []
-            const helper = conv.kind === 'dm' && isHelper(me, conv.members.find((u) => u !== me.user.id))
+            const helper = isHelper(me, conv)
             return (
               <li key={conv.id} className="relative">
                 <button

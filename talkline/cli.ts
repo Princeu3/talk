@@ -1,15 +1,16 @@
 #!/usr/bin/env node
 // talkline: the Claude Code bridge to Talk (Phase 1). Commands below; see talkline/README.md.
 import { createHmac } from 'node:crypto'
-import { appendFileSync, existsSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { constants, hostname } from 'node:os'
+import path from 'node:path'
 import { text as readAll } from 'node:stream/consumers'
 import { parseArgs } from 'node:util'
 import { b64, deriveIdentity, safetyCode, unwrapConvKey } from '../src/lib/crypto.ts'
 import type { Me } from '../shared/types.ts'
 import { ask, cancel } from './ask.ts'
 import { hook, idleSeconds, ourHooks, readSettings, SETTINGS, setHooks } from './hooks.ts'
-import { api, call, CLI, connect, file, home, limits, log, paired, patchProfile, readProfile, REMOVED, request, saveProfile, say, type Paired } from './talk.ts'
+import { api, call, CLI, connect, file, limits, log, noteSent, paired, patchProfile, readProfile, REMOVED, saveProfile, say, sessionId, type Paired } from './talk.ts'
 
 const PAIR = `pair '<agent link>' [--name "Claude AI"]   (make the link in Talk: Settings > Agents)`
 const USAGE = `Usage: node ${CLI} <command>
@@ -41,9 +42,9 @@ for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const)
   })
 
 // Run from Claude Code, whose Bash sets CLAUDE_CODE_SESSION_ID (the hooks' session_id): name the session, and send a swipe-reply back to it.
-const sid = process.env.CLAUDE_CODE_SESSION_ID?.replace(/[^A-Za-z0-9_-]/g, '')
-const label = sid ? `${process.cwd().split('/').pop()}: ` : ''
-const sent = (id: number) => void (sid && (home(), appendFileSync(file(`sessions/${sid}.sent`), `${id}\n`, { mode: 0o600 })))
+const sid = sessionId(process.env.CLAUDE_CODE_SESSION_ID)
+const label = sid ? `${path.basename(process.cwd())}: ` : ''
+const sent = (id: number) => void (sid && noteSent(sid, id))
 
 async function main(): Promise<number> {
   const { values: o, positionals: [cmd, ...args] } = parseArgs({
@@ -105,11 +106,10 @@ async function main(): Promise<number> {
       if (!o.yes) throw new Error('unpair deletes the agent account on the server and the local profile. Run unpair --yes to do it.')
       const p = readProfile()
       if (!p) throw new Error('Not paired.')
-      if (p.token) {
-        // 401: the owner removed it already.
-        const r = await request(p, 'DELETE', '/api/me')
-        if (r.status !== 200 && r.status !== 401) throw new Error(`DELETE /api/me: ${r.data?.error ?? r.status}`)
-      } else await api(p, 'DELETE', '/api/me', { auth: p.agent.auth })
+      // REMOVED: the owner removed it already.
+      await api(p, 'DELETE', '/api/me', p.token ? undefined : { auth: p.agent.auth }).catch((e: Error) => {
+        if (e.message !== REMOVED) throw e
+      })
       rmSync(file('profile.json'))
       await print(`${p.token ? 'Removed' : 'Deleted'} ${p.agent.name} from ${p.server}. Run hooks uninstall to remove the hooks.`)
       return 0

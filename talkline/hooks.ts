@@ -6,8 +6,8 @@ import { homedir } from 'node:os'
 import path from 'node:path'
 import { setTimeout as pause } from 'node:timers/promises'
 import type { Message, MessageBody } from '../shared/types.ts'
-import { ask, asked, noteOf, PLAIN, TYPED } from './ask.ts'
-import { CLI, dmKey, file, gate, history, hhmm, home, log, paired, patchProfile, react, read, readProfile, say, type Paired } from './talk.ts'
+import { ask, asked, PLAIN, typed } from './ask.ts'
+import { CLI, dmKey, file, gate, history, hhmm, home, log, noteSent, paired, patchProfile, react, read, readProfile, say, sessionId, type Paired } from './talk.ts'
 
 export const SETTINGS = path.join(homedir(), '.claude', 'settings.json')
 // Ours, also from an older checkout path.
@@ -168,11 +168,10 @@ export async function hook(event: string, input: Input, expires?: number): Promi
   if (!profile?.owner || !profile.dm) return
   const p = profile as Paired
   home()
-  const sid = String(input.session_id ?? '').replace(/[^A-Za-z0-9_-]/g, '') || 'none'
+  const sid = sessionId(input.session_id) || 'none'
   const session = (ext: string) => file(`sessions/${sid}.${ext}`)
   const label = path.basename(String(input.cwd ?? '')) || 'Claude Code'
-  // What this session sent the owner, so the Stop inbox gives a swipe-reply to it back to this session.
-  const sent = (id: number) => appendFileSync(session('sent'), `${id}\n`, { mode: 0o600 })
+  const sent = (id: number) => noteSent(sid, id)
 
   if (event === 'notification') {
     const kind = String(input.notification_type)
@@ -244,9 +243,10 @@ export async function hook(event: string, input: Input, expires?: number): Promi
   // A value with a line break, VT and FF included, shows as a quoted JSON string, so it can't pass for another field or line.
   // JSON.stringify leaves NEL, LS and PS raw, and the iPhone breaks lines on them.
   const json = (v: unknown) => JSON.stringify(v).replace(/[\u0085\u2028\u2029]/g, esc)
-  const one = (s: string) => (/[\r\n\u000b\u000c\u0085\u2028\u2029]/.test(s) ? json(s) : s)
+  const BREAK = /\r\n?|[\n\u000b\u000c\u0085\u2028\u2029]/
+  const one = (s: string) => (BREAK.test(s) ? json(s) : s)
   const where = one(dir && target.startsWith(dir + '/') ? target.slice(dir.length + 1) : tidy(target))
-  const mark = (s: unknown, m: string) => String(s ?? '').split(/\r\n?|[\n\u000b\u000c\u0085\u2028\u2029]/).map((l) => m + l).join('\n') // a mark on every shown line
+  const mark = (s: unknown, m: string) => String(s ?? '').split(BREAK).map((l) => m + l).join('\n') // a mark on every shown line
   // Text-direction controls show as escapes, so a command can't read one way on Talk and run another.
   const bare = (t: string) => t.replace(/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, esc)
   const fields = () => Object.entries(ti).map(([k, v]) => `${one(k)}: ${typeof v === 'string' ? one(v) : json(v)}`).join('\n')
@@ -297,11 +297,10 @@ const CAP = 9000 // Claude Code moves additionalContext over 10,000 chars to a f
 // (its code typed, by the asks file, or a plain yes or no), call logs and group events.
 function shown(m: Message, b: MessageBody, asks: ReturnType<typeof asked>) {
   const text = String(b.text ?? '')
-  const typed = TYPED.exec(text)
-  const code = typed?.[2].toLowerCase()
+  const t = typed(text)
   // An answer, never chat: a known code that an ask took or that carries no note, or a plain yes or no. A plain
   // word is a swipe at a question or a reminder, or, with no swipe, for no session at all.
-  if (b.system || (code && asks.codes.has(code) && (asks.ids.has(m.id) || !noteOf(typed![3]))) || (PLAIN.test(text) && (!b.reply || asks.ids.has(Number(b.reply.id))))) return ''
+  if (b.system || (t && asks.codes.has(t.code) && (asks.ids.has(m.id) || !t.note)) || (PLAIN.test(text) && (!b.reply || asks.ids.has(Number(b.reply.id))))) return ''
   const said = text || (b.files?.length ? '(sent a file, not shown)' : '')
   if (!said) return ''
   const quote = b.reply ? `(reply to "${String(b.reply.preview ?? '').replace(/\s+/g, ' ')}") ` : ''
@@ -333,10 +332,11 @@ async function inbox(p: Paired, sid: string, label: string) {
   const news = taken === held.length ? await history(p, p.cursor ?? 0) : []
 
   const bodies = await Promise.all(news.map((m) => gate(p, key, m)))
-  const asks = asked()
-  // shortcut: a reply or a code means reading every session's .sent file; prune old sessions if that ever shows.
+  // Only the owner's messages can answer an ask: with none, the asks file stays unread.
+  const asks = bodies.some(Boolean) ? asked() : { ids: new Set<number>(), codes: new Map<string, number[]>() }
+  // shortcut: a reply or a known code means reading every session's .sent file; prune old sessions if that ever shows.
   const sender = new Map<number, string>()
-  if (bodies.some((b) => b?.reply || TYPED.test(String(b?.text ?? ''))))
+  if (bodies.some((b) => b?.reply || asks.codes.has(typed(String(b?.text ?? ''))?.code ?? '')))
     for (const f of readdirSync(file('sessions')))
       if (f.endsWith('.sent')) for (const id of readFileSync(file(`sessions/${f}`), 'utf8').split('\n')) if (id) sender.set(Number(id), f.slice(0, -5))
   const holds: { to: string; id: number; line: string }[] = []
@@ -348,7 +348,7 @@ async function inbox(p: Paired, sid: string, label: string) {
     if (body && !body.reply && PLAIN.test(String(body.text ?? ''))) puzzled.push(m.id)
     // A note on a known code goes to the session that asked, whatever it replies to.
     // shortcut: a Stop that reads a note the moment before its open ask takes it holds it too: Claude gets it twice, and 👀 replaces the ❌.
-    const ids = asks.codes.get(TYPED.exec(String(body?.text ?? ''))?.[2].toLowerCase() ?? '')
+    const ids = asks.codes.get(typed(String(body?.text ?? ''))?.code ?? '')
     const to = ids ? ids.map((id) => sender.get(id)).find(Boolean) : body?.reply && sender.get(body.reply.id)
     if (line && ids && !to) puzzled.push(m.id) // no session asked it: a CLI ask run outside Claude Code
     else if (line && to && to !== sid) holds.push({ to, id: m.id, line })
@@ -366,14 +366,13 @@ async function inbox(p: Paired, sid: string, label: string) {
       return log('inbox', { count: 0, why: 'blocked' })
     }
     if (status >= 300) throw new Error(`PUT reaction: ${status}`)
-    await Promise.all(lines.slice(1).map((l) => react(p, key, l.id, '👀').catch(() => {})))
-    await read(p, cursor).catch(() => {})
+    await Promise.all([...lines.slice(1).map((l) => react(p, key, l.id, '👀').catch(() => {})), read(p, cursor).catch(() => {})])
   }
   await marking
   for (const h of holds) appendFileSync(file(`sessions/${h.to}.held`), JSON.stringify({ id: h.id, line: h.line }) + '\n', { mode: 0o600 })
   if (taken < held.length) writeFileSync(heldAt, held.slice(taken).map((h) => JSON.stringify(h) + '\n').join(''), { mode: 0o600 })
   else rmSync(heldAt, { force: true })
-  patchProfile({ cursor })
+  if (cursor !== (p.cursor ?? 0)) patchProfile({ cursor }) // read under the lock, so no other Stop moved it
   if (!lines.length) return
   log('inbox', { count: lines.length })
   return JSON.stringify({ hookSpecificOutput: { hookEventName: 'Stop', additionalContext: [head, ...lines.map((l) => l.line)].join('\n') } })

@@ -217,7 +217,7 @@ export default function ChatInfo({ talk, convId, onClose, onCall, onAddPeople, o
 
   const others = conv.members.filter((u) => u !== me.user.id).sort((a, b) => userName(me, a).localeCompare(userName(me, b)))
   const blocked = me.blocked.includes(other)
-  const helper = isHelper(me, other)
+  const helper = isHelper(me, conv)
   const call = (kind: CallKind) => {
     onCall?.(kind)
     onClose()

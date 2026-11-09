@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { Server } from 'socket.io'
 import { db, BLOB_DIR, setting, isMember, memberIds, mutedIds, audience, dmRefusal, kindOf, userExists } from './db.ts'
 import { authMatches, hashAuth, setSession, clearSession, userFrom, requireUser, throttled, recordFail } from './auth.ts'
-import { vapidPublicKey, saveSubscription, notifyIfAway, toUsers } from './push.ts'
+import { vapidPublicKey, saveSubscription, notifyIfAway, toUsers, apns, type Apns } from './push.ts'
 import { callHandlers, callState, groupCall } from './calls.ts'
 import { allow, unfurl } from './unfurl.ts'
 import { budget, ownerOf, validTz, type AgentInfo } from './agents.ts'
@@ -180,8 +180,9 @@ app.get('/api/me', (req, res) => {
     }
   })
   // shortcut: "last active" is the helper's last message, not its last request; store a time per request if owners need it.
+  // Ids grow with time, and max(id) reads only the (sender_id, cid) index, not every sealed body.
   const agents = myOwner ? undefined : (db.prepare(
-    `select u.id, u.name, u.pubkey, u.agent, (select max(created_at) from messages where sender_id = u.id) as activeAt
+    `select u.id, u.name, u.pubkey, u.agent, (select created_at from messages where id = (select max(id) from messages where sender_id = u.id)) as activeAt
      from users u where u.owner_id = ? and u.deleted_at is null order by u.created_at`,
   ).all(req.userId) as { agent: string }[]).map(({ agent, ...a }) => ({ ...a, ...JSON.parse(agent) }))
   res.json({ user, users, conversations, blocked, vapidPublicKey, ...(agents && { agents }) } satisfies Me)
@@ -217,18 +218,13 @@ app.delete('/api/me', (req, res) => {
     ]) db.prepare(sql).run(req.userId)
     // shortcut: attachment blobs stay on disk (sealed, now unreachable); sweep orphans if storage matters.
     db.prepare(`update users set name = id, auth_hash = '', deleted_at = ?, tz = null where id = ?`).run(Date.now(), req.userId)
-    // Their helpers go too, as Remove does.
-    db.prepare(`update users set name = id, auth_hash = '', deleted_at = ? where owner_id = ? and deleted_at is null`).run(Date.now(), req.userId)
     db.exec('commit')
   } catch (e) {
     db.exec('rollback')
     throw e
   }
   io.in(`user:${req.userId}`).disconnectSockets(true)
-  for (const h of helpers) {
-    calls.hangUp(h)
-    io.in(`user:${h}`).disconnectSockets(true)
-  }
+  for (const h of helpers) removeAgent(h) // their helpers go too, as Remove does
   sync([...others])
   clearSession(res)
   res.json({ ok: true })
@@ -568,12 +564,14 @@ app.get('/api/attachments/:id', (req, res) => {
 
 io.use((socket, next) => {
   const id = userFrom(socket.handshake.headers)
-  if (!id || !userExists(id)) return next(new Error('signed out'))
+  const user = id && (db.prepare('select owner_id as owner from users where id = ? and deleted_at is null').get(id) as { owner: string | null } | undefined)
+  if (!user) return next(new Error('signed out'))
   // The web app's zone, kept only for people who linked a helper: their helpers' ring hours follow it.
   // shortcut: an owner who travels with only the iPhone keeps the old zone until they open the web app; add a zone picker if that bites.
   const tz = socket.handshake.auth?.tz
   if (validTz(tz)) db.prepare('update users set tz = ?1 where id = ?2 and tz is not null and tz != ?1').run(tz, id)
   socket.data.userId = id
+  socket.data.owner = user.owner // a helper's owner, null for a person; it never changes, and Remove drops the socket
   socket.data.active = true
   // The app's protocol version: 2 and up know group calls and the events above.
   socket.data.v = Number(socket.handshake.query.v) || 1
@@ -601,7 +599,7 @@ io.on('connection', (socket) => {
     if (sent) return ack({ message: shaped([sent], me)[0] })
     const refused = dmRefusal(p.convId, me)
     if (refused) return ack({ error: refused })
-    const owner = ownerOf(me)
+    const owner = socket.data.owner as string | null
     if (owner && !p.cid) return ack({ error: 'bad request' }) // every client of ours sends one; helpers are all new
     const b = owner ? budget(me, owner, p) : { quiet: !!p.quiet }
     if (b.error) return ack({ error: b.error })
@@ -617,11 +615,11 @@ io.on('connection', (socket) => {
     if (b.quiet) return
     const sender = (db.prepare('select name from users where id = ?').get(me) as { name: string }).name
     const muted = mutedIds(p.convId)
-    for (const u of to) if (u !== me && !muted.has(u))
-      notifyIfAway(io, u, { title: sender, body: 'New message', convId: p.convId }, {
-        apns: { type: 'message', convId: p.convId, messageId: message.id, ...(b.level && { level: b.level }) },
-        always: !!owner,
-      })
+    const push: Apns = { type: 'message', convId: p.convId, messageId: message.id, ...(b.level && { level: b.level }) }
+    for (const u of to) if (u !== me && !muted.has(u)) {
+      notifyIfAway(io, u, { title: sender, body: 'New message', convId: p.convId }, owner ? {} : { apns: push })
+      if (owner) apns(u, push) // a helper's loud send buzzes the phone even with a tab open
+    }
   })
 
   // "I'm typing" for the chat's other members, never stored. Clients send it at
