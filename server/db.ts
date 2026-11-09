@@ -117,6 +117,13 @@ if (!(db.prepare('pragma table_info(messages)').all() as { name: string }[]).som
   db.exec('alter table messages add column cid text')
 db.exec('create unique index if not exists messages_by_cid on messages (sender_id, cid)')
 
+// Helpers: an owner-only account. owner_id is null for people.
+addColumn('users', 'owner_id', 'text')
+addColumn('users', 'agent', 'text') // helpers only: JSON AgentInfo (server/agents.ts)
+// People who linked a helper: their IANA time zone, for their helpers' ring hours. Null for everyone else.
+addColumn('users', 'tz', 'text')
+addColumn('invites', 'agent', 'integer') // 1 on a 10-minute helper link, null on person invites
+
 // Secrets live in the DB (on the volume) so a fresh deploy needs no config;
 // an env var with the same name overrides.
 export function setting(key: string, make: () => string): string {
@@ -129,6 +136,8 @@ export function setting(key: string, make: () => string): string {
 }
 
 export const SESSION_SECRET = setting('SESSION_SECRET', () => randomBytes(32).toString('hex'))
+
+export const userExists = (id: string) => !!db.prepare('select 1 from users where id = ? and deleted_at is null').get(id)
 
 export const isMember = (convId: string, userId: string) =>
   !!db.prepare('select 1 from members where conv_id = ? and user_id = ?').get(convId, userId)

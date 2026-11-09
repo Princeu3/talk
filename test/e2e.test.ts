@@ -3,16 +3,18 @@
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn, type ChildProcess } from 'node:child_process'
+import { createHmac, randomBytes } from 'node:crypto'
 import { createServer } from 'node:http'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { io as connect, type Socket } from 'socket.io-client'
 import * as c from '../src/lib/crypto.ts'
 import { blocked, parseHead } from '../server/unfurl.ts'
 import type { GroupCall, Me, Message, MessageBody, ReactionBody } from '../shared/types.ts'
 
-const PORT = 4000 + Math.floor(Math.random() * 1000)
+const PORT = 4200 + Math.floor(Math.random() * 800) // skips fetch's bad ports 4045 and 4190
 const BASE = `http://localhost:${PORT}`
 const dataDir = mkdtempSync(path.join(tmpdir(), 'talk-test-'))
 let server: ChildProcess
@@ -63,13 +65,16 @@ interface Client {
   name: string
   ident: c.Identity
   cookie: string
+  token?: string // helpers: a bearer token, never a cookie
 }
+
+const authHeader = (cl: Client): Record<string, string> => (cl.token ? { authorization: `Bearer ${cl.token}` } : { cookie: cl.cookie })
 
 const api = async (cl: Client | null, method: string, url: string, body?: unknown, raw?: Uint8Array) => {
   const r = await fetch(BASE + url, {
     method,
     headers: {
-      ...(cl ? { cookie: cl.cookie } : {}),
+      ...(cl ? authHeader(cl) : {}),
       'content-type': raw ? 'application/octet-stream' : 'application/json',
     },
     body: (raw as BodyInit | undefined) ?? (body ? JSON.stringify(body) : undefined),
@@ -87,9 +92,9 @@ async function register(name: string, invite: string): Promise<Client> {
 
 const me = async (cl: Client) => (await (await api(cl, 'GET', '/api/me')).r.json()) as Me
 const invite = async (cl: Client) => (await (await api(cl, 'POST', '/api/invites')).r.json()).code as string
-const socket = (cl: Client, v = 1) =>
+const socket = (cl: Client, v = 1, auth?: Record<string, string>) =>
   new Promise<Socket>((resolve, reject) => {
-    const s = connect(BASE, { extraHeaders: { cookie: cl.cookie }, transports: ['websocket'], query: { v: String(v) } })
+    const s = connect(BASE, { extraHeaders: authHeader(cl), transports: ['websocket'], query: { v: String(v) }, auth })
     sockets.push(s)
     s.on('connect', () => resolve(s))
     s.on('connect_error', reject)
@@ -576,4 +581,318 @@ test('safety code is stable and short', async () => {
   const code = await c.safetyCode(id.publicKey)
   assert.match(code, /^\d\d( \d\d){5}$/)
   assert.equal(code, await c.safetyCode(id.publicKey))
+})
+
+// --- helpers (talkline): owner-only accounts with a bearer token ---
+
+// Ring hours are 08:00–22:00 where the owner is. A day zone's hour is in [9, 21) and a night zone's in [23, 7);
+// these zones sit at most 6 h apart (5.5 in northern winter), so both exist at any time, an hour or more from either edge.
+const hourIn = (tz: string) => Number(new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: 'numeric', hourCycle: 'h23' }).format(Date.now()))
+const ZONES = ['Pacific/Kiritimati', 'Asia/Tokyo', 'Asia/Kolkata', 'Europe/London', 'America/New_York']
+const DAY = ZONES.find((z) => hourIn(z) >= 9 && hourIn(z) < 21)!
+const NIGHT = ZONES.find((z) => hourIn(z) >= 23 || hourIn(z) < 7)!
+
+const proofFor = (secret: Uint8Array, pubkey: string) => createHmac('sha256', secret).update(`talk-pair-v1:${pubkey}`).digest('base64url')
+
+// Pairs a helper as talkline does: its owner's link, a key of its own, a proof that it holds the link's secret.
+async function helper(owner: Client, name: string, tz = DAY): Promise<Client> {
+  const link = await api(owner, 'POST', '/api/invites', { agent: true, tz })
+  assert.equal(link.status, 200)
+  const { code } = await link.r.json()
+  const ident = await c.deriveIdentity(name, `${name} ${crypto.randomUUID()}`, 1000)
+  const res = await api(null, 'POST', '/api/agents', { code, name, pubkey: ident.publicKey, proof: proofFor(randomBytes(32), ident.publicKey), where: 'test-mac' })
+  assert.equal(res.status, 200)
+  const { id, token } = await res.r.json()
+  return { id, name, ident, cookie: '', token }
+}
+
+// Allow: the owner opens a DM with the helper.
+async function allow(owner: Client, h: Client) {
+  const dm = await createConv(owner, 'dm', [owner, h])
+  assert.equal(dm.res.status, 200)
+  return dm.id
+}
+
+// A text from the helper, with a cid as talkline sends it. Its id names an ask for a ring.
+const ask = async (h: Client, s: Socket, convId: string) =>
+  ((await s.emitWithAck('send', { convId, body: await seal(h, convId, { from: h.id, text: 'Deploy?' }), cid: crypto.randomUUID() })).message as Message).id
+const ring = (s: Socket, convId: string, ask?: number): Promise<{ id?: string; error?: string }> => s.emitWithAck('call:start', { convId, kind: 'audio', ask })
+const refused = async (res: { status: number; r: Response }, error: string, status = 403) =>
+  assert.deepEqual([res.status, (await res.r.json()).error], [status, error])
+
+test('helper link: 10 minutes, one use, never a person invite', async () => {
+  const alice = await login('Alice')
+  const [owen, mallory] = await Promise.all(['Owen', 'Mallory'].map(async (n) => register(n, await invite(alice))))
+  await refused(await api(owen, 'POST', '/api/invites', { agent: true, tz: 'Mars/Olympus' }), 'bad request', 400)
+  const link = await (await api(owen, 'POST', '/api/invites', { agent: true, tz: DAY })).r.json()
+  const left = link.expiresAt - Date.now()
+  assert.ok(left > 9 * 60_000 && left <= 10 * 60_000, `${left} ms`)
+
+  const ident = await c.deriveIdentity('Claude AI', 'helper passphrase', 1000)
+  assert.equal((await api(null, 'POST', '/api/register', { invite: link.code, name: 'Sneaky', pubkey: ident.publicKey, auth: ident.auth })).status, 403)
+  const proof = proofFor(randomBytes(32), ident.publicKey)
+  const personCode = await invite(owen)
+  await refused(await api(null, 'POST', '/api/agents', { code: personCode, name: 'Spare AI', pubkey: ident.publicKey, proof, where: 'studio.local' }), 'This link is not valid or has expired.')
+  await register('Iris', personCode) // still a person invite
+  const pair = (name: string) => api(null, 'POST', '/api/agents', { code: link.code, name, pubkey: ident.publicKey, proof, where: 'studio.local' })
+  await refused(await api(null, 'POST', '/api/agents', {}), 'bad request', 400)
+  await refused(await pair('Claude'), 'Helper names end in “AI”, like “Claude AI”.', 400)
+  const paired = await pair('Claude AI')
+  assert.equal(paired.status, 200, 'the link still works after a refused name')
+  const { id, token } = await paired.r.json()
+  assert.match(token, /^[\w-]{43}$/)
+  await refused(await pair('Claude AI'), 'This link is not valid or has expired.')
+
+  // pending: its owner sees it under agents, nobody lists it as a user, and it sees only itself
+  const owners = await me(owen)
+  assert.deepEqual(owners.agents, [{ id, name: 'Claude AI', pubkey: ident.publicKey, where: 'studio.local', proof, invite: link.code, activeAt: null }])
+  assert.ok(!owners.users.some((u) => u.id === id))
+  const strangers = await me(mallory)
+  assert.ok(!strangers.users.some((u) => u.id === id))
+  assert.deepEqual(strangers.agents, [])
+  const its = await me({ id, name: 'Claude AI', ident, cookie: '', token })
+  assert.deepEqual(its.users, [{ id, name: 'Claude AI', pubkey: ident.publicKey, owner: owen.id }])
+  assert.equal(its.agents, undefined)
+})
+
+test('helper token: HTTP and socket, a bad one is signed out', async () => {
+  const paula = await register('Paula', await invite(await login('Alice')))
+  const h = await helper(paula, 'Penny AI')
+  assert.equal((await api(h, 'GET', '/api/me')).status, 200)
+  const bad = { ...h, token: randomBytes(32).toString('base64url') }
+  await refused(await api(bad, 'GET', '/api/me'), 'signed out', 401)
+  await assert.rejects(socket(bad), /signed out/)
+  assert.ok((await socket(h)).connected)
+})
+
+test('reach: only the owner, one to one', async () => {
+  const alice = await login('Alice')
+  const mallory = await login('Mallory')
+  const rita = await register('Rita', await invite(alice))
+  const h = await helper(rita, 'Robin AI')
+  const ONLY = 'Helpers chat only with their owner.'
+  const ONE_TO_ONE = 'A helper chats only with its owner, one to one.'
+
+  // the helper starts nothing: no chats, invites, pushes, TURN or link previews
+  await refused((await createConv(h, 'dm', [h, rita])).res, ONLY)
+  for (const [method, url] of [['POST', '/api/invites'], ['POST', '/api/push'], ['POST', '/api/devices'], ['GET', '/api/ice'], ['POST', '/api/unfurl']])
+    await refused(await api(h, method, url), ONLY)
+  // nobody else chats with it, and its owner only one to one
+  await refused((await createConv(mallory, 'dm', [mallory, h])).res, ONE_TO_ONE)
+  await refused((await createConv(rita, 'group', [rita, mallory, h], 'Crew')).res, ONE_TO_ONE)
+  const group = await createConv(rita, 'group', [rita, mallory], 'Crew')
+  assert.equal(group.res.status, 200)
+  await refused(await api(rita, 'POST', `/api/conversations/${group.id}/members`, { userId: h.id, wrappedKey: 'A'.repeat(80) }), 'Helpers can’t join group chats.')
+
+  // the owner's DM is the approval, and still nobody else lists the helper
+  const dm = await allow(rita, h)
+  assert.equal((await api(h, 'GET', `/api/conversations/${dm}/messages`)).status, 200, 'the gate takes exact paths')
+  assert.equal((await api(h, 'POST', `/api/conversations/${dm}/read`, { upTo: 0 })).status, 200)
+  assert.ok(!(await me(mallory)).users.some((u) => u.id === h.id))
+  assert.equal((await me(rita)).users.find((u) => u.id === h.id)?.owner, rita.id)
+  assert.deepEqual((await me(h)).users.map((u) => u.id).sort(), [h.id, rita.id].sort())
+})
+
+test('remove: locks out in under a second, keeps the chat', async () => {
+  const alice = await login('Alice')
+  const mallory = await login('Mallory')
+  const nora = await register('Nora', await invite(alice))
+  const h = await helper(nora, 'Nimbus AI')
+  const dm = await allow(nora, h)
+  await refused(await api(mallory, 'DELETE', `/api/agents/${h.id}`), 'not found', 404)
+
+  // a live ring ends and the helper's socket drops, both within a second of Remove
+  const [so, sh] = await Promise.all([socket(nora), socket(h)])
+  const said = await ask(h, sh, dm)
+  const rung = next(so, 'call:ring')
+  const { id: callId } = await ring(sh, dm, said)
+  assert.ok(callId)
+  await rung
+  const sent = Date.now()
+  const dropped = next(sh, 'disconnect').then(() => Date.now() - sent)
+  const ended = next<{ id: string; reason: string }>(so, 'call:end').then((e) => (assert.deepEqual(e, { id: callId, reason: 'cancelled' }), Date.now() - sent))
+  assert.equal((await api(nora, 'DELETE', `/api/agents/${h.id}`)).status, 200)
+  for (const ms of await Promise.all([dropped, ended])) assert.ok(ms < 1000, `${ms} ms`)
+  await refused(await api(h, 'GET', '/api/me'), 'signed out', 401)
+
+  // the chat stays: its messages, and the helper as a deleted account that still carries its owner
+  assert.ok((await history(nora, dm)).some((m) => m.id === said))
+  const after = await me(nora)
+  assert.deepEqual(after.users.find((u) => u.id === h.id), { id: h.id, name: 'Deleted account', pubkey: h.ident.publicKey, deleted: true, owner: nora.id })
+  assert.deepEqual(after.agents, [])
+  assert.equal((await ring(so, dm)).error, 'This account was deleted.')
+
+  // its name is free again, and a helper can remove itself (talkline's unpair)
+  const again = await helper(nora, 'Nimbus AI')
+  assert.equal((await api(again, 'DELETE', '/api/me')).status, 200)
+  assert.equal((await api(again, 'GET', '/api/me')).status, 401)
+  assert.deepEqual((await me(nora)).agents, [])
+
+  // deleting an owner's account removes their helpers, in one transaction: when a helper's write
+  // fails (a full disk, say), the owner keeps the account and can try again
+  const olive = await register('Olive', await invite(alice))
+  const h2 = await helper(olive, 'Orbit AI')
+  await allow(olive, h2)
+  const file = new DatabaseSync(path.join(dataDir, 'talk.db'))
+  file.exec(`create trigger fail_helper before update of deleted_at on users when old.owner_id is not null
+             begin select raise(abort, 'test: injected write failure'); end`)
+  assert.equal((await api(olive, 'DELETE', '/api/me', { auth: olive.ident.auth })).status, 500)
+  file.exec('drop trigger fail_helper')
+  file.close()
+  assert.equal((await api(olive, 'GET', '/api/me')).status, 200)
+  assert.equal((await api(h2, 'GET', '/api/me')).status, 200)
+  const s2 = await socket(h2)
+  const gone = next(s2, 'disconnect')
+  assert.equal((await api(olive, 'DELETE', '/api/me', { auth: olive.ident.auth })).status, 200)
+  await gone
+  assert.equal((await api(h2, 'GET', '/api/me')).status, 401)
+})
+
+test('pause and push budgets', async () => {
+  const alice = await login('Alice')
+  const ruth = await register('Ruth', await invite(alice))
+  const h = await helper(ruth, 'Ranger AI')
+  const dm = await allow(ruth, h)
+  const token = randomBytes(32).toString('hex') // fresh: a token moves to whoever registers it last
+  assert.equal((await api(ruth, 'POST', '/api/devices', { token, kind: 'alert', env: 'sandbox' })).status, 200)
+  const sh = await socket(h)
+  const body = await seal(h, dm, { from: h.id, text: 'Build done' })
+  const send = (s: Socket, convId: string, b: string, extra = {}): Promise<{ message?: Message; error?: string }> =>
+    s.emitWithAck('send', { convId, body: b, cid: crypto.randomUUID(), ...extra })
+  const pushesFor = (ids: number[]) => relayed.filter((p) => ids.includes(p.messageId as number))
+
+  // Pause: the owner mutes the chat. No push, no ring.
+  assert.equal((await api(ruth, 'PATCH', `/api/conversations/${dm}/me`, { muted: true })).status, 200)
+  const paused = (await send(sh, dm, body)).message!
+  assert.equal((await ring(sh, dm, paused.id)).error, 'Paused in Talk: no rings.')
+
+  // Resume: 7 sends in a minute buzz 6 times (the paused one didn't count), and the first goes time-sensitive
+  assert.equal((await api(ruth, 'PATCH', `/api/conversations/${dm}/me`, { muted: false })).status, 200)
+  const ids = [(await send(sh, dm, body, { level: 'time-sensitive' })).message!.id]
+  for (let i = 0; i < 6; i++) ids.push((await send(sh, dm, body)).message!.id)
+  assert.deepEqual(await pushed((p) => p.messageId === ids[0]), { token, env: 'sandbox', type: 'message', convId: dm, messageId: ids[0], level: 'time-sensitive' })
+  for (let i = 0; i < 50 && pushesFor(ids).length < 6; i++) await new Promise((r) => setTimeout(r, 20))
+  await new Promise((r) => setTimeout(r, 300))
+  assert.equal(pushesFor(ids).length, 6)
+  assert.equal(pushesFor([paused.id]).length, 0, 'paused: no push')
+
+  assert.equal((await send(sh, dm, body, { level: 'loud' })).error, 'bad request')
+  assert.equal((await sh.emitWithAck('send', { convId: dm, body })).error, 'bad request', 'a helper always sends a cid')
+
+  // at night where the owner is, time-sensitive is a plain push
+  const tess = await register('Tess', await invite(alice))
+  const owl = await helper(tess, 'Owl AI', NIGHT)
+  const dm2 = await allow(tess, owl)
+  const token2 = randomBytes(32).toString('hex')
+  assert.equal((await api(tess, 'POST', '/api/devices', { token: token2, kind: 'alert', env: 'sandbox' })).status, 200)
+  const late = (await send(await socket(owl), dm2, await seal(owl, dm2, { from: owl.id, text: 'Done' }), { level: 'time-sensitive' })).message!
+  assert.deepEqual(await pushed((p) => p.messageId === late.id), { token: token2, env: 'sandbox', type: 'message', convId: dm2, messageId: late.id })
+
+  // a helper sends at most 60 a minute
+  const chatty = await helper(tess, 'Chatty AI')
+  const dm3 = await allow(tess, chatty)
+  const sc = await socket(chatty)
+  const tick = await seal(chatty, dm3, { from: chatty.id, text: 'tick' })
+  for (let i = 0; i < 60; i++) assert.ok((await send(sc, dm3, tick, { quiet: true })).message)
+  assert.equal((await send(sc, dm3, tick, { quiet: true })).error, 'Slow down: a helper can send 60 messages a minute.')
+})
+
+// The timeout fails a missing call:end instead of waiting on it forever.
+test('pause ends a helper’s live ring', { timeout: 10_000 }, async () => {
+  const pia = await register('Pia', await invite(await login('Alice')))
+  const h = await helper(pia, 'Pip AI')
+  const dm = await allow(pia, h)
+  const [so, sh] = await Promise.all([socket(pia), socket(h)])
+  const rung = next(so, 'call:ring')
+  const { id } = await ring(sh, dm, await ask(h, sh, dm))
+  assert.ok(id)
+  await rung
+  const sent = Date.now()
+  const ended = next<{ id: string; reason: string }>(so, 'call:end')
+  assert.equal((await api(pia, 'PATCH', `/api/conversations/${dm}/me`, { muted: true })).status, 200)
+  assert.deepEqual(await ended, { id, reason: 'cancelled' })
+  const ms = Date.now() - sent
+  assert.ok(ms < 1000, `${ms} ms`)
+})
+
+// Its own owner: 'pause and push budgets' spends Ruth's 6 loud pushes a minute.
+test('a helper’s loud send reaches the phone while a tab is open', async () => {
+  const alice = await login('Alice')
+  const quinn = await register('Quinn', await invite(alice))
+  const h = await helper(quinn, 'Quill AI')
+  const dm = await allow(quinn, h)
+  const token = randomBytes(32).toString('hex')
+  assert.equal((await api(quinn, 'POST', '/api/devices', { token, kind: 'alert', env: 'sandbox' })).status, 200)
+  const tab = await socket(quinn)
+  tab.emit('active', true) // a Talk tab in front on the Mac
+  const said = (await (await socket(h)).emitWithAck('send', { convId: dm, body: await seal(h, dm, { from: h.id, text: 'Tests pass' }), cid: crypto.randomUUID() })).message as Message
+  assert.deepEqual(await pushed((p) => p.messageId === said.id), { token, env: 'sandbox', type: 'message', convId: dm, messageId: said.id })
+
+  // a person's message still leaves it to the open tab
+  const withAlice = (await createConv(alice, 'dm', [alice, quinn])).id
+  const hi = (await (await socket(alice)).emitWithAck('send', { convId: withAlice, body: await seal(alice, withAlice, { from: alice.id, text: 'hi' }) })).message as Message
+  await new Promise((r) => setTimeout(r, 300))
+  assert.ok(!relayed.some((p) => p.messageId === hi.id), 'no push for a person’s message')
+})
+
+test('ring rules', async () => {
+  const alice = await login('Alice')
+  const uma = await register('Uma', await invite(alice))
+  const h = await helper(uma, 'Umber AI')
+  const dm = await allow(uma, h)
+  const [so, sh] = await Promise.all([socket(uma), socket(h)])
+
+  assert.equal((await ring(sh, dm)).error, 'Say which ask this ring is for.')
+  const first = await ask(h, sh, dm)
+  const rung = next<{ id: string }>(so, 'call:ring')
+  const { id } = await ring(sh, dm, first)
+  assert.equal((await rung).id, id)
+  const declined = next<{ reason: string }>(sh, 'call:end')
+  so.emit('call:hangup', { id })
+  assert.equal((await declined).reason, 'declined')
+
+  assert.equal((await ring(sh, dm, first)).error, 'This ask already rang.')
+  assert.equal((await ring(sh, dm, await ask(h, sh, dm))).error, 'Your owner didn’t take the last ring. No more until they write to you.')
+  await so.emitWithAck('send', { convId: dm, body: await seal(uma, dm, { from: uma.id, text: 'What is it?' }), cid: crypto.randomUUID() })
+  assert.equal((await ring(sh, dm, await ask(h, sh, dm))).error, 'A helper rang your owner less than 10 minutes ago.')
+
+  // the gap is the owner's, across all their helpers
+  const h2 = await helper(uma, 'Umbra AI')
+  const dm2 = await allow(uma, h2)
+  const sh2 = await socket(h2)
+  assert.equal((await ring(sh2, dm2, await ask(h2, sh2, dm2))).error, 'A helper rang your owner less than 10 minutes ago.')
+
+  // the owner's web app connects from a night zone, and ring hours follow it
+  await socket(uma, 1, { tz: NIGHT })
+  assert.equal((await ring(sh2, dm2, await ask(h2, sh2, dm2))).error, 'Outside ring hours: 08:00–22:00 where your owner is.')
+})
+
+test('a ring stops at 45 s and an unanswered one counts as not taken', { timeout: 60_000 }, async () => {
+  const alice = await login('Alice')
+  const vic = await register('Vic', await invite(alice))
+  const h = await helper(vic, 'Vesper AI')
+  const dm = await allow(vic, h)
+  const [so, sh] = await Promise.all([socket(vic), socket(h)])
+  // alongside, another owner's helper rings, and its socket drops for good mid-ring
+  const wes = await register('Wes', await invite(alice))
+  const h2 = await helper(wes, 'Wisp AI')
+  const dm2 = await allow(wes, h2)
+  const [so2, sh2] = await Promise.all([socket(wes), socket(h2)])
+  const ask2 = await ask(h2, sh2, dm2)
+  const first = await ask(h, sh, dm)
+  const started = Date.now()
+  const missed = next<{ id: string; reason: string }>(so, 'call:end').then((e) => ({ ...e, ms: Date.now() - started }))
+  const missed2 = next<{ id: string; reason: string }>(so2, 'call:end').then((e) => ({ ...e, ms: Date.now() - started }))
+  const { id } = await ring(sh, dm, first)
+  const { id: id2 } = await ring(sh2, dm2, ask2)
+  await new Promise((r) => setTimeout(r, 30_000))
+  assert.equal((await sh.emitWithAck('call:rejoin', { id })).id, id, 'the caller is back mid-ring')
+  sh2.disconnect() // its 30 s grace would outlast the ring
+  const end = await missed
+  assert.deepEqual([end.id, end.reason], [id, 'missed'])
+  assert.ok(end.ms < 46_000, `${end.ms} ms`)
+  const end2 = await missed2
+  assert.deepEqual([end2.id, end2.reason], [id2, 'missed'], 'a dropped caller’s ring still ends at 45 s')
+  assert.ok(end2.ms < 46_000, `${end2.ms} ms`)
+  assert.equal((await ring(sh, dm, await ask(h, sh, dm))).error, 'Your owner didn’t take the last ring. No more until they write to you.')
 })

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import type { Decrypted, Talk } from '../lib/useTalk.ts'
-import { convName, fold, preview, shortTime, snippet, typingLabel, userName } from '../lib/format.ts'
+import { convName, fold, isHelper, preview, shortTime, snippet, typingLabel, userName } from '../lib/format.ts'
 import { BellOff, Close, Compose, Lock, Phone, Pin, Search, Settings, Video } from './icons.tsx'
 
 // Olive to soft white, so every avatar sits inside the app palette in both themes.
@@ -27,6 +27,15 @@ export function Avatar({ name, size = 44 }: { name: string; size?: number }) {
     </svg>
   )
 }
+
+// Next to a helper's name. Anyone can end a name in "AI", but only the server sets `owner`, so this badge is
+// the trust signal: screen readers hear it as "helper", since a spoken "AI" would sound like part of the name.
+export const AiBadge = () => (
+  <span className="ml-1.5 shrink-0 rounded-full bg-fill px-1.5 py-px text-xs font-semibold text-on-fill">
+    <span aria-hidden>AI</span>
+    <span className="sr-only">, helper</span>
+  </span>
+)
 
 export const iconButton = 'pressable flex h-11 w-11 shrink-0 items-center justify-center rounded-full text-accent hover:bg-raised'
 
@@ -236,6 +245,7 @@ export default function Sidebar({ talk, onNew, onSettings, onJoin }: { talk: Tal
             const who = !last || last.system ? '' : last.senderId === me.user.id ? 'You: ' : conv.kind === 'group' ? `${userName(me, last.senderId)}: ` : ''
             const join = conv.call && !conv.call.peers.includes(me.user.id) ? conv.call : null
             const typers = talk.typers[conv.id] ?? []
+            const helper = isHelper(me, conv)
             return (
               <li key={conv.id} className="relative">
                 <button
@@ -246,7 +256,10 @@ export default function Sidebar({ talk, onNew, onSettings, onJoin }: { talk: Tal
                   <Avatar name={name} size={48} />
                   <div className="min-w-0 flex-1">
                     <div className="flex items-baseline justify-between gap-2">
-                      <span className={`truncate ${conv.unread ? 'font-semibold' : 'font-medium'}`}>{name}</span>
+                      <span className="flex min-w-0 items-center">
+                        <span className={`truncate ${conv.unread ? 'font-semibold' : 'font-medium'}`}>{name}</span>
+                        {helper && <AiBadge />}
+                      </span>
                       {conv.lastMessageAt && (
                         <time className={`shrink-0 text-xs tabular-nums ${conv.unread ? 'font-semibold text-accent' : 'text-mut'}`}>
                           {shortTime(conv.lastMessageAt)}

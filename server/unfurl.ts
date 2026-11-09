@@ -165,12 +165,13 @@ export async function unfurl(raw: string): Promise<Unfurled> {
   return value
 }
 
+// A sliding window: true, and it counts, while `id` has fewer than `max` hits in the last `ms`.
+export const hit = (m: Map<string, number[]>, id: string, ms: number, max: number, now = Date.now()) => {
+  const recent = (m.get(id) ?? []).filter((t) => now - t < ms)
+  m.set(id, recent.length < max ? [...recent, now] : recent)
+  return recent.length < max
+}
+
 // 20 previews a minute per account.
 const hits = new Map<string, number[]>()
-export function allow(userId: string) {
-  const now = Date.now()
-  const recent = (hits.get(userId) ?? []).filter((t) => now - t < 60_000)
-  if (recent.length >= 20) return false
-  hits.set(userId, [...recent, now])
-  return true
-}
+export const allow = (userId: string) => hit(hits, userId, 60_000, 20)

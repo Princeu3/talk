@@ -6,7 +6,7 @@ Node 24+ runs `server/*.ts` directly (type stripping): imports need `.ts` extens
 - `npm run dev`: server on :3000 plus Vite on :5173 (needs `SETUP_CODE` for a first account)
 - `npm run check`: typecheck
 - `npm test`: end-to-end tests (spawns the server)
-- `node talkline/cli.ts <command>`: the Claude Code bridge (Phase 0): pair, notify, ask, hooks; see `talkline/README.md`
+- `node talkline/cli.ts <command>`: the Claude Code bridge (Phase 1): pair, notify, ask, hooks; see `talkline/README.md`
 - `railway up`: deploy the live server by hand (project `talk`, volume at `/data`)
 - Pushes to `master` deploy the push relay (`talk-push`) and the demo server (`talk-demo`, App Review uses it) through Railway's GitHub integration; GitHub Actions runs CI (`.github/workflows/ci.yml`)
 - `railway up relay --path-as-root -p cfe9ad88-4f60-417e-808b-bfe41b9d4da4 -e production -s relay`: deploy the push relay (project `talk-push` in the personal Railway workspace, never the work one); plain `railway up .` from `relay/` fails with "prefix not found"

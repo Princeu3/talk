@@ -4,7 +4,7 @@ import { clearIdentity, loadIdentity, type StoredIdentity } from './lib/keystore
 import { pushSupported, subscribe } from './lib/push.ts'
 import { useTalk } from './lib/useTalk.ts'
 import { useCall } from './lib/useCall.ts'
-import { convName, userName } from './lib/format.ts'
+import { convName, isHelper, userName } from './lib/format.ts'
 import Auth from './components/Auth.tsx'
 import Sidebar from './components/Sidebar.tsx'
 import Chat from './components/Chat.tsx'
@@ -73,10 +73,10 @@ function Main({ ident, onSignOut }: { ident: StoredIdentity; onSignOut: () => vo
     if (live) calls.join(convId, live)
   }
   // In a group with a call on, the call buttons join it. A DM whose other account
-  // was deleted has nobody to call, so it gets no buttons.
+  // was deleted has nobody to call, and a helper takes no calls, so neither gets buttons.
   const active = me.conversations.find((c) => c.id === talk.activeId)
   const peer = active?.members.find((u) => u !== me.user.id)
-  const startCall = !active || (active.kind !== 'group' && !peer) ? undefined : (kind: CallKind) => {
+  const startCall = !active || (active.kind !== 'group' && !peer) || isHelper(me, active) ? undefined : (kind: CallKind) => {
     if (active.call) return joinCall(active.id)
     if (active.kind === 'group') calls.start(active.id, kind)
     else calls.start(active.id, kind, peer)

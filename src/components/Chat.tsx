@@ -5,9 +5,10 @@ import {
 import type { Talk, Decrypted } from '../lib/useTalk.ts'
 import { AUTO_LOAD, unfurl } from '../lib/useTalk.ts'
 import type { CallKind, FileRef, LinkPreview, Voice } from '../../shared/types.ts'
-import { callNoun, callSummary, convName, dayLabel, fileSize, host, preview, typingLabel, URL_RE, userName, who } from '../lib/format.ts'
-import { canRecord, startRecording, type Recording } from '../lib/voice.ts'
-import { Avatar } from './Sidebar.tsx'
+import { callNoun, callSummary, convName, dayLabel, fileSize, host, isHelper, preview, typingLabel, URL_RE, userName, who } from '../lib/format.ts'
+import { canRecord, clock, startRecording, type Recording } from '../lib/voice.ts'
+import { useSecondTick } from './Call.tsx'
+import { AiBadge, Avatar } from './Sidebar.tsx'
 import { Back, Check, Clip, Close, Copy, FileIcon, Flag, Forward, LinkIcon, Lock, Mic, More, Pencil, Phone, Reply, Send, Trash, Video } from './icons.tsx'
 import { iconButton } from './Sidebar.tsx'
 import { VoicePlayer, VoiceRecorder } from './Voice.tsx'
@@ -144,6 +145,31 @@ function Attachment({ talk, convId, file, onZoom }: { talk: Talk; convId: string
   )
 }
 
+// Under a helper's open ask: the typed answer talkline reads ("yes kxqzm"), in one tap. They go when
+// the ask expires, or when talkline's closing edit ("Approved 14:03") drops `ask`. A removed helper
+// reads no answer and sends no closing edit, so its asks get no buttons.
+function AskButtons({ talk, convId, code, expires }: { talk: Talk; convId: string; code: string; expires: number }) {
+  const [sent, setSent] = useState(false)
+  const left = Math.ceil((expires - Date.now()) / 1000)
+  useSecondTick(left > 0)
+  if (left <= 0) return null
+  const answer = (word: 'yes' | 'no') => {
+    setSent(true)
+    talk.send(convId, { text: `${word} ${code}` }).catch(() => setSent(false))
+  }
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <button onClick={() => answer('yes')} disabled={sent} className="pressable min-h-9 rounded-full bg-fill px-3.5 text-sm font-semibold text-on-fill disabled:opacity-40">
+        Approve
+      </button>
+      <button onClick={() => answer('no')} disabled={sent} className="pressable min-h-9 rounded-full bg-raised px-3.5 text-sm font-semibold text-danger disabled:opacity-40">
+        Deny
+      </button>
+      <span className="text-xs tabular-nums text-ink/80">{clock(left)} left</span>
+    </div>
+  )
+}
+
 // Bubbles in one run from the same sender share a column; inner corners tighten.
 // Full class names: Tailwind only generates classes it can read in the source.
 function corners(mine: boolean, first: boolean, last: boolean) {
@@ -213,6 +239,9 @@ function Bubble({ m, mine, first, last, talk, onCall, onZoom, onJump }: {
       )}
       {c.files?.map((f) => <Attachment key={f.id} talk={talk} convId={m.convId} file={f} onZoom={onZoom} />)}
       {c.text && <span><Linkified text={c.text} /></span>}
+      {c.ask && /^[a-km-z]{5}$/.test(c.ask.code) && typeof c.ask.expires === 'number' && !mine && !m.forged && me.users.some((u) => u.id === m.senderId && !!u.owner && !u.deleted) && (
+        <AskButtons talk={talk} convId={m.convId} code={c.ask.code} expires={c.ask.expires} />
+      )}
       {c.preview && <LinkCard p={c.preview} />}
       {m.forged && <span className={`text-xs ${mine ? '' : 'text-danger'}`}>Warning: the sender could not be verified</span>}
     </div>
@@ -442,6 +471,7 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
 
   if (!conv) return null
   const name = convName(me, conv)
+  const helper = isHelper(me, conv)
 
   const cancelCompose = () => {
     if (editing) setText('')
@@ -599,10 +629,13 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
         <button onClick={onBack} aria-label="Back to chats" className={`${iconButton} md:hidden`}>
           <Back />
         </button>
-        <button onClick={() => setInfo(true)} aria-label={`${name}: chat info`} className="flex min-h-11 min-w-0 flex-1 items-center gap-3 rounded-2xl px-1 text-left hover:bg-raised/60 md:px-2">
+        <button onClick={() => setInfo(true)} aria-label={`${name}${helper ? ', helper' : ''}: chat info`} className="flex min-h-11 min-w-0 flex-1 items-center gap-3 rounded-2xl px-1 text-left hover:bg-raised/60 md:px-2">
           <Avatar name={name} size={36} />
           <div className="min-w-0">
-            <h2 className="truncate font-semibold leading-tight">{name}</h2>
+            <h2 className="flex items-center font-semibold leading-tight">
+              <span className="truncate">{name}</span>
+              {helper && <AiBadge />}
+            </h2>
             <p className={`truncate text-xs ${typers.length ? 'text-accent' : 'text-mut'}`}>
               {typers.length
                 ? typingLabel(me, conv, typers)
@@ -610,12 +643,17 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
             </p>
           </div>
         </button>
-        <button onClick={() => onCall?.('audio')} disabled={!onCall} aria-label="Voice call" className={iconButton}>
-          <Phone size={22} />
-        </button>
-        <button onClick={() => onCall?.('video')} disabled={!onCall} aria-label="Video call" className={iconButton}>
-          <Video size={24} />
-        </button>
+        {/* a helper takes no calls */}
+        {!helper && (
+          <>
+            <button onClick={() => onCall?.('audio')} disabled={!onCall} aria-label="Voice call" className={iconButton}>
+              <Phone size={22} />
+            </button>
+            <button onClick={() => onCall?.('video')} disabled={!onCall} aria-label="Video call" className={iconButton}>
+              <Video size={24} />
+            </button>
+          </>
+        )}
       </header>
       {conv.call && (
         <button onClick={() => onJoin(convId)} className="flex min-h-11 items-center gap-2.5 border-t border-line bg-surface px-4 py-1.5 text-left text-sm">

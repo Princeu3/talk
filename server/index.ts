@@ -5,11 +5,12 @@ import { writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Server } from 'socket.io'
-import { db, BLOB_DIR, setting, isMember, memberIds, mutedIds, audience, dmRefusal, kindOf } from './db.ts'
-import { authMatches, hashAuth, setSession, clearSession, userFromCookie, requireUser, throttled, recordFail } from './auth.ts'
-import { vapidPublicKey, saveSubscription, notifyIfAway, toUsers } from './push.ts'
+import { db, BLOB_DIR, setting, isMember, memberIds, mutedIds, audience, dmRefusal, kindOf, userExists } from './db.ts'
+import { authMatches, hashAuth, setSession, clearSession, userFrom, requireUser, throttled, recordFail } from './auth.ts'
+import { vapidPublicKey, saveSubscription, notifyIfAway, toUsers, apns, type Apns } from './push.ts'
 import { callHandlers, callState, groupCall } from './calls.ts'
 import { allow, unfurl } from './unfurl.ts'
+import { budget, ownerOf, validTz, type AgentInfo } from './agents.ts'
 import type { Conversation, Me, Message, Reaction, SendPayload, User } from '../shared/types.ts'
 
 const PORT = Number(process.env.PORT ?? 3000)
@@ -25,7 +26,6 @@ const isAuth = (v: unknown): v is string => typeof v === 'string' && /^[0-9a-f]{
 const isSealed = (v: unknown, max: number): v is string => typeof v === 'string' && v.length <= max && B64.test(v)
 
 const userCount = () => (db.prepare('select count(*) as n from users').get() as { n: number }).n
-const userExists = (id: string) => !!db.prepare('select 1 from users where id = ? and deleted_at is null').get(id)
 // Hides messages from people `?` blocked, in groups (DMs refuse them at send).
 const NOT_BLOCKED = 'sender_id not in (select blocked_id from blocks where user_id = ?)'
 const MESSAGE = 'id, conv_id as convId, sender_id as senderId, body, created_at as createdAt, edited_at as editedAt'
@@ -68,7 +68,7 @@ app.post('/api/register', (req, res) => {
   if (typeof invite !== 'string' || !isName(name) || !isPubkey(pubkey) || !isAuth(auth))
     return void res.status(400).json({ error: 'bad request' })
   const setup = userCount() === 0 && invite === SETUP_CODE
-  const valid = setup || !!db.prepare('select 1 from invites where code = ? and expires_at > ?').get(invite, Date.now())
+  const valid = setup || !!db.prepare('select 1 from invites where code = ? and agent is null and expires_at > ?').get(invite, Date.now())
   if (!valid) return void res.status(403).json({ error: 'This invite is not valid or has expired.' })
   if (db.prepare('select 1 from users where name = ?').get(name))
     return void res.status(409).json({ error: 'That name is taken.' })
@@ -79,6 +79,33 @@ app.post('/api/register', (req, res) => {
   db.prepare('delete from invites where code = ?').run(invite)
   setSession(res, id)
   res.json({ id })
+})
+
+// A helper (talkline) signs up with its owner's 10-minute link and gets a bearer token, shown once.
+// It stays pending until its owner's browser checks the proof and opens a DM with it. No await
+// in here, so the link check and its delete can't interleave: one link makes one helper.
+// shortcut: pending helpers never expire, and Deny removes them; sweep old pending ones if they pile up.
+// shortcut: each helper has one token, with no rotation; add rotation if tokens ever leave the Mac.
+app.post('/api/agents', (req, res) => {
+  const { code, name, pubkey, proof, where } = req.body ?? {}
+  if (typeof code !== 'string' || !isName(name) || !isPubkey(pubkey) || !isPubkey(proof) ||
+      typeof where !== 'string' || !where || where.length > 64 || where.trim() !== where)
+    return void res.status(400).json({ error: 'bad request' })
+  if (!/ AI$/.test(name)) return void res.status(400).json({ error: 'Helper names end in “AI”, like “Claude AI”.' })
+  // Always a person's: helpers can't make links, and deleting a person deletes theirs.
+  const link = db.prepare('select created_by as owner from invites where code = ? and agent is not null and expires_at > ?').get(code, Date.now()) as
+    | { owner: string }
+    | undefined
+  if (!link) return void res.status(403).json({ error: 'This link is not valid or has expired.' })
+  if (db.prepare('select 1 from users where name = ?').get(name)) return void res.status(409).json({ error: 'That name is taken.' })
+  const id = randomUUID()
+  const token = randomBytes(32).toString('base64url')
+  db.prepare('insert into users (id, name, pubkey, auth_hash, created_at, owner_id, agent) values (?, ?, ?, ?, ?, ?, ?)').run(
+    id, name, pubkey, hashAuth(token), Date.now(), link.owner, JSON.stringify({ where, proof, invite: code } satisfies AgentInfo),
+  )
+  db.prepare('delete from invites where code = ?').run(code)
+  sync([link.owner])
+  res.json({ id, token })
 })
 
 app.post('/api/login', (req, res) => {
@@ -103,12 +130,26 @@ app.post('/api/logout', (_req, res) => {
 
 app.use('/api', requireUser, (req, res, next) => (userExists(req.userId) ? next() : void res.status(401).json({ error: 'signed out' })))
 
+// Helpers talk only to their owner: no new chats, invites, pushes, TURN or link previews.
+// Exact paths: app.use would also catch /api/conversations/:id/... (history, read, attachments).
+app.all(['/api/conversations', '/api/invites', '/api/push', '/api/devices', '/api/ice', '/api/unfurl'], (req, res, next) =>
+  ownerOf(req.userId) ? void res.status(403).json({ error: 'Helpers chat only with their owner.' }) : next())
+
 app.get('/api/me', (req, res) => {
   const user = db.prepare('select id, name, pubkey from users where id = ?').get(req.userId) as unknown as User
-  // Deleted accounts keep their public key: keys they sealed for others still open.
+  // People see every person, helpers only their chat members. Both see whoever shares a chat with them,
+  // so every key wrapper stays listed. Deleted accounts keep their public key: keys they sealed for others still open.
+  const myOwner = ownerOf(req.userId)
   const users = (
-    db.prepare(`select id, case when deleted_at is null then name else 'Deleted account' end as name, pubkey, deleted_at as deleted from users order by name`).all() as unknown as User[]
-  ).map(({ deleted, ...u }) => (deleted ? { ...u, deleted: true } : u))
+    db.prepare(
+      `select id, case when deleted_at is null then name else 'Deleted account' end as name, pubkey,
+              deleted_at as deleted, owner_id as owner
+       from users
+       where (owner_id is null and ?2 is null) or id = ?1
+          or id in (select b.user_id from members a join members b on b.conv_id = a.conv_id where a.user_id = ?1)
+       order by name`,
+    ).all(req.userId, myOwner) as unknown as (User & { owner: string | null })[]
+  ).map(({ deleted, owner, ...u }) => ({ ...u, ...(deleted && { deleted: true }), ...(owner && { owner }) }))
   const blocked = (db.prepare('select blocked_id as id from blocks where user_id = ?').all(req.userId) as { id: string }[]).map((r) => r.id)
   const rows = db
     .prepare(
@@ -138,17 +179,31 @@ app.get('/api/me', (req, res) => {
       ...(call && { call }),
     }
   })
-  res.json({ user, users, conversations, blocked, vapidPublicKey } satisfies Me)
+  // shortcut: "last active" is the helper's last message, not its last request; store a time per request if owners need it.
+  // Ids grow with time, and max(id) reads only the (sender_id, cid) index, not every sealed body.
+  const agents = myOwner ? undefined : (db.prepare(
+    `select u.id, u.name, u.pubkey, u.agent, (select created_at from messages where id = (select max(id) from messages where sender_id = u.id)) as activeAt
+     from users u where u.owner_id = ? and u.deleted_at is null order by u.created_at`,
+  ).all(req.userId) as { agent: string }[]).map(({ agent, ...a }) => ({ ...a, ...JSON.parse(agent) }))
+  res.json({ user, users, conversations, blocked, vapidPublicKey, ...(agents && { agents }) } satisfies Me)
 })
 
 // Deletes the account for good: sign-in, devices, memberships and every
 // message it sent. Asks for the passphrase-derived auth again first.
+// A helper removes itself (talkline's unpair): its token is the credential, and its messages stay.
 app.delete('/api/me', (req, res) => {
+  const owner = ownerOf(req.userId)
+  if (owner) {
+    removeAgent(req.userId)
+    sync([owner])
+    return void res.json({ ok: true })
+  }
   const { auth } = req.body ?? {}
   const row = db.prepare('select auth_hash from users where id = ?').get(req.userId) as { auth_hash: string }
   if (!isAuth(auth) || !authMatches(auth, row.auth_hash)) return void res.status(403).json({ error: 'Wrong passphrase.' })
   const convs = (db.prepare('select conv_id as id from members where user_id = ?').all(req.userId) as { id: string }[]).map((r) => r.id)
   const others = new Set(convs.flatMap(memberIds))
+  const helpers = (db.prepare('select id from users where owner_id = ? and deleted_at is null').all(req.userId) as { id: string }[]).map((r) => r.id)
   db.exec('begin')
   try {
     for (const sql of [
@@ -162,22 +217,33 @@ app.delete('/api/me', (req, res) => {
       'delete from reports where reporter_id = ?',
     ]) db.prepare(sql).run(req.userId)
     // shortcut: attachment blobs stay on disk (sealed, now unreachable); sweep orphans if storage matters.
-    db.prepare(`update users set name = id, auth_hash = '', deleted_at = ? where id = ?`).run(Date.now(), req.userId)
+    db.prepare(`update users set name = id, auth_hash = '', deleted_at = ?, tz = null where id = ?`).run(Date.now(), req.userId)
+    // Their helpers go too, as Remove does, in the same transaction: a failed delete leaves none orphaned.
+    db.prepare(`update users set name = id, auth_hash = '', deleted_at = ? where owner_id = ? and deleted_at is null`).run(Date.now(), req.userId)
     db.exec('commit')
   } catch (e) {
     db.exec('rollback')
     throw e
   }
   io.in(`user:${req.userId}`).disconnectSockets(true)
+  for (const h of helpers) {
+    calls.hangUp(h)
+    io.in(`user:${h}`).disconnectSockets(true)
+  }
   sync([...others])
   clearSession(res)
   res.json({ ok: true })
 })
 
+// A person invite (7 days), or with { agent: true, tz } a helper link (10 minutes). The link
+// also stores the owner's zone for ring hours: a bad one is refused, never guessed.
 app.post('/api/invites', (req, res) => {
+  const agent = req.body?.agent === true
+  if (agent && !validTz(req.body.tz)) return void res.status(400).json({ error: 'bad request' })
   const code = randomBytes(12).toString('base64url')
-  const expiresAt = Date.now() + 7 * 24 * 3600 * 1000
-  db.prepare('insert into invites (code, created_by, expires_at) values (?, ?, ?)').run(code, req.userId, expiresAt)
+  const expiresAt = Date.now() + (agent ? 10 * 60_000 : 7 * 24 * 3600 * 1000)
+  if (agent) db.prepare('update users set tz = ? where id = ?').run(req.body.tz, req.userId)
+  db.prepare('insert into invites (code, created_by, expires_at, agent) values (?, ?, ?, ?)').run(code, req.userId, expiresAt, agent ? 1 : null)
   res.json({ code, expiresAt })
 })
 
@@ -279,6 +345,23 @@ app.get('/api/ice', async (_req, res) => {
 
 const sync = (userIds: string[]) => toUsers(io, userIds).emit('sync')
 
+// Remove: the token stops at once, a live ring ends, the sockets drop. Its messages, its chat
+// membership and its key stay, so old messages still open.
+function removeAgent(id: string) {
+  db.prepare(`update users set name = id, auth_hash = '', deleted_at = ? where id = ?`).run(Date.now(), id)
+  calls.hangUp(id)
+  io.in(`user:${id}`).disconnectSockets(true)
+}
+
+// Remove, or Deny a pending helper: its owner only.
+app.delete('/api/agents/:id', (req, res) => {
+  const { id } = req.params
+  if (ownerOf(id) !== req.userId || !userExists(id)) return void res.status(404).json({ error: 'not found' })
+  removeAgent(id)
+  sync([req.userId])
+  res.json({ ok: true })
+})
+
 app.post('/api/conversations', (req, res) => {
   const { id, kind, title, members } = req.body ?? {}
   const list = Array.isArray(members) ? (members as { userId: unknown; wrappedKey: unknown }[]) : []
@@ -289,6 +372,10 @@ app.post('/api/conversations', (req, res) => {
     new Set(ids).size === ids.length && ids.includes(req.userId) &&
     list.every((m) => typeof m.userId === 'string' && userExists(m.userId) && isSealed(m.wrappedKey, 200))
   if (!ok) return void res.status(400).json({ error: 'bad request' })
+  if (ids.some((u) => {
+    const owner = ownerOf(u as string)
+    return owner && (kind !== 'dm' || owner !== req.userId)
+  })) return void res.status(403).json({ error: 'A helper chats only with its owner, one to one.' })
 
   if (kind === 'dm') {
     const other = ids.find((u) => u !== req.userId) as string
@@ -324,6 +411,7 @@ app.post('/api/conversations/:id/members', (req, res) => {
   if (!kind || !isMember(convId, req.userId)) return void res.status(404).json({ error: 'not found' })
   if (kind !== 'group' || typeof userId !== 'string' || !userExists(userId) || isMember(convId, userId) || !isSealed(wrappedKey, 200))
     return void res.status(400).json({ error: 'bad request' })
+  if (ownerOf(userId)) return void res.status(403).json({ error: 'Helpers can’t join group chats.' })
   db.prepare('insert into members (conv_id, user_id, wrapped_key, wrapped_by) values (?, ?, ?, ?)').run(convId, userId, wrappedKey, req.userId)
   sync(memberIds(convId))
   res.json({ ok: true })
@@ -363,6 +451,8 @@ app.patch('/api/conversations/:id/me', (req, res) => {
   db.prepare('update members set muted = coalesce(?, muted), pinned = coalesce(?, pinned) where conv_id = ? and user_id = ?').run(
     muted === undefined ? null : Number(muted), pinned === undefined ? null : Number(pinned), req.params.id, req.userId,
   )
+  // Muting my helper's chat pauses it: a ring that is already going stops too.
+  if (muted === true) for (const u of memberIds(req.params.id)) if (ownerOf(u) === req.userId) calls.hangUp(u)
   sync([req.userId])
   res.json({ ok: true })
 })
@@ -478,9 +568,15 @@ app.get('/api/attachments/:id', (req, res) => {
 // --- realtime ---
 
 io.use((socket, next) => {
-  const id = userFromCookie(socket.handshake.headers.cookie)
-  if (!id || !userExists(id)) return next(new Error('signed out'))
+  const id = userFrom(socket.handshake.headers)
+  const user = id && (db.prepare('select owner_id as owner from users where id = ? and deleted_at is null').get(id) as { owner: string | null } | undefined)
+  if (!user) return next(new Error('signed out'))
+  // The web app's zone, kept only for people who linked a helper: their helpers' ring hours follow it.
+  // shortcut: an owner who travels with only the iPhone keeps the old zone until they open the web app; add a zone picker if that bites.
+  const tz = socket.handshake.auth?.tz
+  if (validTz(tz)) db.prepare('update users set tz = ?1 where id = ?2 and tz is not null and tz != ?1').run(tz, id)
   socket.data.userId = id
+  socket.data.owner = user.owner // a helper's owner, null for a person; it never changes, and Remove drops the socket
   socket.data.active = true
   // The app's protocol version: 2 and up know group calls and the events above.
   socket.data.v = Number(socket.handshake.query.v) || 1
@@ -500,13 +596,18 @@ io.on('connection', (socket) => {
   socket.on('send', (p: SendPayload, ack: (r: { message?: Message; error?: string }) => void) => {
     if (typeof ack !== 'function') return
     if (typeof p?.convId !== 'string' || !isSealed(p.body, 64 * 1024) || !isMember(p.convId, me) ||
-        (p.cid !== undefined && (typeof p.cid !== 'string' || !UUID.test(p.cid))))
+        (p.cid !== undefined && (typeof p.cid !== 'string' || !UUID.test(p.cid))) ||
+        (p.level !== undefined && p.level !== 'time-sensitive'))
       return ack({ error: 'bad request' })
     // A resend (the first ack was lost): ack what's stored, with no second broadcast or push.
     const sent = p.cid && db.prepare(`select ${MESSAGE} from messages where sender_id = ? and cid = ?`).get(me, p.cid) as unknown as Message | undefined
     if (sent) return ack({ message: shaped([sent], me)[0] })
     const refused = dmRefusal(p.convId, me)
     if (refused) return ack({ error: refused })
+    const owner = socket.data.owner as string | null
+    if (owner && !p.cid) return ack({ error: 'bad request' }) // every client of ours sends one; helpers are all new
+    const b = owner ? budget(me, owner, p) : { quiet: !!p.quiet }
+    if (b.error) return ack({ error: b.error })
     const createdAt = Date.now()
     const { lastInsertRowid } = db
       .prepare('insert into messages (conv_id, sender_id, body, created_at, seen, cid) values (?, ?, ?, ?, ?, ?)')
@@ -516,11 +617,14 @@ io.on('connection', (socket) => {
     toUsers(io, to).emit('message', message)
     ack({ message })
 
-    if (p.quiet) return
+    if (b.quiet) return
     const sender = (db.prepare('select name from users where id = ?').get(me) as { name: string }).name
     const muted = mutedIds(p.convId)
-    for (const u of to) if (u !== me && !muted.has(u))
-      notifyIfAway(io, u, { title: sender, body: 'New message', convId: p.convId }, { apns: { type: 'message', convId: p.convId, messageId: message.id } })
+    const push: Apns = { type: 'message', convId: p.convId, messageId: message.id, ...(b.level && { level: b.level }) }
+    for (const u of to) if (u !== me && !muted.has(u)) {
+      notifyIfAway(io, u, { title: sender, body: 'New message', convId: p.convId }, owner ? {} : { apns: push })
+      if (owner) apns(u, push) // a helper's loud send buzzes the phone even with a tab open
+    }
   })
 
   // "I'm typing" for the chat's other members, never stored. Clients send it at

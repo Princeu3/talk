@@ -1,7 +1,7 @@
 // Yes/no questions over Talk: a one-time code, the answer rules, expiry and the
 // urgent ring. Only the owner's own account can answer (`gate` in talk.ts).
 import { randomInt } from 'node:crypto'
-import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, readFileSync } from 'node:fs'
 import { openMessage } from '../src/lib/crypto.ts'
 import type { Me, ReactionBody } from '../shared/types.ts'
 import { api, connect, dmKey, edit, file, gate, history, hhmm, log, react, read, send, type Paired } from './talk.ts'
@@ -16,43 +16,58 @@ export interface AskOptions {
   ringAfter: number // seconds
   expires: number // minutes, under 15: closing the ask edits it, and Talk allows edits for 15 minutes
   source: 'cli' | 'permission'
+  waits?: boolean // a permission ask in an attended session: no answer leaves the prompt at the Mac
   atMac?: (sentAt: number) => boolean // polled every 2 s; true hands the question back to the terminal
-  posted?: (id: number) => void // each ask message once stored: the first, then any re-post
+  posted?: (id: number) => void // each message the ask stores: the ask, any re-post, and its reminders
 }
 
 interface Answer {
   verdict: Verdict
   via?: 'typed' | 'swipe' | 'reaction'
   id?: number // the answering message
+  note?: string // what followed the code of a typed no
   at: number
 }
 
-export const TYPED = /^\s*(yes|no)\s+([a-km-z]{5})[\s.!]*$/i // "yes kxqzm"
-export const BARE = /^\s*(yes|no)[\s.!]*$/i // a swipe-reply
+const TYPED = /^\s*(yes|no)[\s,.:;!-]+([a-km-z]{5})\b[\s,.:;!-]*(.*)$/is // "yes kxqzm", "Yes, kxqzm.", "no kxqzm use staging"
+// What follows the code. "yes kxqzm 👍" has no note; "yes kxqzm?" has one.
+const noteOf = (rest: string) => (/[\p{L}\p{N}?]/u.test(rest) ? rest.trim() : '')
+// A typed answer, its word and code in lower case, or null. The ask and the Stop hook both read answers through this.
+export const typed = (text: string) => {
+  const t = TYPED.exec(text)
+  return t && { word: t[1].toLowerCase() as 'yes' | 'no', code: t[2].toLowerCase(), note: noteOf(t[3]) }
+}
+// A whole-message yes or no with no code. It answers only as a swipe-reply; otherwise it gets ❓ and a reminder.
+export const PLAIN = /^\s*(?:(y|yes|yep|yeah|yup|ok|okay|sure|approve|approved|👍[\u{1F3FB}-\u{1F3FF}]?)|n|no|nope|nah|deny|denied|👎[\u{1F3FB}-\u{1F3FF}]?)\u{FE0F}?[\s.!]*$/iu
 
 // Set while an ask is open, for the signal handler in cli.ts: it closes the ask before the process exits.
 export let cancel: (() => void) | undefined
 
-// 5 letters, a-z without l.
-export const newCode = () => Array.from({ length: 5 }, () => 'abcdefghijkmnopqrstuvwxyz'[randomInt(25)]).join('')
-
-// The last 500 ask records, a line each: "<id> <code>", id 0 for the code before the ask is stored.
-// The Stop hook keeps answers to asks from Claude by them, however long it waits to read.
+// Every ask record, a line each: "<id> <code>", id 0 for the code before the ask is stored, then the ask, its
+// re-posts, its reminders and the answer it took. Never pruned, so a code never repeats in this chat: an old
+// "yes <code>" the server sends again can't answer a new ask. The Stop hook keeps answers to asks from Claude
+// by them, however long it waits to read.
+// shortcut: the asks file grows forever (about 30 bytes an ask) and each run reads it whole; pair can reset it if it gets big.
 const ASKS = file('asks')
 const records = () => (existsSync(ASKS) ? readFileSync(ASKS, 'utf8').split('\n').filter(Boolean).map((l) => l.split(' ')) : [])
 export function asked() {
   const r = records()
-  return { ids: new Set(r.map(([id]) => Number(id))), codes: new Set(r.map(([, code]) => code)) }
+  const codes = new Map<string, number[]>() // each code's ids: its ask, re-posts, reminders and the answer it took
+  for (const [id, code] of r) codes.set(code, [...(codes.get(code) ?? []), Number(id)])
+  return { ids: new Set(r.map(([id]) => Number(id))), codes }
 }
-// Written aside and renamed, so a reader sees the old file or the new one, whole.
-// shortcut: two asks recorded in the same instant can drop a line; lock the file if that ever bites.
-function record(id: number, code: string) {
-  const tmp = `${ASKS}.${process.pid}.tmp`
-  writeFileSync(tmp, [...records().slice(-499), [id, code]].map((l) => l.join(' ') + '\n').join(''), { mode: 0o600 })
-  renameSync(tmp, ASKS)
+const record = (id: number, code: string) => appendFileSync(ASKS, `${id} ${code}\n`, { mode: 0o600 })
+
+// 5 letters, a-z without l, never one this chat has had.
+export function newCode() {
+  const used = asked().codes
+  for (;;) {
+    const code = Array.from({ length: 5 }, () => 'abcdefghijkmnopqrstuvwxyz'[randomInt(25)]).join('')
+    if (!used.has(code)) return code
+  }
 }
 
-export async function ask(p: Paired, o: AskOptions): Promise<Verdict> {
+export async function ask(p: Paired, o: AskOptions): Promise<{ verdict: Verdict; note?: string }> {
   const key = await dmKey(p)
   let answer: Answer | undefined
   let done!: (a: Answer) => void
@@ -65,23 +80,21 @@ export async function ask(p: Paired, o: AskOptions): Promise<Verdict> {
   record(0, code) // before the send: the owner may answer before Talk's ack comes back
   const sentAt = Date.now()
   const expiresAt = sentAt + o.expires * 60_000
-  const closed = (status: string) => [o.question, status, o.detail].filter(Boolean).join('\n')
+  const closed = (status: string) => `${o.question}\n${status}${o.detail ? `\n\n${o.detail}` : ''}`
   const text = closed(`Reply yes ${code} or no ${code} by ${hhmm(expiresAt)}${o.risk === 'low' ? ', or tap 👍' : ''}`)
+  // `ask` gives the web its Approve and Deny buttons; `text` still holds the whole ask for older apps. Closing edits drop it.
+  // shortcut: an urgent ask goes time-sensitive at once, not message, then time-sensitive, then one ring; split those steps once a build can show Time Sensitive.
+  const asking = () => send(s, p, key, { text, ask: { code, expires: expiresAt } }, o.urgent ? { level: 'time-sensitive' } : {})
   const askIds: number[] = [] // the ask message, then any re-post after a ring
-  let hinted = false
   let rang = false
   let call: string | undefined
 
-  const settle = (verdict: Verdict, via?: Answer['via'], id?: number) => {
-    if (!answer) done((answer = { verdict, via, id, at: Date.now() })) // the first answer wins
+  const settle = (verdict: Verdict, via?: Answer['via'], id?: number, note?: string) => {
+    if (answer) return // the first answer wins
+    done((answer = { verdict, via, id, note, at: Date.now() }))
+    if (id) record(id, code) // the answer it took: the Stop hook keeps it, note and all, from Claude
   }
   cancel = () => settle('cancelled')
-  // A high-risk ask needs the code. Say so once when the owner swipes yes or taps 👍.
-  const hint = () => {
-    if (hinted) return
-    hinted = true
-    send(s, p, key, { text: `This one needs the code: reply yes ${code}` }, { quiet: true }).catch(() => {})
-  }
 
   // One path for every answer: re-read the chat since the ask, so edits, reactions and whatever came
   // while the socket was down count alike. Runs one at a time; the first answer in message order wins.
@@ -93,11 +106,24 @@ export async function ask(p: Paired, o: AskOptions): Promise<Verdict> {
       const body = await gate(p, key, m)
       if (!body) continue
       const said = String(body.text ?? '')
-      const typed = TYPED.exec(said)
-      if (typed && typed[2].toLowerCase() === code) return settle(typed[1].toLowerCase() as Verdict, 'typed', m.id)
-      const bare = BARE.exec(said)?.[1].toLowerCase()
-      if (!bare || !askIds.includes(Number(body.reply?.id))) continue
-      if (bare === 'no' || o.risk === 'low') return settle(bare as Verdict, 'swipe', m.id) // a deny is always safe
+      const t = typed(said)
+      if (t?.code === code) {
+        // A yes can't carry a note: an allow or an exit code would drop it, and with it any condition ("but not on prod").
+        if (!t.note || t.word === 'no') return settle(t.word, 'typed', m.id, t.note)
+        puzzled(m.id, 'note', `Not taken: a yes can't carry a note. Reply yes ${code} alone, or no ${code} and your note`)
+        continue
+      }
+      const plain = PLAIN.exec(said)
+      if (!plain) continue
+      const word = plain[1] ? 'yes' : 'no'
+      const at = Number(body.reply?.id)
+      // Only a swipe at the question answers, or a swiped no at a reminder: a yes, ok or 👍 there may mean "got it".
+      if (!(askIds.includes(at) || (word === 'no' && replies.includes(at)))) {
+        const how = `To say ${word}, reply ${word} ${code}${word === 'yes' && o.risk === 'low' ? ' or tap 👍 on the question' : ''}`
+        if (!body.reply || replies.includes(at)) puzzled(m.id, word, how)
+        continue // otherwise a swipe-reply to another message
+      }
+      if (word === 'no' || o.risk === 'low') return settle(word, 'swipe', m.id) // a deny is always safe
       hint()
     }
     for (const m of ms)
@@ -124,17 +150,38 @@ export async function ask(p: Paired, o: AskOptions): Promise<Verdict> {
   // Ring steps run one at a time and the close waits for them, so no call outlives the ask.
   let work: Promise<unknown> = Promise.resolve()
   const queue = (f: () => Promise<unknown>) => void (work = work.then(f).catch(() => {}))
+  const replies: number[] = [] // reminders: quiet replies to the ask. A swiped no at one counts as at the ask; a yes or 👍 only on the question.
+  const told = new Set<string>() // one reminder of each kind per ask
+  const remind = (kind: string, text: string) => {
+    if (told.has(kind)) return
+    told.add(kind)
+    // Queued, so the close waits for it. Its id goes in `asks`, so the Stop hook keeps a swipe at it from Claude.
+    queue(() =>
+      send(s, p, key, { text, reply: { id: askIds.at(-1)!, from: p.agent.id, preview: o.question.slice(0, 200) } }, { quiet: true })
+        .then((m) => (replies.push(m.id), record(m.id, code), o.posted?.(m.id))),
+    )
+  }
+  // A high-risk ask needs the code. Say so once when the owner swipes yes or taps 👍.
+  const hint = () => remind('yes', `This one needs the code: reply yes ${code}`)
+  const marked = new Set<number>()
+  // An answer this ask can't take: ❓ on it once, and a reminder of the form that works.
+  const puzzled = (id: number, kind: string, text: string) => {
+    if (!marked.has(id)) (marked.add(id), queue(() => react(p, key, id, '❓')))
+    remind(kind, text)
+  }
   const ring = async () => {
-    // shortcut: ring hours for permission asks live here; Phase 1 moves ring caps to the server.
+    // Talk enforces a helper's ring hours where its owner is. shortcut: a Phase 0 profile (a cookie)
+    // keeps this Mac's 08–22 for permission asks; re-pairing moves it to the server's rules.
     const hour = new Date().getHours()
-    if (o.source === 'permission' && (hour < 8 || hour >= 22)) return
+    if (!p.token && o.source === 'permission' && (hour < 8 || hour >= 22)) return
     // Read already? Asked now, so reads made while the socket was down count too.
     const me = await api<Me>(p, 'GET', '/api/me').catch(() => null)
     if (answer) return
     if (!me) return log('ring', { result: 'error', error: 'read state unknown' }) // it rings only for an unread question
     if ((me.conversations.find((c) => c.id === p.dm.id)?.reads?.[p.owner.id] ?? 0) >= askIds.at(-1)!) return
     rang = true
-    const r = await s.timeout(10_000).emitWithAck('call:start', { convId: p.dm.id, kind: 'audio' }).catch(() => ({ error: 'timeout' }))
+    // `ask` names the question the ring is for: Talk rings once per ask.
+    const r = await s.timeout(10_000).emitWithAck('call:start', { convId: p.dm.id, kind: 'audio', ask: askIds.at(-1) }).catch(() => ({ error: 'timeout' }))
     if (r.error) return log('ring', { result: 'error', error: r.error })
     call = r.id
   }
@@ -153,8 +200,8 @@ export async function ask(p: Paired, o: AskOptions): Promise<Verdict> {
     log('ring', { result: 'accepted' })
     await callLog(1) // any ms > 0 reads as answered; we hang up at once
     if (answer) return
-    post((await send(s, p, key, { text })).id)
-    await edit(p, key, askIds.at(-2)!, closed('Sent again below'))
+    post((await asking()).id)
+    await edit(p, key, askIds.at(-2)!, `${o.question}\nSent again below`)
   }
   const ended = async (id: string, reason: string) => {
     if (id !== call) return
@@ -163,17 +210,19 @@ export async function ask(p: Paired, o: AskOptions): Promise<Verdict> {
   }
 
   // Listen before sending, so no answer slips past. Reconnects catch up too (the first connect came before this).
-  for (const ev of ['message', 'edit', 'reaction', 'connect']) s.on(ev, check)
+  // Talk echoes the agent's own sends, edits and reactions back to it; none can be an answer, so they read nothing.
+  for (const ev of ['message', 'edit', 'reaction']) s.on(ev, (x?: { senderId?: string; userId?: string }) => (x?.senderId ?? x?.userId) !== p.agent.id && check())
+  s.on('connect', check)
   s.on('call:accepted', (c: { id: string }) => queue(() => accepted(c.id)))
   s.on('call:end', (c: { id: string; reason: string }) => queue(() => ended(c.id, c.reason)))
 
-  post((await send(s, p, key, { text })).id)
+  post((await asking()).id)
   log('ask', { risk: o.risk, urgent: o.urgent, source: o.source })
   const timers = [setTimeout(() => settle('expired'), expiresAt - Date.now())]
   if (o.urgent) timers.push(setTimeout(() => queue(ring), o.ringAfter * 1000))
   if (o.atMac) timers.push(setInterval(() => o.atMac!(sentAt) && settle('keyboard'), 2000))
 
-  const { verdict, via, id, at } = await settled
+  const { verdict, via, id, note, at } = await settled
   cancel = undefined // a second signal exits at once
   timers.forEach(clearTimeout) // clears the interval too
   if (verdict !== 'cancelled') await work // a ring step can take 10 s; a signal leaves 1 s
@@ -185,8 +234,9 @@ export async function ask(p: Paired, o: AskOptions): Promise<Verdict> {
   const status =
     verdict === 'yes' ? `Approved ${hhmm(at)}`
     : verdict === 'no' ? `Denied ${hhmm(at)}`
-    : verdict === 'keyboard' ? 'Answered at the Mac'
-    : verdict === 'cancelled' ? 'Cancelled'
+    : verdict === 'keyboard' ? 'Back at the Mac: answer there'
+    : verdict === 'cancelled' ? 'Cancelled: no answer needed'
+    : o.waits ? `No answer by ${hhmm(expiresAt)}: it waits for you at the Mac`
     : o.source === 'permission' ? 'Expired, denied'
     : 'Expired'
   await Promise.all([
@@ -196,5 +246,5 @@ export async function ask(p: Paired, o: AskOptions): Promise<Verdict> {
   ])
   log('answer', { verdict, via })
   s.close()
-  return verdict
+  return { verdict, note }
 }

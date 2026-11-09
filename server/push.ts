@@ -26,7 +26,7 @@ export function saveSubscription(userId: string, sub: { endpoint: string }) {
 // What an APNs push carries: ids only. The app's notification extension
 // fetches and decrypts the rest on the phone.
 export type Apns =
-  | { type: 'message'; convId: string; messageId: number }
+  | { type: 'message'; convId: string; messageId: number; level?: 'time-sensitive' }
   | { type: 'missed'; convId: string; callId: string; kind: CallKind }
   | { type: 'call'; convId: string; callId: string; kind: CallKind; from: string }
 

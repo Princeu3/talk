@@ -1,6 +1,7 @@
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto'
+import type { IncomingHttpHeaders } from 'node:http'
 import type { Request, Response, NextFunction } from 'express'
-import { SESSION_SECRET } from './db.ts'
+import { SESSION_SECRET, db } from './db.ts'
 
 const COOKIE = 'talk_session'
 const YEAR = 365 * 24 * 3600 * 1000
@@ -41,6 +42,17 @@ export function userFromCookie(header: string | undefined): string | null {
   return Number(exp) > Date.now() ? id : null
 }
 
+// A browser's session cookie, or a helper's bearer token (sha256 in its auth_hash).
+// A person's auth_hash never matches: the lookup needs owner_id.
+export function userFrom(h: IncomingHttpHeaders): string | null {
+  const id = userFromCookie(h.cookie)
+  if (id) return id
+  const token = /^Bearer ([\w-]{43})$/.exec(h.authorization ?? '')?.[1]
+  if (!token) return null
+  const row = db.prepare('select id from users where auth_hash = ? and owner_id is not null').get(hashAuth(token)) as { id: string } | undefined
+  return row?.id ?? null
+}
+
 declare module 'express-serve-static-core' {
   interface Request {
     userId: string
@@ -48,7 +60,7 @@ declare module 'express-serve-static-core' {
 }
 
 export function requireUser(req: Request, res: Response, next: NextFunction) {
-  const id = userFromCookie(req.headers.cookie)
+  const id = userFrom(req.headers)
   if (!id) return void res.status(401).json({ error: 'signed out' })
   req.userId = id
   next()

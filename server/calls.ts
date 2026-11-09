@@ -17,14 +17,16 @@
 // Only sockets and phones on protocol v2 hear group rings; older apps don't know them.
 import { randomUUID } from 'node:crypto'
 import type { Server, Socket } from 'socket.io'
-import { db, audience, blocks, isMember, kindOf, memberIds, mutedIds } from './db.ts'
+import { db, audience, blocks, isMember, kindOf, memberIds, mutedIds, userExists } from './db.ts'
 import { apns, notifyIfAway, toUsers } from './push.ts'
+import { noteDecline, ringRefusal } from './agents.ts'
 import type { CallEnd, CallKind, CallRing, GroupCall } from '../shared/types.ts'
 
 interface Call extends CallRing {
   to: string
   device: Record<string, string | null> // socket each side talks on; callee's is null until answered
   answered: boolean
+  until: number // when an unanswered ring stops, however often the caller rejoins
   timer?: ReturnType<typeof setTimeout>
 }
 
@@ -80,6 +82,9 @@ export function callHandlers(io: Server) {
     clearTimeout(c.timer)
     calls.delete(c.id)
     io.to([`user:${c.from}`, `user:${c.to}`]).emit('call:end', { id: c.id, reason })
+    // Helpers' ring rules read this. shortcut: an unanswered ring counts as a decline, because build 10
+    // reports a lock-screen decline as 'missed'; count only 'declined' once build 10 is gone.
+    if (reason === 'declined' || reason === 'missed') noteDecline(c.from)
     if (reason === 'missed')
       notifyIfAway(io, c.to, { title: nameOf(c.from), body: `Missed ${label(c.kind)}`, convId: c.convId }, {
         apns: { type: 'missed', convId: c.convId, callId: c.id, kind: c.kind },
@@ -87,7 +92,11 @@ export function callHandlers(io: Server) {
   }
   const ringFor = (c: Call) => {
     clearTimeout(c.timer)
-    c.timer = setTimeout(() => end(c, 'missed'), RING_MS)
+    c.timer = setTimeout(() => end(c, 'missed'), c.until - Date.now())
+  }
+  // A removed or paused helper: end its 1:1 calls now, not 30 s after its socket drops.
+  const hangUp = (u: string) => {
+    for (const c of calls.values()) if (c.from === u || c.to === u) end(c, 'cancelled')
   }
 
   // --- group calls ---
@@ -167,19 +176,21 @@ export function callHandlers(io: Server) {
     if (socket.data.v >= 2) for (const g of groups.values()) if (g.ringing.has(me)) socket.emit('call:ring', groupRing(g))
     const others = (g: Group) => [...g.peers.keys()].filter((u) => u !== me)
 
-    socket.on('call:start', (p: { convId?: unknown; kind?: unknown }, ack: Ack) => {
+    socket.on('call:start', (p: { convId?: unknown; kind?: unknown; ask?: unknown }, ack: Ack) => {
       if (typeof ack !== 'function') return
       const { convId, kind } = p ?? {}
       const convKind = typeof convId === 'string' && kindOf(convId)
       if (!convKind || !isMember(convId as string, me) || (kind !== 'audio' && kind !== 'video')) return ack({ error: 'bad request' })
       if (convKind === 'group') return startGroup(socket, me, convId as string, kind, ack)
       const to = memberIds(convId as string).find((u) => u !== me)
-      if (!to) return ack({ error: 'This account was deleted.' })
+      if (!to || !userExists(to)) return ack({ error: 'This account was deleted.' })
       if (blocks(me, to)) return ack({ error: `Unblock ${nameOf(to)} to call them.` })
       if (blocks(to, me)) return ack({ error: `${nameOf(to)} isn't taking calls from you.` })
       if (inCall(me)) return ack({ error: 'You are already in a call.' })
       if (inCall(to)) return ack({ error: `${nameOf(to)} is on another call.` })
-      const c: Call = { id: randomUUID(), convId: convId as string, from: me, kind, to, device: { [me]: socket.id, [to]: null }, answered: false }
+      const refused = ringRefusal(socket.data.owner, me, convId as string, p.ask)
+      if (refused) return ack({ error: refused })
+      const c: Call = { id: randomUUID(), convId: convId as string, from: me, kind, to, device: { [me]: socket.id, [to]: null }, answered: false, until: Date.now() + RING_MS }
       calls.set(c.id, c)
       ringFor(c)
       io.to(`user:${to}`).emit('call:ring', ring(c))
@@ -297,7 +308,9 @@ export function callHandlers(io: Server) {
         if (c.device[me] !== socket.id) continue
         c.device[me] = null
         clearTimeout(c.timer)
-        c.timer = setTimeout(() => end(c, 'lost'), GRACE_MS)
+        // An unanswered ring still stops at `until` when that comes before the grace runs out.
+        if (!c.answered && c.until < Date.now() + GRACE_MS) ringFor(c)
+        else c.timer = setTimeout(() => end(c, 'lost'), GRACE_MS)
       }
       for (const g of groups.values()) {
         if (g.peers.get(me) !== socket.id) continue
@@ -306,5 +319,5 @@ export function callHandlers(io: Server) {
       }
     })
   }
-  return Object.assign(handlers, { drop })
+  return Object.assign(handlers, { drop, hangUp })
 }

@@ -1,6 +1,6 @@
-// The Talk client under talkline: the profile on disk, HTTP with the session
-// cookie, the socket, sealed messages and the events log. All crypto comes from
-// the apps' own src/lib/crypto.ts.
+// The Talk client under talkline: the profile on disk, HTTP with the helper's
+// token (or a Phase 0 session cookie), the socket, sealed messages and the events
+// log. All crypto comes from the apps' own src/lib/crypto.ts.
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import path from 'node:path'
@@ -15,13 +15,13 @@ export const file = (name: string) => path.join(HOME, name)
 const PROFILE = file('profile.json')
 
 export interface Profile {
-  server: string // origin, from the invite link
+  server: string // origin, from the link
   agent: { id: string; name: string; pubkey: string; passphrase: string; auth: string }
-  cookie: string // "talk_session=..."
-  owner?: { id: string; name: string; pubkey: string } // pinned at pairing
+  token?: string // a helper's bearer token (Phase 1)
+  cookie?: string // "talk_session=...", Phase 0 profiles only: a person account
+  owner?: { id: string; name: string; pubkey: string } // pinned at pairing: the id and key from the link
   dm?: { id: string; key: string } // raw DM key, base64url
   cursor?: number // Stop-hook inbox: the last message id in the DM already handled
-  handed?: number[] // inbox messages reacted 👀 that get ✅ at the next Stop
   loginFailedAt?: number // when signing in again last got 401 (the account is gone)
 }
 export type Paired = Profile & Required<Pick<Profile, 'owner' | 'dm'>>
@@ -60,17 +60,28 @@ export function log(ev: string, fields: Record<string, unknown> = {}) {
   } catch {}
 }
 
-export const hhmm = (t: number) => new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+export const hhmm = (t: number) => new Date(t).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+
+// A Claude Code session id, safe as a file name.
+export const sessionId = (v: unknown) => String(v ?? '').replace(/[^A-Za-z0-9_-]/g, '')
+// What a session sent the owner, a message id a line, so the Stop inbox gives a swipe-reply to it back to that session.
+export const noteSent = (sid: string, id: number) => (home(), appendFileSync(file(`sessions/${sid}.sent`), `${id}\n`, { mode: 0o600 }))
 
 // --- HTTP ---
 
 // Per request and per socket connect. The Stop and Notification hooks lower it, so a dead network can't hold up Claude Code.
 export const limits = { ms: 15_000 }
 
-export async function call(server: string, method: string, url: string, body?: unknown, cookie = '') {
+export const authHeader = (p: Profile): Record<string, string> =>
+  p.token ? { authorization: `Bearer ${p.token}` } : p.cookie ? { cookie: p.cookie } : {}
+
+// A helper's token is never refreshed: 401 means its owner removed it (or denied it).
+export const REMOVED = 'Removed in Talk. Run unpair --yes, then link a new helper.'
+
+export async function call(server: string, method: string, url: string, body?: unknown, headers: Record<string, string> = {}) {
   const r = await fetch(server + url, {
     method,
-    headers: { 'content-type': 'application/json', ...(cookie && { cookie }) },
+    headers: { 'content-type': 'application/json', ...headers },
     body: body === undefined ? undefined : JSON.stringify(body),
     signal: AbortSignal.timeout(limits.ms),
   }).catch(() => {
@@ -82,11 +93,11 @@ export async function call(server: string, method: string, url: string, body?: u
 // The login throttle is server-wide (10 wrong tries a minute block every login), so sign in again
 // at most once per process, only after the server said signed out, and in no process for 10 minutes
 // after a try got 401: every hook is a new process, and a gone account would fail at each one.
-// Every 401 in the process waits for that one sign-in, and retries if it worked.
+// Every 401 in the process waits for that one sign-in, and retries if it worked. Phase 0 cookies only.
 let relogging: Promise<boolean> | undefined
 const relogin = (p: Profile) =>
   (relogging ??= (async () => {
-    if (Date.now() - (p.loginFailedAt ?? 0) < 600_000) return false
+    if (p.token || Date.now() - (p.loginFailedAt ?? 0) < 600_000) return false
     const r = await call(p.server, 'POST', '/api/login', { name: p.agent.name, auth: p.agent.auth })
     if (r.status === 401) patchProfile({ loginFailedAt: (p.loginFailedAt = Date.now()) })
     if (r.status !== 200 || !r.cookie) return false
@@ -96,34 +107,38 @@ const relogin = (p: Profile) =>
   })())
 
 export async function request(p: Profile, method: string, url: string, body?: unknown) {
-  const r = await call(p.server, method, url, body, p.cookie)
-  return r.status === 401 && (await relogin(p)) ? call(p.server, method, url, body, p.cookie) : r
+  const r = await call(p.server, method, url, body, authHeader(p))
+  return r.status === 401 && (await relogin(p)) ? call(p.server, method, url, body, authHeader(p)) : r
 }
 
 export async function api<T = unknown>(p: Profile, method: string, url: string, body?: unknown): Promise<T> {
   const r = await request(p, method, url, body)
+  if (r.status === 401 && p.token) throw new Error(REMOVED)
   if (r.status >= 300) throw new Error(`${method} ${url}: ${r.data?.error ?? r.status}`)
   return r.data
 }
 
 // --- the socket ---
 
-// Resolves once connected. Calls to the agent, from anyone, are declined at once: Phase 0 has no voice,
+// Resolves once connected. Calls to the agent, from anyone, are declined at once: talkline has no voice,
 // and a ringing call would keep the agent's own ring from starting. `onDead` hears of a session Talk
-// refuses after the connect, which socket.io won't retry. socket.io-client loads here, so Stop runs skip it.
-export async function connect(p: Paired, onDead?: (e: Error) => void): Promise<Socket> {
+// refuses or drops after the connect, which socket.io won't retry. socket.io-client loads here, so Stop runs skip it.
+export async function connect(p: Profile, onDead?: (e: Error) => void): Promise<Socket> {
   const { io } = await import('socket.io-client')
-  const s = io(p.server, { extraHeaders: { cookie: p.cookie }, transports: ['websocket'], query: { v: '1' } })
+  const s = io(p.server, { extraHeaders: authHeader(p), transports: ['websocket'], query: { v: '1' } })
   s.on('call:ring', (c: { id: string }) => s.emit('call:hangup', { id: c.id }))
   return new Promise((resolve, reject) => {
     const fail = (message: string) => (clearTimeout(timer), s.close(), reject(new Error(message)), onDead?.(new Error(message)))
     const timer = setTimeout(() => fail(`Could not reach ${p.server}.`), limits.ms)
     s.once('connect', () => (clearTimeout(timer), resolve(s)))
+    // Remove (or Deny) drops a helper's sockets, as deleting drops an account's.
+    s.on('disconnect', (why) => why === 'io server disconnect' && fail(p.token ? REMOVED : 'Talk ended the session.'))
     s.on('connect_error', async (e: Error) => {
       if (s.active) return // a network failure: socket.io keeps retrying on its own
+      if (p.token) return fail(e.message === 'signed out' ? REMOVED : `Talk refused the session: ${e.message}`)
       const refused = s.io.opts.extraHeaders?.cookie // the sign-in is shared: a cookie this socket already tried won't do
       if (e.message !== 'signed out' || !(await relogin(p).catch(() => false)) || p.cookie === refused) return fail(`Talk refused the session: ${e.message}`)
-      s.io.opts.extraHeaders = { cookie: p.cookie }
+      s.io.opts.extraHeaders = authHeader(p)
       s.connect()
     })
   })
@@ -131,7 +146,7 @@ export async function connect(p: Paired, onDead?: (e: Error) => void): Promise<S
 
 // Socket send only, always with a cid, so a resend after a lost ack stores once. While the
 // socket is down socket.io holds the emit and flushes it on reconnect; a timeout drops it and we resend.
-export async function send(s: Socket, p: Paired, key: CryptoKey, body: Omit<MessageBody, 'from'>, opts: { quiet?: boolean; seen?: boolean } = {}) {
+export async function send(s: Socket, p: Paired, key: CryptoKey, body: Omit<MessageBody, 'from'>, opts: { quiet?: boolean; seen?: boolean; level?: 'time-sensitive' } = {}) {
   const payload = { convId: p.dm.id, body: await sealMessage(key, p.dm.id, { from: p.agent.id, ...body }), ...opts, cid: crypto.randomUUID() }
   for (let tries = 0; tries < 3; tries++) {
     const r = await s.timeout(10_000).emitWithAck('send', payload).catch(() => null)
@@ -177,9 +192,32 @@ export async function history(p: Paired, cursor: number) {
   }
 }
 
-// The owner gate: our DM, sent by the owner's account, opens with the DM key, and its body says `from` the owner.
+// The first message id each body of the owner's came under, by the body's IV: lines of "<iv> <id>".
+// shortcut: the seen file grows forever (about 25 bytes per owner message) and each run reads it whole; pair can reset it if it gets big.
+// shortcut: read once per process, so two talkline processes running at once could each take one replayed body in a narrow window; lock the file if that matters.
+let ivs: Map<string, number> | undefined
+function seen() {
+  if (ivs) return ivs
+  ivs = new Map()
+  for (const l of existsSync(file('seen')) ? readFileSync(file('seen'), 'utf8').split('\n') : []) {
+    const [iv, id] = l.split(' ')
+    if (id && !ivs.has(iv)) ivs.set(iv, Number(id))
+  }
+  return ivs
+}
+
+// The owner gate: our DM, sent by the owner's account, opens with the DM key, its body says `from` the owner,
+// and it's no replay.
 export async function gate(p: Paired, key: CryptoKey, m: Message) {
   if (m.convId !== p.dm.id || m.senderId !== p.owner.id) return null
   const body = await openMessage<MessageBody>(key, m.convId, m.body).catch(() => null)
-  return body?.from === p.owner.id ? body : null
+  if (body?.from !== p.owner.id) return null
+  // The seal doesn't bind a message id: the server could send an old message of the owner's again under a new id.
+  // A seal starts with its random 12-byte IV, so a body's first 16 chars name it. An edit keeps its id, so it passes.
+  // No await from here to the set, so parallel gates can't both let one body through.
+  const iv = m.body.slice(0, 16)
+  const first = seen().get(iv)
+  if (first !== undefined && first !== m.id) return null
+  if (first === undefined) (seen().set(iv, m.id), appendFileSync(file('seen'), `${iv} ${m.id}\n`, { mode: 0o600 }))
+  return body
 }

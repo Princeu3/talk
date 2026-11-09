@@ -60,16 +60,19 @@ function apns(origin: string, token: string, headers: Record<string, string>, bo
   })
 }
 
-type Push = { token: string; env: string; type: string; convId: string; callId?: string; messageId?: number; kind?: string; from?: string }
+type Push = { token: string; env: string; type: string; convId: string; callId?: string; messageId?: number; kind?: string; from?: string; level?: string }
 
 // Returns APNs headers and payload, or null if the request is malformed.
 function build(p: Push): [Record<string, string>, object] | null {
   if (!TOKEN.test(p.token) || !ORIGIN[p.env] || !UUID.test(p.convId)) return null
+  if (p.level !== undefined && p.level !== 'time-sensitive') return null
   const call = p.kind === 'video' ? 'video call' : 'voice call'
   const alert = (body: string, ids: object): [Record<string, string>, object] => [
     { 'apns-push-type': 'alert', 'apns-topic': BUNDLE, 'apns-priority': '10', 'apns-expiration': String(Math.floor(Date.now() / 1000) + 86400) },
-    // The app's notification extension swaps in the sender and decrypted text.
-    { aps: { alert: { title: 'Talk', body }, sound: 'default', 'mutable-content': 1, 'thread-id': p.convId }, convId: p.convId, ...ids },
+    // The app's notification extension swaps in the sender and decrypted text. A helper's urgent ask
+    // breaks through Focus as time-sensitive. shortcut: builds 10 and 11 lack the Time Sensitive
+    // entitlement, so iOS shows these as normal alerts; it works once a build carries it.
+    { aps: { alert: { title: 'Talk', body }, sound: 'default', 'mutable-content': 1, 'thread-id': p.convId, ...(p.level && { 'interruption-level': p.level }) }, convId: p.convId, ...ids },
   ]
   const callOk = typeof p.callId === 'string' && UUID.test(p.callId) && (p.kind === 'audio' || p.kind === 'video')
   switch (p.type) {
