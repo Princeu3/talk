@@ -97,9 +97,11 @@ export function marker(name: string): Marker | undefined {
   } catch {}
 }
 export const markers = () => (existsSync(file('mcp')) ? readdirSync(file('mcp')) : []).filter((f) => f.endsWith('.json')).flatMap((f) => marker(f) ?? [])
+// The live talkline mcp of the Claude Code process a hook or a CLI run belongs to, if any.
+export const mcpMarker = () => (Number(process.env.CLAUDE_PID) ? marker(`${Number(process.env.CLAUDE_PID)}.json`) : undefined)
 // The key a hook or a CLI run files its session's .sent, .last and .held under: a live talkline mcp's
 // for this Claude Code process, which keeps its key across /clear, else the session id.
-export const sessionKey = (sid: string) => (Number(process.env.CLAUDE_PID) && marker(`${Number(process.env.CLAUDE_PID)}.json`)?.key) || sid
+export const sessionKey = (sid: string) => mcpMarker()?.key || sid
 
 // --- HTTP ---
 

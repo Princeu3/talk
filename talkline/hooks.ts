@@ -8,7 +8,7 @@ import { setTimeout as pause } from 'node:timers/promises'
 import type { Socket } from 'socket.io-client'
 import type { Message, MessageBody } from '../shared/types.ts'
 import { ask, asked, CHAT, PLAIN, record, typed } from './ask.ts'
-import { CLI, dmKey, file, gate, history, hhmm, home, log, lstart, markers, noteSent, patchProfile, react, read, readProfile, say, send, sessionId, sessionKey, type Marker, type Paired } from './talk.ts'
+import { CLI, dmKey, file, gate, history, hhmm, home, log, lstart, markers, mcpMarker, noteSent, patchProfile, react, read, readProfile, say, send, sessionId, type Marker, type Paired } from './talk.ts'
 
 export const SETTINGS = path.join(homedir(), '.claude', 'settings.json')
 // Ours, also from an older checkout path.
@@ -133,6 +133,7 @@ interface Input {
   tool_name?: string
   tool_input?: Record<string, unknown>
   scratchpad_dir?: string
+  transcript_path?: string
 }
 
 const TEN_MINUTES = 600_000
@@ -181,7 +182,8 @@ export async function hook(event: string, input: Input, print: (out: string) => 
   home()
   const sid = sessionId(input.session_id) || 'none'
   const session = (ext: string) => file(`sessions/${sid}.${ext}`) // this hook run's own: .prompt and .pending
-  const self = sessionKey(sid) // .sent, .last and .held: a live talkline mcp's key, which outlives /clear
+  const m = mcpMarker() // this session's talkline mcp, if one runs: a channel or plain
+  const self = m?.key || sid // .sent, .last and .held: a live talkline mcp's key, which outlives /clear
   const keyed = (ext: string) => file(`sessions/${self}.${ext}`)
   const label = path.basename(String(input.cwd ?? '')) || 'Claude Code'
   const sent = (id: number) => noteSent(self, id)
@@ -193,14 +195,17 @@ export async function hook(event: string, input: Input, print: (out: string) => 
     // Claude Code sends idle_prompt after 60 s without typing, so 60 s idle means the owner left before Claude finished. Unknown counts as away.
     const idle = idleSeconds()
     if (idle !== null && idle < (kind === 'idle_prompt' ? 60 : 120)) return log('notification', { kind, sent: false, why: 'keyboard' })
-    // A Talk reply can't reach a session waiting at the Mac, so the text says where to answer.
-    let text = `${label}${kind === 'agent_completed' ? ':' : ' needs you at the Mac:'} ${input.message ?? ''}`
+    // A channel session takes a Talk reply, so its text doesn't send the owner to the Mac; and one that wrote to him
+    // in the last 3 minutes has said enough. Elsewhere a Talk reply can't reach a session waiting at the Mac.
+    const chat = m?.channel && kind !== 'permission_prompt'
+    if (chat && fresh(keyed('sent'), 180_000)) return log('notification', { kind, sent: false, why: 'answered' })
+    let text = `${label}${kind === 'agent_completed' || chat ? ':' : ' needs you at the Mac:'} ${input.message ?? ''}`
     if (kind === 'permission_prompt' && /AskUserQuestion|ExitPlanMode/.test(String(input.message)) && fresh(session('prompt'), TEN_MINUTES))
       try {
         text = prompted(label, JSON.parse(readFileSync(session('prompt'), 'utf8')))
       } catch {} // a shape we don't know keeps the plain text
     // Cut on read too, keeping the end: an older talkline wrote up to 2,000 characters there.
-    if ((kind === 'idle_prompt' || kind === 'agent_completed') && fresh(keyed('last'), TEN_MINUTES)) text += '\n' + readFileSync(keyed('last'), 'utf8').slice(-501)
+    if ((kind === 'idle_prompt' || kind === 'agent_completed' || chat) && fresh(keyed('last'), TEN_MINUTES)) text += '\n' + readFileSync(keyed('last'), 'utf8').slice(-501)
     sent((await say(p, text, { quiet: kind === 'agent_completed' })).id)
     return log('notification', { kind, sent: true })
   }
@@ -211,10 +216,13 @@ export async function hook(event: string, input: Input, print: (out: string) => 
     if (typeof t === 'string') writeFileSync(keyed('last'), t.length > 500 ? '…' + t.slice(-500).replace(/^\S*\s+/, '') : t, { mode: 0o600 })
     // The owner's messages since the last read, handed to Claude as context, oldest first. Route and take
     // share 2 s of waiting for inbox.lock, inside the 5 s Claude Code gives a Stop.
-    const key = await dmKey(p)
     const end = Date.now() + 2000
-    await route(p, key, self, { wait: 2000 })
-    const head = `${p.owner.name} sent these messages on Talk, from ${p.owner.name}'s own account (end-to-end encrypted), while Claude Code session "${label}" worked. To answer on Talk, run node "${CLI}" notify "<text>", or ask "<question>?" for a yes or no. Other Claude Code sessions on this Mac share this inbox, so a message that isn't a reply may be meant for another session:`
+    // A channel hands its session the messages, but for what it delivered that no transcript shows (plan B).
+    if (m?.channel && !(input.transcript_path && (await lost(self, input.transcript_path, 2000)))) return
+    const key = await dmKey(p)
+    await route(p, key, self, { wait: end - Date.now() })
+    const answer = m ? 'use the send_message tool, or the ask tool for a yes or no' : `run node "${CLI}" notify "<text>", or ask "<question>?" for a yes or no`
+    const head = `${p.owner.name} sent these messages on Talk, from ${p.owner.name}'s own account (end-to-end encrypted), while Claude Code session "${label}" worked. To answer on Talk, ${answer}. Other Claude Code sessions on this Mac share this inbox, so a message that isn't a reply may be meant for another session:`
     const got = await take(p, key, self, { cap: CAP - head.length, wait: end - Date.now() })
     if (!got) return
     log('inbox', { count: got.lines.length })
@@ -264,7 +272,8 @@ export async function hook(event: string, input: Input, print: (out: string) => 
   // Only Bash's description is Claude's reason. An MCP tool's description field is content, shown with the fields.
   const why = tool === 'Bash' ? String(ti.description ?? '').replace(/[\s\u0085]+/g, ' ').trim().slice(0, 120) : '' // \s misses NEL
   // Claude Code 2.1.319 sets CLAUDE_CODE_SESSION_ATTENDED to "1" in interactive and desktop sessions, "0" in -p, background and daemon runs.
-  const waits = process.env.CLAUDE_CODE_SESSION_ATTENDED !== '0' // unset (older versions) counts as attended
+  // A channel session's expiry denies instead: Claude goes on, and can tell the owner on Talk what didn't run.
+  const waits = !m?.channel && process.env.CLAUDE_CODE_SESSION_ATTENDED !== '0' // unset (older versions) counts as attended
   writeFileSync(session('pending'), String(process.pid))
   try {
     // Claude Code asks once, so wait here until 2 minutes without keyboard or mouse; touching the Mac first leaves it to the terminal.
@@ -288,6 +297,7 @@ export async function hook(event: string, input: Input, print: (out: string) => 
     const decision =
       verdict === 'yes' ? { behavior: 'allow' }
       : verdict === 'no' ? { behavior: 'deny', message: note ? `Denied on Talk: ${note}` : 'Denied on Talk' }
+      : m?.channel ? { behavior: 'deny', message: 'No answer on Talk' }
       : { behavior: 'deny', message: 'No answer on Talk', interrupt: true } // stops Claude: each new try would ask and ring again
     return JSON.stringify({ hookSpecificOutput: { hookEventName: 'PermissionRequest', decision } })
   } finally {
@@ -313,6 +323,16 @@ export interface Held {
   quote?: string // its preview
   forwarded?: boolean
 }
+
+// A file of JSON lines, such as .held. A line a crash cut short is skipped, and so is the empty last line.
+const jsonLines = <T>(at: string) =>
+  (readOr(at) ?? '').split('\n').flatMap((l): T[] => {
+    try {
+      return [JSON.parse(l)]
+    } catch {
+      return []
+    }
+  })
 
 const FORWARDED = '(forwarded; written by someone else) '
 function held(m: Message, b: MessageBody): Held {
@@ -493,13 +513,7 @@ export async function take(p: Paired, key: CryptoKey, self: string, o: { cap?: n
       return f.startsWith(`${self}.taking.`) && (pid === process.pid || !alive(pid))
     })
     const all = [...adopted, `${self}.held`]
-      .flatMap((f) => (readOr(at(f)) ?? '').split('\n').flatMap((l) => {
-        try {
-          return [JSON.parse(l) as Held]
-        } catch {
-          return [] // the empty last line
-        }
-      }))
+      .flatMap((f) => jsonLines<Held>(at(f)))
       .sort((a, b) => a.id - b.id)
       .filter((h, i, a) => !i || h.id !== a[i - 1].id) // a kill mid-take can leave a line in two files
     let n = 0
@@ -529,3 +543,36 @@ export async function take(p: Paired, key: CryptoKey, self: string, o: { cap?: n
     },
   }
 }
+
+// Plan B (4.1): Claude Code never says it registered a channel, but each event it takes lands in the session's
+// transcript within milliseconds, JSON-escaped as message_id=\"<id>\". So a channel process notes what it delivered
+// in .delivered, and the Stop hook looks for each line delivered over 10 s ago. A missing one was lost: it goes back
+// to .held for that Stop, and .nochannel turns the process plain. Both run under the lock: Stop rewrites the file.
+// shortcut: Stop checks delivery by searching the transcript for message_id; drop this if Claude Code ever confirms registration.
+type Delivered = Held & { t: number } // t: when it went out
+export const delivered = (key: string, hs: Held[]) =>
+  locked(10_000, async () => appendFileSync(file(`sessions/${key}.delivered`), hs.map((h) => JSON.stringify({ ...h, t: Date.now() }) + '\n').join(''), { mode: 0o600 }))
+
+// True when some line never reached the transcript. /clear starts a new transcript file in the same folder, so the
+// files there written since the oldest line count too. Checked lines leave .delivered.
+const lost = async (key: string, transcript: string, wait: number) =>
+  !!(await locked(wait, async () => {
+    const at = (ext: string) => file(`sessions/${key}.${ext}`)
+    const now = Date.now()
+    const all = jsonLines<Delivered>(at('delivered'))
+    const old = all.filter((d) => now - d.t > 10_000)
+    if (!old.length) return false
+    const dir = path.dirname(transcript)
+    const since = Math.min(...old.map((d) => d.t))
+    const shown = readdirSync(dir)
+      .filter((f) => f.endsWith('.jsonl') && statSync(path.join(dir, f)).mtimeMs >= since)
+      .map((f) => readFileSync(path.join(dir, f), 'utf8'))
+      .join('\n')
+    const gone = old.filter((d) => !shown.includes(`message_id=\\"${d.id}\\"`))
+    writeFileSync(at('delivered'), all.filter((d) => now - d.t <= 10_000).map((d) => JSON.stringify(d) + '\n').join(''), { mode: 0o600 })
+    if (!gone.length) return false
+    appendFileSync(at('held'), gone.map(({ t, ...h }) => JSON.stringify(h) + '\n').join(''), { mode: 0o600 })
+    writeFileSync(at('nochannel'), '', { mode: 0o600 })
+    log('inbox', { count: gone.length, why: 'unseen' })
+    return true
+  }))

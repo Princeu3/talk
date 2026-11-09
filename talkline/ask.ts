@@ -77,7 +77,8 @@ export function claim() {
   return code
 }
 
-export async function ask(p: Paired, o: AskOptions): Promise<{ verdict: Verdict; note?: string }> {
+// `id` is the answering message, if one answered, and `at` when the ask settled.
+export async function ask(p: Paired, o: AskOptions): Promise<{ verdict: Verdict; note?: string; id?: number; at: number }> {
   const key = await dmKey(p)
   let answer: Answer | undefined
   let done!: (a: Answer) => void
@@ -257,5 +258,5 @@ export async function ask(p: Paired, o: AskOptions): Promise<{ verdict: Verdict;
   ])
   log('answer', { verdict, via })
   s.close()
-  return { verdict, note }
+  return { verdict, note, id, at }
 }

@@ -100,7 +100,7 @@ async function main(): Promise<number> {
       return 0
     }
     case 'mcp':
-      return (await import('./mcp.ts')).mcp() // plain mode only so far: --channel is accepted and changes nothing
+      return (await import('./mcp.ts')).mcp(!!o.channel)
     case 'doctor':
       return doctor(settings)
     case 'stats':
