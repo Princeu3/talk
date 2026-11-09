@@ -480,8 +480,18 @@ test('ask: answers from someone else, or claiming to be from someone else, are i
   )
   assert.equal((await api(mallory, 'POST', '/api/conversations', { id, kind: 'dm', title: null, members })).status, 403)
   assert.ok(!(await me(mallory)).users.some((u) => u.id === agent.id), 'nor does she see it')
-  // Prince's account sends a body that says it is from Mallory.
+  // Prince's account sends a body that says it is from Mallory, and one he forwarded: someone else wrote it.
   await send({ from: mallory.id, text: `yes ${a.code}` })
+  await send({ text: `yes ${a.code}`, forwarded: true })
+  await ignored()
+  await send({ text: `yes ${a.code}` })
+  result(await a.done, 0, 'yes')
+})
+
+test('ask: with TALKLINE_PLAIN=chat an unswiped ok is chat, with no ❓ or reminder', { timeout: 30_000 }, async () => {
+  const a = await asking(['ask', 'Merge?'], 'Merge?\n', { env: { TALKLINE_PLAIN: 'chat' } })
+  const ignored = ignoring(a)
+  await send({ text: 'ok' })
   await ignored()
   await send({ text: `yes ${a.code}` })
   result(await a.done, 0, 'yes')
@@ -848,6 +858,12 @@ test("hook stop: a note on a closed question's code goes to the session that ask
   await send({ text: `no ${a.code} wait, iOS CI is red` })
   assert.equal(await stop('s3'), '')
   assert.match(await stop('c2'), new RegExp(`\\n\\[[^\\]\\n]+\\] no ${a.code} wait, iOS CI is red$`))
+  // A typed answer once the ask closed did nothing: ⏳ on it, and no session gets it.
+  await flush()
+  const late = reactionFromAgent()
+  const again = await send({ text: `yes ${a.code}` })
+  assert.equal(await stop('c2'), '')
+  assert.deepEqual(await late, { from: agent.id, to: again.id, emoji: '⏳' })
 
   // Asked outside Claude Code: no session asked, so a late note gets ❓ and reaches none.
   const b = await ask('Tag the beta?')

@@ -8,7 +8,7 @@ import { text as readAll } from 'node:stream/consumers'
 import { parseArgs } from 'node:util'
 import { b64, deriveIdentity, safetyCode, unwrapConvKey } from '../src/lib/crypto.ts'
 import type { Me } from '../shared/types.ts'
-import { ask, cancel } from './ask.ts'
+import { ask, cancels } from './ask.ts'
 import { hook, idleSeconds, ourHooks, readSettings, SETTINGS, setHooks } from './hooks.ts'
 import { api, call, CLI, connect, file, limits, log, noteSent, paired, patchProfile, readProfile, REMOVED, saveProfile, say, sessionId, sessionKey, type Paired } from './talk.ts'
 
@@ -36,8 +36,8 @@ const print = (text: string) => write(process.stdout, text + '\n')
 for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const)
   process.on(sig, () => {
     process.exitCode = 128 + constants.signals[sig]
-    if (!cancel) process.exit()
-    cancel()
+    if (!cancels.size) process.exit()
+    for (const c of cancels) c()
     setTimeout(() => process.exit(), 1000).unref()
   })
 
