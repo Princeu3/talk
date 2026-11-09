@@ -190,6 +190,22 @@ export async function send(s: Socket, p: Paired, key: CryptoKey, body: Omit<Mess
   throw new Error('Talk did not confirm the message.')
 }
 
+// Sealed bytes as an attachment, by POST: call() is JSON only. 120 s, for 50 MB on a slow link.
+export async function upload(p: Paired, sealed: Uint8Array<ArrayBuffer>) {
+  const r = await fetch(`${p.server}/api/conversations/${p.dm.id}/attachments`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/octet-stream', ...authHeader(p) },
+    body: sealed,
+    signal: AbortSignal.timeout(120_000),
+  }).catch(() => {
+    throw new Error(`Could not reach ${p.server}.`)
+  })
+  const data = await r.json().catch(() => null)
+  if (r.status === 401 && p.token) throw new Error(REMOVED)
+  if (r.status >= 300) throw new Error(`Talk refused the file: ${data?.error ?? r.status}`)
+  return data.id as string
+}
+
 // One text on a socket of its own: notify, the pair hello, the notification hook.
 export async function say(p: Paired, text: string, opts?: { quiet?: boolean }) {
   const s = await connect(p)

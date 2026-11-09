@@ -161,7 +161,7 @@ const live = (at: string, ms: number) => fresh(at, ms) && alive(Number(readOr(at
 const esc = (c: string) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`
 // A value with a line break, VT and FF included, shows as a quoted JSON string, so it can't pass for another field or line.
 // JSON.stringify leaves NEL, LS and PS raw, and the iPhone breaks lines on them.
-const json = (v: unknown) => JSON.stringify(v).replace(/[\u0085\u2028\u2029]/g, esc)
+export const json = (v: unknown) => JSON.stringify(v).replace(/[\u0085\u2028\u2029]/g, esc)
 const BREAK = /\r\n?|[\n\u000b\u000c\u0085\u2028\u2029]/
 
 // What an AskUserQuestion or a plan, saved by the permission hook, asks. Options get "- ", never numbers: a bare
@@ -298,9 +298,9 @@ export async function hook(event: string, input: Input, print: (out: string) => 
 
 // --- the router: route() files each owner message in one session's .held, take() hands a session its lines ---
 
-const CAP = 9000 // Claude Code moves additionalContext over 10,000 chars to a file it doesn't ask Claude to read
+export const CAP = 9000 // Claude Code moves additionalContext over 10,000 chars to a file it doesn't ask Claude to read
 // The first line always goes, cut to `room` if it must be.
-const clip = (line: string, room: number) => (line.length <= room ? line : `${line.slice(0, room - 40)} [${line.length - room + 40} more characters not shown]`)
+export const clip = (line: string, room: number) => (line.length <= room ? line : `${line.slice(0, room - 40)} [${line.length - room + 40} more characters not shown]`)
 
 // One message for a session, a JSON line in sessions/<key>.held. Phase 1 wrote and reads only `id` and `line`.
 export interface Held {
@@ -444,7 +444,7 @@ export async function route(p: Paired, key: CryptoKey, self: string, o: { sock?:
         const ended = readOr(file(`sessions/${swiped}.ended`))
         if (ended !== undefined) {
           marks.push([m.id, '❓'])
-          tell(m, b, `${ended} has ended, so nothing reads this until you resume it. Send it again without a swipe to reach another session.`)
+          tell(m, b, `${ended || 'That session'} has ended, so nothing reads this until you resume it. Send it again without a swipe to reach another session.`)
         }
         return swiped
       }

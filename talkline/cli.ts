@@ -21,6 +21,7 @@ const USAGE = `Usage: node ${CLI} <command>
   hooks install [--approvals] [--settings <path>]
   hooks uninstall [--settings <path>]
   hook notification|stop|permission [--expires <minutes>]   (Claude Code runs these)
+  mcp [--channel]   (Claude Code runs this: Talk tools for the session, over stdio)
   doctor [--settings <path>]
   stats
   unpair --yes
@@ -53,7 +54,7 @@ async function main(): Promise<number> {
       // owner: unused since Phase 1, kept so an old pair command reaches the link hint, not "Unknown option".
       owner: { type: 'string' }, name: { type: 'string' }, detail: { type: 'string' }, risk: { type: 'string' },
       'ring-after': { type: 'string' }, expires: { type: 'string' }, settings: { type: 'string' },
-      quiet: { type: 'boolean' }, urgent: { type: 'boolean' }, approvals: { type: 'boolean' }, yes: { type: 'boolean' },
+      quiet: { type: 'boolean' }, urgent: { type: 'boolean' }, approvals: { type: 'boolean' }, yes: { type: 'boolean' }, channel: { type: 'boolean' },
     },
   })
   const settings = o.settings ?? SETTINGS
@@ -98,6 +99,8 @@ async function main(): Promise<number> {
       }
       return 0
     }
+    case 'mcp':
+      return (await import('./mcp.ts')).mcp() // plain mode only so far: --channel is accepted and changes nothing
     case 'doctor':
       return doctor(settings)
     case 'stats':
