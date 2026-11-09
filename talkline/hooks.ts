@@ -35,7 +35,8 @@ export function idleSeconds() {
   if (v === 'never') return 0
   if (process.env.SSH_CONNECTION) return null
   try {
-    const out = execFileSync('ioreg', ['-r', '-c', 'IOHIDSystem', '-d', '1', '-k', 'HIDIdleTime'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+    // ioreg answers in milliseconds. A stuck one would block every timer in the hook, or the whole talkline mcp, so after 2 s it reads as unknown.
+    const out = execFileSync('ioreg', ['-r', '-c', 'IOHIDSystem', '-d', '1', '-k', 'HIDIdleTime'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 2000 })
     const ns = /"HIDIdleTime" = (\d+)/.exec(out)?.[1]
     return ns ? Number(ns) / 1e9 : null
   } catch {

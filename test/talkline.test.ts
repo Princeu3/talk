@@ -1249,6 +1249,12 @@ test('hook permission: leaves the prompt to the terminal unless idle shows 2 min
   const hook = ['hook', 'permission', '--expires', '0.05']
   let ignored = ignoring()
   result(await cli(hook, { input, env }), 0, '') // idle unknown
+  // An ioreg that hangs reads as unknown after 2 s, rather than holding the hook until Claude Code ends it.
+  const stuck = mkdtempSync(path.join(tmp, 'ioreg-'))
+  writeFileSync(path.join(stuck, 'ioreg'), '#!/bin/sh\nexec sleep 30\n', { mode: 0o755 })
+  const t0 = Date.now()
+  result(await cli(hook, { input, env: { ...env, PATH: `${stuck}${path.delimiter}${process.env.PATH}` } }), 0, '')
+  assert.ok(Date.now() - t0 < 10_000, `took ${Date.now() - t0} ms`)
   idle(300)
   result(await cli(hook, { input, env: { ...env, SSH_CONNECTION: '10.0.0.2 52000 10.0.0.1 22' } }), 0, '')
   idle(60) // left a minute ago, then came back before 2 minutes
