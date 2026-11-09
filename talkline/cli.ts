@@ -58,7 +58,12 @@ async function main(): Promise<number> {
     },
   })
   const settings = o.settings ?? SETTINGS
-  const minutes = o.expires === undefined ? undefined : Number(o.expires)
+  // --expires: the minutes a question stays open. Closing it edits it, and Talk allows edits for 15 minutes.
+  const minutes = (max: number, why = 'closing the question edits it, and Talk allows edits for 15 minutes') => {
+    const m = o.expires === undefined ? undefined : Number(o.expires)
+    if (m !== undefined && !(m > 0 && m <= max)) throw new Error(`--expires takes minutes, more than 0 and at most ${max}: ${why}.`)
+    return m
+  }
   switch (cmd) {
     case 'pair':
       return pair(args[0], o.name ?? 'Claude AI')
@@ -69,10 +74,8 @@ async function main(): Promise<number> {
     case 'ask': {
       const risk = o.risk ?? 'high'
       const ringAfter = Number(o['ring-after'] ?? 180)
-      const expires = Number(o.expires ?? 10)
       if (!args.length || (risk !== 'low' && risk !== 'high') || !(ringAfter >= 0)) break
-      if (!(expires > 0 && expires <= 14))
-        throw new Error('--expires takes minutes, more than 0 and at most 14: closing the question edits it, and Talk allows edits for 15 minutes.')
+      const expires = minutes(14) ?? 10
       const { verdict, note } = await ask(paired(), { question: label + args.join(' '), detail: o.detail, risk, urgent: !!o.urgent, ringAfter, expires, source: 'cli', posted: sent })
       if (verdict === 'cancelled') return Number(process.exitCode)
       await print(note ? `${verdict}\n${note}` : verdict) // only a no carries a note
@@ -93,14 +96,17 @@ async function main(): Promise<number> {
       }
       try {
         const raw = await readAll(process.stdin) // decodes UTF-8 across chunk boundaries
-        await hook(event, JSON.parse(raw.trim() || '{}'), print, minutes)
+        // 8, the default, leaves 2 minutes to close the question: a ring step takes up to 10 s, a Talk request 15.
+        await hook(event, JSON.parse(raw.trim() || '{}'), print, minutes(8, "the hook closes its question within Claude Code's 600 s hook timeout"))
       } catch (e) {
         log('error', { where: `hook ${event}`, message: (e as Error).message })
       }
       return 0
     }
-    case 'mcp':
-      return (await import('./mcp.ts')).mcp(!!o.channel, minutes)
+    case 'mcp': {
+      const expires = minutes(14) // a bad one fails before the import reads the profile
+      return (await import('./mcp.ts')).mcp(!!o.channel, expires)
+    }
     case 'doctor':
       return doctor(settings)
     case 'stats':

@@ -605,6 +605,7 @@ test('ask: no answer in time expires', { timeout: 30_000 }, async () => {
   result(await cli(['ask', 'Still there?', '--expires', '0.01']), 2, 'expired')
   assert.equal((await closed).b.text, 'Still there?\nExpired')
   assert.equal((await cli(['ask', 'Too long?', '--expires', '15'])).code, 3, 'Talk allows edits for 15 minutes')
+  assert.equal((await cli(['ask', 'When?', '--expires', 'soon'])).code, 3)
 })
 
 // Prince reacts the way the apps do.
@@ -1190,6 +1191,16 @@ test('hook permission: asks on Talk when away and gives Claude Code the answer',
   let ignored = ignoring()
   result(await cli(['hook', 'permission'], { input, env: { TALKLINE_AWAY: 'never' } }), 0, '')
   await ignored()
+
+  // An expiry that would outlast Claude Code's 600 s hook timeout, or no number: logged, no question, no decision.
+  const events = path.join(TL, 'events.jsonl')
+  for (const bad of ['9', 'soon']) {
+    const logged = readFileSync(events, 'utf8').length
+    ignored = ignoring()
+    result(await cli(['hook', 'permission', '--expires', bad], { input }), 0, '')
+    await ignored()
+    assert.match(readFileSync(events, 'utf8').slice(logged), /"ev":"error","where":"hook permission","message":"--expires takes minutes, more than 0 and at most 8: /)
+  }
 
   // Away: asked on Talk, and Claude Code's own permission_prompt notification adds nothing meanwhile.
   const a = await asking(['hook', 'permission'], question, { input })
@@ -2251,6 +2262,9 @@ test('mcp relay: previews, cut or whole, at the Mac or away, answered or not', {
   await until(() => !existsSync(path.join(TL, 'sessions', 'c33near.pending')))
   await ignored()
   await closeAll(near)
+
+  // An expiry Talk couldn't close (edits last 15 minutes), or no number: talkline mcp won't start.
+  for (const bad of ['15', 'soon']) assert.equal(await mcp({ channel: true, args: ['--expires', bad] }).done, 3)
 
   // No answer: one deny, and the question says so.
   const short = mcp({ sid: 'c33short', claudePid: 9001, label: 'c1', channel: true, args: ['--expires', '0.01'] })
