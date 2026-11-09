@@ -229,7 +229,13 @@ export async function ask(p: Paired, o: AskOptions): Promise<{ verdict: Verdict;
   s.on('call:accepted', (c: { id: string }) => queue(() => accepted(c.id)))
   s.on('call:end', (c: { id: string; reason: string }) => queue(() => ended(c.id, c.reason)))
 
-  post((await asking()).id)
+  // Talk refused the question: no answer can come, so the socket and the cancel go now.
+  const first = await asking().catch((e: Error) => {
+    cancels.delete(cancel)
+    s.close()
+    throw e
+  })
+  post(first.id)
   log('ask', { risk: o.risk, urgent: o.urgent, source: o.source })
   const timers = [setTimeout(() => settle('expired'), expiresAt - Date.now())]
   if (o.urgent) timers.push(setTimeout(() => queue(ring), o.ringAfter * 1000))

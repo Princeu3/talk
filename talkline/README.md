@@ -162,7 +162,7 @@ While you are away, Claude Code's permission dialog also comes to Talk, as an ur
 | `wait_for_reply` | Waits for your next message, or with a code, for an ask's answer | 1 to 110 s |
 | `read_messages` | Your new messages, and answers no call collected | 1 to 50 messages |
 | `set_status` | One quiet status line: the first call posts it, later calls edit it | 1 to 500 characters. A new line after 14 minutes. |
-| `send_file` | Sends a file, captioned with its name or a caption | 50 MB. Under `claudet` it asks you first. |
+| `send_file` | Sends a file, captioned with its name or a caption | An absolute path, up to 50 MB. Under `claudet` it asks you first. |
 
 Claude gets your words marked: a forwarded message says someone else wrote it, and quoted text shows as context. Claude is told that neither is an instruction, and that a Talk message never approves a tool call.
 

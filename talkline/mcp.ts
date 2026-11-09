@@ -89,7 +89,7 @@ let dk: CryptoKey
 let sock: Socket | undefined
 let backoff = 5000
 // In the background: a failed connect tries again after 5 s, doubling to 60 s, until Talk says REMOVED.
-// Each connect, socket.io's reconnects included, routes what came while it was down.
+// In channel mode, or while a call waits, each connect, socket.io's reconnects included, routes what came while it was down.
 function up() {
   connect(p, (e) => {
     sock = undefined
@@ -99,10 +99,10 @@ function up() {
   }).then((s) => {
     backoff = 5000
     sock = s
-    s.on('connect', () => deliver())
     // Plain mode routes his messages only while a call waits: otherwise the next Stop or read routes them, as in Phase 1.
+    s.on('connect', () => void ((channel || waits) && deliver()))
     s.on('message', (m: Message) => void ((channel || waits) && m.senderId === p.owner.id && m.convId === p.dm.id && deliver(m.id)))
-    deliver()
+    if (channel || waits) deliver()
   }, () => {}) // the callback above retries
 }
 // A send waits up to 10 s for the socket.
@@ -266,16 +266,22 @@ interface Out {
   after?: () => Promise<void>
 }
 // An ask's answer, or pending: at once when lines come here (his words can't wait 110 s), or after `s` seconds.
-async function waitAsk(code: string, a: Mine, s: number): Promise<Out> {
+// Cancelled, call `rid` stops and answers nothing: an answer strands for the next read, wait or event.
+// shortcut: a cancel that comes while ask still posts its question is missed, and that call waits on; note early cancels if Esc there ever shows.
+async function waitAsk(code: string, a: Mine, s: number, rid: unknown): Promise<Out | undefined> {
+  let cancelled = false
+  cancellers.set(rid, () => ((cancelled = true), beat()))
   a.held++
   try {
-    const t = s && !a.r && !a.e ? await watch(s * 1000, () => !!(a.r || a.e)) : undefined
+    const t = s && !a.r && !a.e ? await watch(s * 1000, () => cancelled || !!(a.r || a.e)) : undefined
+    if (cancelled) return void t?.drop() // no response, as MCP asks
     if (t) return { text: `pending ${code}: no answer yet. ${owner} wrote while you waited:\n${t.text}`, after: t.done }
     if (a.e || a.r) mine.delete(code) // collected
     if (a.e) throw a.e
     if (a.r) return { text: verdict(a) }
     return { text: `pending ${code}: no answer yet. The question stays open until ${hhmm(a.until)}. Call wait_for_reply with code "${code}" to keep waiting.` }
   } finally {
+    cancellers.delete(rid)
     a.held--
     beat() // an answer this call didn't collect is stranded now: a wait without a code takes it
     if (a.r) strand(code, a)
@@ -362,7 +368,7 @@ function wrong({ required = [], properties }: Tool['inputSchema'], a: Args) {
   }
 }
 
-const cancellers = new Map<unknown, () => void>() // wait_for_reply calls without a code, by request id
+const cancellers = new Map<unknown, () => void>() // waiting ask and wait_for_reply calls, by request id
 let status: { id: number; at: number } | undefined
 
 const TOOLS: Record<string, Tool> = {
@@ -417,7 +423,7 @@ const TOOLS: Record<string, Tool> = {
       },
     },
     // shortcut: each open ask opens its own socket (ask() connects one); share the process socket if Talk ever caps sockets per helper.
-    async run(a) {
+    async run(a, rid) {
       const expires = a.expires ?? 10
       if (!(expires > 0 && expires <= 14)) throw new Error('expires must be more than 0 and at most 14 minutes') // closing it edits it, within Talk's 15
       const code = claim()
@@ -438,7 +444,7 @@ const TOOLS: Record<string, Tool> = {
         mine.delete(code)
         throw x.e
       }
-      return waitAsk(code, x, a.wait ?? 110)
+      return waitAsk(code, x, a.wait ?? 110, rid)
     },
   },
   wait_for_reply: {
@@ -455,7 +461,7 @@ const TOOLS: Record<string, Tool> = {
       if (a.code !== undefined) {
         const x = mine.get(a.code)
         if (!x) throw new Error(`No ask ${a.code} in this session. It may have closed with the session that asked it.`)
-        return waitAsk(a.code, x, s)
+        return waitAsk(a.code, x, s, rid)
       }
       let cancelled = false
       cancellers.set(rid, () => ((cancelled = true), beat()))
@@ -490,23 +496,24 @@ const TOOLS: Record<string, Tool> = {
     },
   },
   send_file: {
-    description: `Send ${owner} a file on Talk, up to 50 MB.`,
+    description: `Send ${owner} a file on Talk, up to 50 MB, by its absolute path.`,
     inputSchema: {
       type: 'object',
       required: ['path'],
       properties: {
-        path: { type: 'string', minLength: 1, maxLength: 4096, description: 'File to send, absolute or relative to the session folder' },
+        path: { type: 'string', minLength: 1, maxLength: 4096, description: 'Absolute path of the file to send' },
         caption: { type: 'string', maxLength: 2000, description: 'Up to 2,000 characters. Default: the file name' },
       },
     },
     async run(a) {
-      const at = path.resolve(process.env.CLAUDE_PROJECT_DIR || process.cwd(), a.path)
-      const st = statSync(at, { throwIfNoEntry: false }) // follows links
+      // Absolute only: the permission hook's folder follows Claude's cd, so a relative path could name another file there.
+      if (!path.isAbsolute(a.path)) throw new Error('Give an absolute path.')
+      const st = statSync(a.path, { throwIfNoEntry: false }) // follows links
       if (!st) throw new Error(`No file at ${a.path}`)
       if (!st.isFile()) throw new Error(`${a.path} is not a plain file`)
       if (st.size > MAX_FILE) throw new Error(`${a.path} is ${Math.round(st.size / 1024 / 1024)} MB; Talk takes up to 50 MB`)
-      const name = path.basename(realpathSync(at)) // a link sends under its target's name
-      const bytes = new Uint8Array(readFileSync(at))
+      const name = path.basename(realpathSync(a.path)) // a link sends under its target's name
+      const bytes = new Uint8Array(readFileSync(a.path))
       const id = await upload(p, await sealFile(dk, p.dm.id, bytes))
       const type = TYPES[path.extname(name).toLowerCase()] ?? 'application/octet-stream'
       return { text: `sent ${(await post({ text: prefix(a.caption || name), files: [{ id, name, type, size: bytes.length }] })).id}` }

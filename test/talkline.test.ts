@@ -6,7 +6,7 @@ import { test, describe, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
 import { appendFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, truncateSync, utimesSync, writeFileSync } from 'node:fs'
-import { createServer, type AddressInfo, type Socket as Conn } from 'node:net'
+import { createConnection, createServer, type AddressInfo, type Socket as Conn } from 'node:net'
 import { hostname, tmpdir } from 'node:os'
 import path from 'node:path'
 import { setTimeout as pause } from 'node:timers/promises'
@@ -1458,7 +1458,7 @@ test('a replayed owner message reaches Claude once', { timeout: 30_000 }, async 
 })
 
 test('mcp: the handshake, plain until the channel gate opens', { timeout: 30_000 }, async () => {
-  await caughtUp() // each mcp process routes on connect
+  await caughtUp() // a channel routes on connect
   // The test runner's command line lacks Claude Code's development-channel flag, so --channel stays plain.
   for (const args of [[], ['--channel']]) {
     const s = mcp({ args })
@@ -1586,6 +1586,39 @@ test('mcp ask: waits for the answer, or says pending; his words come back at onc
   await s.done
 })
 
+test('mcp ask: a question Talk refuses leaves no socket open and nothing to cancel', { timeout: 30_000 }, async () => {
+  await caughtUp()
+  // A proxy in front of Talk, counting the socket.io connections open through it.
+  const ws = new Set<Conn>()
+  const proxy = createServer((conn) => {
+    const up = createConnection(PORT, 'localhost')
+    const both = () => (conn.destroy(), up.destroy())
+    for (const x of [conn, up]) x.on('error', both).on('close', both)
+    conn.once('data', (d) => String(d).startsWith('GET /socket.io/') && (ws.add(conn), conn.once('close', () => ws.delete(conn))))
+    conn.pipe(up).pipe(conn)
+  })
+  await new Promise<void>((r) => proxy.listen(0, r))
+  const good = readFileSync(PROFILE, 'utf8')
+  writeFileSync(PROFILE, JSON.stringify({ ...profile(), server: `http://localhost:${(proxy.address() as AddressInfo).port}` }))
+  const asks = path.join(TL, 'asks')
+  const before = readFileSync(asks, 'utf8').length
+  const s = mcp()
+  try {
+    await until(() => ws.size === 1) // its own
+    assert.equal((await api(prince, 'PUT', `/api/blocks/${agent.id}`)).status, 200)
+    for (const question of ['One?', 'Two?']) assert.equal(await s.tool('ask', { question, wait: 0 }), 'ERROR: This person isn’t taking messages from you.')
+    await until(() => ws.size === 1) // each ask's socket closed
+  } finally {
+    writeFileSync(PROFILE, good)
+    proxy.close()
+    assert.equal((await api(prince, 'DELETE', `/api/blocks/${agent.id}`)).status, 200)
+  }
+  s.close()
+  await s.done
+  // Shutdown runs every cancel left in the process, and a cancel closes its code: a "-1 <code>" line after the "0 <code>".
+  assert.deepEqual(readFileSync(asks, 'utf8').slice(before).split('\n').filter(Boolean).map((l) => l.split(' ')[0]), ['0', '0'])
+})
+
 test('mcp read_messages: the read block, marked, with 👀 on each, once', { timeout: 30_000 }, async () => {
   await caughtUp()
   const s = mcp()
@@ -1634,6 +1667,21 @@ test("mcp read_messages: with Talk out of reach, the lines go back to .held, so 
   await s.done
 })
 
+test("mcp: an idle plain process routes nothing as it connects or reconnects, so the working session's Stop gets his message", { timeout: 30_000 }, async () => {
+  await caughtUp()
+  await send({ text: 'sent before it started' })
+  const idle = mcp({ sid: 'm9' })
+  await idle.tool('send_message', { text: 'idle', quiet: true }) // its socket is up
+  assert.deepEqual(lines(await stop('h9')), ['sent before it started'])
+  await send({ text: 'sent before Talk restarts' })
+  await restart()
+  await reconnected()
+  await idle.tool('send_message', { text: 'back', quiet: true }) // its socket is back
+  assert.deepEqual(lines(await stop('h9')), ['sent before Talk restarts'])
+  idle.close()
+  await idle.done
+})
+
 test('mcp wait_for_reply: returns when he writes, times out, and a cancelled wait takes nothing', { timeout: 30_000 }, async () => {
   await caughtUp()
   const s = mcp({ sid: 'm7' })
@@ -1659,6 +1707,36 @@ test('mcp wait_for_reply: returns when he writes, times out, and a cancelled wai
   await s.done
 })
 
+test('mcp ask: a cancelled ask, or wait for its answer, stops waiting, and the answer and his next message still reach Claude', { timeout: 30_000 }, async () => {
+  await caughtUp()
+  const s = mcp({ sid: 'm11' })
+  // Esc at the Mac: Claude Code cancels the call. It stops waiting and sends no response.
+  const cancel = async (call: { id: number }) => {
+    await until(() => s.marker().waiting)
+    s.notify('notifications/cancelled', { requestId: call.id, reason: 'interrupted' })
+    await until(() => !s.marker().waiting)
+  }
+  const asked = fromAgent((b) => !!b.text?.startsWith('proj: Deploy?\n'))
+  const deploy = s.request('tools/call', { name: 'ask', arguments: { question: 'Deploy?', wait: 30 } })
+  const code = codeIn((await asked).b.text)
+  await cancel(deploy)
+  const approved = fromAgent((b) => !!b.text?.includes('\nApproved '), 'edit')
+  await send({ text: `yes ${code}` })
+  await approved
+  const hey = await send({ text: 'also bump the version' })
+  assert.match(await s.tool('read_messages'), new RegExp(`^Answer to your question ${code} \\("Deploy\\?"\\): yes\\nMessages from Prince on Talk[^\\n]*\\n#${hey.id} \\[[^\\]\\n]+\\] also bump the version$`))
+  // The same for wait_for_reply with the code: a later one collects the answer.
+  const merge = codeIn(await s.tool('ask', { question: 'Merge?', wait: 0 }))
+  const waited = s.request('tools/call', { name: 'wait_for_reply', arguments: { code: merge, seconds: 30 } })
+  await cancel(waited)
+  await send({ text: `no ${merge}` })
+  assert.equal(await s.tool('wait_for_reply', { code: merge, seconds: 30 }), 'no')
+  const answered = (r: Promise<unknown>) => Promise.race([r.then(() => 'answered'), pause(100).then(() => 'no response')])
+  assert.deepEqual(await Promise.all([deploy, waited].map(answered)), ['no response', 'no response'])
+  s.close()
+  await s.done
+})
+
 test('mcp set_status: posts once, then edits that message', { timeout: 30_000 }, async () => {
   await caughtUp()
   const s = mcp()
@@ -1675,13 +1753,15 @@ test('mcp set_status: posts once, then edits that message', { timeout: 30_000 },
   await s.done
 })
 
-test('mcp send_file: sealed bytes he can open, named after the real file; nothing but plain files up to 50 MB', { timeout: 30_000 }, async () => {
+test('mcp send_file: sealed bytes he can open, named after the real file; by absolute path, nothing but plain files up to 50 MB', { timeout: 30_000 }, async () => {
   await caughtUp()
   const s = mcp({ label: 'files' })
   const at = (f: string) => path.join(s.cwd, f)
   writeFileSync(at('notes.txt'), 'hello file')
+  // A relative one could name another file in the approval: the permission hook's folder follows Claude's cd.
+  assert.equal(await s.tool('send_file', { path: 'notes.txt' }), 'ERROR: Give an absolute path.')
   let got = fromAgent()
-  const r = await s.tool('send_file', { path: 'notes.txt' })
+  const r = await s.tool('send_file', { path: at('notes.txt') })
   const { m, b } = await got
   assert.equal(r, `sent ${m.id}`)
   assert.equal(b.text, 'files: notes.txt')
@@ -1697,11 +1777,11 @@ test('mcp send_file: sealed bytes he can open, named after the real file; nothin
   assert.equal(linked.files![0].name, 'notes.txt')
   mkdirSync(at('folder'))
   execFileSync('mkfifo', [at('pipe')])
-  for (const f of ['folder', 'pipe']) assert.equal(await s.tool('send_file', { path: f }), `ERROR: ${f} is not a plain file`)
-  assert.equal(await s.tool('send_file', { path: 'gone.txt' }), 'ERROR: No file at gone.txt')
+  for (const f of ['folder', 'pipe'].map(at)) assert.equal(await s.tool('send_file', { path: f }), `ERROR: ${f} is not a plain file`)
+  assert.equal(await s.tool('send_file', { path: at('gone.txt') }), `ERROR: No file at ${at('gone.txt')}`)
   writeFileSync(at('big.bin'), '')
   truncateSync(at('big.bin'), 51 * 1024 * 1024) // sparse
-  assert.equal(await s.tool('send_file', { path: 'big.bin' }), 'ERROR: big.bin is 51 MB; Talk takes up to 50 MB')
+  assert.equal(await s.tool('send_file', { path: at('big.bin') }), `ERROR: ${at('big.bin')} is 51 MB; Talk takes up to 50 MB`)
   s.close()
   await s.done
 })
@@ -2167,11 +2247,14 @@ test('mcp relay: previews, cut or whole, at the Mac or away, answered or not', {
   const broken = await relayed(c1, 'tqbxc', 'mcp__db__query', '{"sql": "drop tab', 'c1: use mcp__db__query?\n')
   assert.ok(broken.text.endsWith(`\n\n{"sql": "drop tab${CUT}`), broken.text)
   await answer(broken)
-  // send_file names the real file and its size.
-  const sendIt = await relayed(c1, 'tqbxd', 'mcp__talkline__send_file', { path: 'report.txt' }, 'c1: send ')
+  // send_file names the real file and its size. A relative path names none: the tool refuses it.
+  const relative = await relayed(c1, 'tqbxh', 'mcp__talkline__send_file', { path: 'report.txt' }, 'c1: send ')
+  assert.ok(relative.text.startsWith('c1: send report.txt (not a file) to Talk?\n'), relative.text)
+  await answer(relative)
+  const sendIt = await relayed(c1, 'tqbxd', 'mcp__talkline__send_file', { path: file }, 'c1: send ')
   assert.ok(sendIt.text.startsWith('c1: send report.txt (12 B) to Talk?\n'), sendIt.text)
   await answer(sendIt, 'yes')
-  assert.deepEqual(verdicts(c1).map((v) => v.behavior), ['deny', 'deny', 'deny', 'allow'])
+  assert.deepEqual(verdicts(c1).map((v) => v.behavior), ['deny', 'deny', 'deny', 'deny', 'allow'])
   await closeAll(c1)
 
   // At the keyboard: no question.

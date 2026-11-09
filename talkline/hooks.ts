@@ -310,11 +310,11 @@ export function describe(label: string, tool: string, ti: Record<string, unknown
   const fields = () => Object.entries(ti).map(([k, v]) => `${one(k)}: ${typeof v === 'string' ? one(v) : json(v)}`).join('\n')
   // send_file's file, as the tool would send it: the real file's name, and its size.
   const sending = () => {
-    const f = path.resolve(dir, String(ti.path ?? ''))
+    const f = String(ti.path ?? '')
     try {
-      const st = statSync(f)
-      if (st.isFile()) return `${one(path.basename(realpathSync(f)))} (${fileSize(st.size)})`
-    } catch {} // missing, or a path it can't read: the tool refuses those too
+      const st = path.isAbsolute(f) && statSync(f)
+      if (st && st.isFile()) return `${one(path.basename(realpathSync(f)))} (${fileSize(st.size)})`
+    } catch {} // relative, missing, or a path it can't read: the tool refuses those too
     return `${one(path.basename(f))} (not a file)`
   }
   const [action, detail] =
