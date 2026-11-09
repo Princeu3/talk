@@ -8,7 +8,7 @@ import { b64, deriveIdentity, newConvKeyBytes, safetyCode, unwrapConvKey, wrapCo
 import type { Me } from '../shared/types.ts'
 import { ask, cancel } from './ask.ts'
 import { hook, idleSeconds, ourHooks, readSettings, SETTINGS, setHooks } from './hooks.ts'
-import { api, call, CLI, connect, dmKey, file, limits, log, paired, patchProfile, readProfile, request, saveProfile, send, type Paired } from './talk.ts'
+import { api, call, CLI, file, limits, log, paired, patchProfile, readProfile, request, saveProfile, say, type Paired } from './talk.ts'
 
 const USAGE = `Usage: node ${CLI} <command>
   pair <invite link> --owner <name> [--name "Claude AI"]
@@ -28,7 +28,8 @@ const write = (to: NodeJS.WriteStream, text: string) => new Promise<void>((r) =>
 const print = (text: string) => write(process.stdout, text + '\n')
 
 // Ctrl+C, a closed terminal, or Claude Code ending a hook. An open ask first closes itself (hangs up,
-// marks the question Cancelled), for up to 1 s. process.exit runs the exit listeners that free inbox.lock and .pending.
+// marks the question Cancelled), for up to 1 s. process.exit runs the exit listener that frees inbox.lock;
+// .pending holds this pid, so the exit frees it too.
 for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const)
   process.on(sig, () => {
     process.exitCode = 128 + constants.signals[sig]
@@ -50,14 +51,10 @@ async function main(): Promise<number> {
   switch (cmd) {
     case 'pair':
       return pair(args[0], o.owner, o.name ?? 'Claude AI')
-    case 'notify': {
+    case 'notify':
       if (!args.length) break
-      const p = paired()
-      const s = await connect(p)
-      await send(s, p, await dmKey(p), { from: p.agent.id, text: args.join(' ') }, { quiet: o.quiet })
-      s.close()
+      await say(paired(), args.join(' '), { quiet: o.quiet })
       return 0
-    }
     case 'ask': {
       const risk = o.risk ?? 'high'
       const ringAfter = Number(o['ring-after'] ?? 180)
@@ -152,12 +149,10 @@ async function pair(link: string | undefined, owner: string | undefined, name: s
   const full: Paired = { ...p, owner: { id: o.id, name: o.name, pubkey: o.pubkey }, dm }
   saveProfile(full)
 
-  const s = await connect(full)
-  const hello = await send(s, full, await dmKey(full), {
-    from: agentId,
-    text: `Hi, I'm ${full.agent.name} on ${hostname()}. I'll message you here when I need you. When I ask you something, reply yes or no with the code I send, like "yes kxqzm".`,
-  })
-  s.close()
+  const hello = await say(
+    full,
+    `Hi, I'm ${full.agent.name} on ${hostname()}. I'll message you here when I need you. When I ask you something, reply yes or no with the code I send, like "yes kxqzm".`,
+  )
   saveProfile({ ...full, cursor: hello.id })
   const w = Math.max(full.agent.name.length, o.name.length) + 3
   await print(`Paired with ${o.name} as "${full.agent.name}" on ${full.server}.
@@ -221,6 +216,8 @@ async function doctor(settings: string) {
     await check('safety codes', async () => `${p.agent.name} ${await safetyCode(p.agent.pubkey)}, ${owner.name} ${await safetyCode(owner.pubkey)}`)
   }
   await check('idle', () => {
+    const v = process.env.TALKLINE_AWAY
+    if (v === 'always' || v === 'never') return `TALKLINE_AWAY=${v}`
     const idle = idleSeconds()
     return idle === null ? 'unknown: notifications count you as away, permission prompts stay in the terminal' : `${Math.round(idle)} s`
   })
@@ -248,7 +245,7 @@ async function stats() {
     const e = JSON.parse(line)
     if (Date.parse(e.t) < since) continue
     const outcome = e.ev === 'notification' ? [e.sent ? 'sent' : e.why] : e.ev === 'answer' ? [e.verdict, e.via] : [e.result ?? e.source ?? e.where]
-    const key = [e.ev, ...new Set(outcome)].filter(Boolean).join(' ')
+    const key = [e.ev, ...outcome].filter(Boolean).join(' ')
     counts.set(key, (counts.get(key) ?? 0) + 1)
   }
   const rows = [...counts].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))

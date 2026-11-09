@@ -72,6 +72,7 @@ All in `~/.talkline` (or `$TALKLINE_HOME`), a folder only you can open (0700):
 
 - `profile.json` (0600): the server, the agent's account and passphrase, its session cookie, your account as pinned at pairing, the chat key, and how far the Stop hook has read.
 - `events.jsonl` (0600): one line per event, never message text. `stats` counts the last 7 days.
+- `asks` (0600): the ids and codes of your recent questions (the last 500 lines), so the Stop hook keeps your answers from Claude.
 - `sessions/`: per Claude Code session, its last reply (added to notifications), the ids of what it sent you, your replies waiting for its next turn, and a marker while a permission question waits.
 - `inbox.lock`: held while the Stop hook reads your messages.
 

@@ -1,11 +1,11 @@
 // The Talk client under talkline: the profile on disk, HTTP with the session
 // cookie, the socket, sealed messages and the events log. All crypto comes from
 // the apps' own src/lib/crypto.ts.
-import { appendFileSync, chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { io, type Socket } from 'socket.io-client'
+import type { Socket } from 'socket.io-client'
 import { openMessage, sealMessage, unb64 } from '../src/lib/crypto.ts'
 import type { Message, MessageBody, ReactionBody } from '../shared/types.ts'
 
@@ -31,14 +31,7 @@ export function home() {
   chmodSync(HOME, 0o700) // mkdir leaves an existing dir's mode alone
 }
 
-export function readProfile(): Profile | null {
-  try {
-    return JSON.parse(readFileSync(PROFILE, 'utf8'))
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return null
-    throw e
-  }
-}
+export const readProfile = (): Profile | null => (existsSync(PROFILE) ? JSON.parse(readFileSync(PROFILE, 'utf8')) : null)
 
 export function paired(): Paired {
   const p = readProfile()
@@ -89,17 +82,18 @@ export async function call(server: string, method: string, url: string, body?: u
 // The login throttle is server-wide (10 wrong tries a minute block every login), so sign in again
 // at most once per process, only after the server said signed out, and in no process for 10 minutes
 // after a try got 401: every hook is a new process, and a gone account would fail at each one.
-let relogged = false
-async function relogin(p: Profile) {
-  if (relogged || Date.now() - (p.loginFailedAt ?? 0) < 600_000) return false
-  relogged = true
-  const r = await call(p.server, 'POST', '/api/login', { name: p.agent.name, auth: p.agent.auth })
-  if (r.status === 401) patchProfile({ loginFailedAt: (p.loginFailedAt = Date.now()) })
-  if (r.status !== 200 || !r.cookie) return false
-  p.cookie = r.cookie
-  patchProfile({ cookie: r.cookie })
-  return true
-}
+// Every 401 in the process waits for that one sign-in, and retries if it worked.
+let relogging: Promise<boolean> | undefined
+const relogin = (p: Profile) =>
+  (relogging ??= (async () => {
+    if (Date.now() - (p.loginFailedAt ?? 0) < 600_000) return false
+    const r = await call(p.server, 'POST', '/api/login', { name: p.agent.name, auth: p.agent.auth })
+    if (r.status === 401) patchProfile({ loginFailedAt: (p.loginFailedAt = Date.now()) })
+    if (r.status !== 200 || !r.cookie) return false
+    p.cookie = r.cookie
+    patchProfile({ cookie: r.cookie })
+    return true
+  })())
 
 export async function request(p: Profile, method: string, url: string, body?: unknown) {
   const r = await call(p.server, method, url, body, p.cookie)
@@ -116,8 +110,9 @@ export async function api<T = unknown>(p: Profile, method: string, url: string, 
 
 // Resolves once connected. Calls to the agent, from anyone, are declined at once: Phase 0 has no voice,
 // and a ringing call would keep the agent's own ring from starting. `onDead` hears of a session Talk
-// refuses after the connect, which socket.io won't retry.
-export function connect(p: Paired, onDead?: (e: Error) => void): Promise<Socket> {
+// refuses after the connect, which socket.io won't retry. socket.io-client loads here, so Stop runs skip it.
+export async function connect(p: Paired, onDead?: (e: Error) => void): Promise<Socket> {
+  const { io } = await import('socket.io-client')
   const s = io(p.server, { extraHeaders: { cookie: p.cookie }, transports: ['websocket'], query: { v: '1' } })
   s.on('call:ring', (c: { id: string }) => s.emit('call:hangup', { id: c.id }))
   return new Promise((resolve, reject) => {
@@ -126,7 +121,8 @@ export function connect(p: Paired, onDead?: (e: Error) => void): Promise<Socket>
     s.once('connect', () => (clearTimeout(timer), resolve(s)))
     s.on('connect_error', async (e: Error) => {
       if (s.active) return // a network failure: socket.io keeps retrying on its own
-      if (e.message !== 'signed out' || !(await relogin(p).catch(() => false))) return fail(`Talk refused the session: ${e.message}`)
+      const refused = s.io.opts.extraHeaders?.cookie // the sign-in is shared: a cookie this socket already tried won't do
+      if (e.message !== 'signed out' || !(await relogin(p).catch(() => false)) || p.cookie === refused) return fail(`Talk refused the session: ${e.message}`)
       s.io.opts.extraHeaders = { cookie: p.cookie }
       s.connect()
     })
@@ -135,14 +131,24 @@ export function connect(p: Paired, onDead?: (e: Error) => void): Promise<Socket>
 
 // Socket send only, always with a cid, so a resend after a lost ack stores once. While the
 // socket is down socket.io holds the emit and flushes it on reconnect; a timeout drops it and we resend.
-export async function send(s: Socket, p: Paired, key: CryptoKey, body: MessageBody, opts: { quiet?: boolean; seen?: boolean } = {}) {
-  const payload = { convId: p.dm.id, body: await sealMessage(key, p.dm.id, body), ...opts, cid: crypto.randomUUID() }
+export async function send(s: Socket, p: Paired, key: CryptoKey, body: Omit<MessageBody, 'from'>, opts: { quiet?: boolean; seen?: boolean } = {}) {
+  const payload = { convId: p.dm.id, body: await sealMessage(key, p.dm.id, { from: p.agent.id, ...body }), ...opts, cid: crypto.randomUUID() }
   for (let tries = 0; tries < 3; tries++) {
     const r = await s.timeout(10_000).emitWithAck('send', payload).catch(() => null)
     if (r?.error) throw new Error(r.error)
     if (r) return r.message as Message
   }
   throw new Error('Talk did not confirm the message.')
+}
+
+// One text on a socket of its own: notify, the pair hello, the notification hook.
+export async function say(p: Paired, text: string, opts?: { quiet?: boolean }) {
+  const s = await connect(p)
+  try {
+    return await send(s, p, await dmKey(p), { text }, opts)
+  } finally {
+    s.close()
+  }
 }
 
 // --- messages ---
@@ -158,13 +164,17 @@ export const react = async (p: Paired, key: CryptoKey, id: number, emoji: string
 
 export const read = (p: Paired, upTo: number) => api(p, 'POST', `/api/conversations/${p.dm.id}/read`, { upTo })
 
-// Every message after `cursor`, oldest first. The API has no `after`: page back from the newest.
+// Every message after `cursor`, oldest first. The API has no `after`: page back from the newest,
+// 10 first (most reads want a few), then 500, the server's most. A short page holds the oldest.
 export async function history(p: Paired, cursor: number) {
-  const page = (before = 0) => api<Message[]>(p, 'GET', `/api/conversations/${p.dm.id}/messages?limit=50${before ? `&before=${before}` : ''}`)
-  let last = await page()
-  let all = last
-  while (last.length === 50 && last[0].id > cursor) all = [...(last = await page(last[0].id)), ...all]
-  return all.filter((m) => m.id > cursor)
+  const page = (limit: number, before?: number) =>
+    api<Message[]>(p, 'GET', `/api/conversations/${p.dm.id}/messages?limit=${limit}${before ? `&before=${before}` : ''}`)
+  let all: Message[] = []
+  for (let limit = 10; ; limit = 500) {
+    const last = await page(limit, all[0]?.id)
+    all = [...last, ...all]
+    if (last.length < limit || last[0].id <= cursor) return all.filter((m) => m.id > cursor)
+  }
 }
 
 // The owner gate: our DM, sent by the owner's account, opens with the DM key, and its body says `from` the owner.
