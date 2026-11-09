@@ -21,7 +21,7 @@ const USAGE = `Usage: node ${CLI} <command>
   hooks install [--approvals] [--settings <path>]
   hooks uninstall [--settings <path>]
   hook notification|stop|permission [--expires <minutes>]   (Claude Code runs these)
-  mcp [--channel]   (Claude Code runs this: Talk tools for the session, over stdio)
+  mcp [--channel] [--expires <minutes>]   (Claude Code runs this: Talk tools for the session, over stdio)
   doctor [--settings <path>]
   stats
   unpair --yes
@@ -100,7 +100,7 @@ async function main(): Promise<number> {
       return 0
     }
     case 'mcp':
-      return (await import('./mcp.ts')).mcp(!!o.channel)
+      return (await import('./mcp.ts')).mcp(!!o.channel, o.expires === undefined ? undefined : Number(o.expires))
     case 'doctor':
       return doctor(settings)
     case 'stats':

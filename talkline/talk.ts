@@ -102,6 +102,9 @@ export const mcpMarker = () => (Number(process.env.CLAUDE_PID) ? marker(`${Numbe
 // The key a hook or a CLI run files its session's .sent, .last and .held under: a live talkline mcp's
 // for this Claude Code process, which keeps its key across /clear, else the session id.
 export const sessionKey = (sid: string) => mcpMarker()?.key || sid
+// The permission relay (4.6): a channel session's prompts reach the owner through its talkline mcp, not the
+// PermissionRequest hook. TALKLINE_RELAY=0 turns it off, for both.
+export const RELAY = process.env.TALKLINE_RELAY !== '0'
 
 // --- HTTP ---
 

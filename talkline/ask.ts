@@ -60,7 +60,7 @@ export function asked() {
   for (const [id, code] of r) codes.set(code, [...(codes.get(code) ?? []), Number(id)])
   return { ids: new Set(r.map(([id]) => Number(id))), codes, relay: new Set(r.filter((x) => x[2] === 'relay').map((x) => x[1])) }
 }
-export const record = (id: number, code: string) => appendFileSync(ASKS, `${id} ${code}\n`, { mode: 0o600 })
+export const record = (id: number, code: string, tag = '') => appendFileSync(ASKS, `${id} ${code}${tag && ` ${tag}`}\n`, { mode: 0o600 })
 
 // 5 letters, a-z without l, never one this chat has had.
 export function newCode() {
@@ -70,10 +70,11 @@ export function newCode() {
     if (!used.has(code)) return code
   }
 }
-// A new code, recorded with no await in between, so two asks in one process can't draw the same one.
-export function claim() {
-  const code = newCode()
-  record(0, code)
+// A new code, recorded with no await in between, so two asks in one process can't draw the same one. A relay asks
+// for Claude Code's request_id, which it gets unless this chat has had it; its record is tagged.
+export function claim(want = '', tag = '') {
+  const code = /^[a-km-z]{5}$/.test(want) && !asked().codes.has(want) ? want : newCode()
+  record(0, code, tag)
   return code
 }
 

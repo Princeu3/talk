@@ -10,8 +10,8 @@ import type { Socket } from 'socket.io-client'
 import { sealFile } from '../src/lib/crypto.ts'
 import type { Message, MessageBody, Reply } from '../shared/types.ts'
 import { ask, asked, cancels, claim } from './ask.ts'
-import { CAP, clip, delivered, json, route, take, type Held } from './hooks.ts'
-import { connect, dmKey, edit, file, hhmm, home, log, lstart, noteSent, react, readProfile, REMOVED, send, sessionId, upload, type Paired } from './talk.ts'
+import { bare, CAP, clip, cut, delivered, describe, json, route, stays, take, touchedSince, type Held } from './hooks.ts'
+import { connect, dmKey, edit, file, hhmm, home, log, lstart, noteSent, react, readProfile, RELAY, REMOVED, send, sessionId, upload, type Paired } from './talk.ts'
 
 const VERSION = '2' // raise it when a tool's contract changes
 const MAX_FILE = 50 * 1024 * 1024 // Talk's limit (server/index.ts)
@@ -249,14 +249,15 @@ const stranded = () => [...mine].filter(([, a]) => a.r && !a.held)
 const verdict = (a: Mine) =>
   a.r!.verdict === 'expired' ? `expired: no answer by ${hhmm(a.until)}. Treat it as no.` : a.r!.note ? `${a.r!.verdict}\n${a.r!.note}` : a.r!.verdict
 const answered = (code: string, a: Mine) => `${code} (${json(a.question.slice(0, 80))}): ${a.r!.verdict}${a.r!.note ? `, with the note ${json(a.r!.note)}` : ''}`
+// An event about an answer carries the answering message's id, and when the ask settled.
+const answeredAt = ({ id, at }: Awaited<ReturnType<typeof ask>>) => ({ ...(id && { message_id: String(id) }), at: hhmm(at), ts: String(at) })
 // Channel mode: an answer no call holds 5 s after it settles, or after the call that held it let go, goes to Claude
-// as an event, with the time and id of the message that answered.
+// as an event.
 const strand = (code: string, a: Mine) =>
   setTimeout(() => {
     if (!channel || !ready || a.held || mine.get(code) !== a) return
     mine.delete(code)
-    const { id, at } = a.r!
-    void event(`${owner} answered your question ${answered(code, a)}`, { ...(id && { message_id: String(id) }), at: hhmm(at), ts: String(at) })
+    void event(`${owner} answered your question ${answered(code, a)}`, answeredAt(a.r!))
   }, 5000)
 
 interface Out {
@@ -287,6 +288,46 @@ function reading(t?: Taken) {
     return `Answer to your question ${answered(code, a)}`
   })
   return top.length || t ? [...top, ...(t ? [t.text] : [])].join('\n') : undefined
+}
+
+// --- the permission relay (4.6) ---
+
+// Claude Code relays a permission dialog it opened: the owner gets it as a question, and his answer goes back as
+// the verdict. The dialog stays open at the Mac, and an answer there wins: touching the Mac closes the question.
+// shortcut: the relay shows Claude Code's preview, cut at 3,500 code points a field, not the hook's 6,000-character view; fine until a cut hides something Prince needed.
+const relays = new Set<Promise<void>>() // open ones, whose questions shutdown lets close
+async function relay(r: { request_id?: unknown; tool_name?: unknown; input_preview?: unknown }) {
+  const tool = String(r.tool_name ?? '')
+  const request_id = String(r.request_id ?? '')
+  // An allow from here would skip the question or approve the plan unseen: the hook leaves those at the Mac (4.7).
+  if (!channel || !RELAY || !request_id || tool === 'AskUserQuestion' || tool === 'ExitPlanMode') return
+  const pending = file(`sessions/${self}.pending`) // mutes the permission_prompt text while this asks
+  writeFileSync(pending, String(process.pid), { mode: 0o600 })
+  try {
+    const stay = await stays(Date.now())
+    if (stay) return log('notification', { kind: 'relay', sent: false, why: stay })
+    const preview = String(r.input_preview ?? '')
+    let ti: unknown
+    try {
+      ti = JSON.parse(preview)
+    } catch {} // Claude Code cut it mid-field
+    const whole = !!ti && typeof ti === 'object'
+    const name = label || 'Claude Code'
+    const shown = whole ? describe(name, tool, ti as Args, process.env.CLAUDE_PROJECT_DIR || process.cwd(), '') : { question: bare(`${name}: use ${tool}?`), detail: cut(bare(preview)) }
+    // Claude Code keeps 3,500 code points of each field, around a "⋯ N code points elided ⋯" marker. Matched
+    // loosely: a false match only adds this line.
+    const partial = (!whole || /code points? elided/.test(preview)) && 'Claude Code cut part of this request. If unsure, reply no and check at the Mac.'
+    const a = await ask(p, {
+      question: shown.question, detail: [shown.detail, partial].filter(Boolean).join('\n\n'), risk: 'high', urgent: true, ringAfter: 180, expires: expiry,
+      source: 'permission', waits: false, atMac: touchedSince, posted: (id) => noteSent(self, id), code: claim(request_id, 'relay'),
+    })
+    if (a.verdict === 'keyboard' || a.verdict === 'cancelled') return // the dialog at the Mac takes it
+    await out({ method: 'notifications/claude/channel/permission', params: { request_id, behavior: a.verdict === 'yes' ? 'allow' : 'deny' } })
+    // A verdict carries no text, so his note comes as an event; the router never hands Claude his answer itself.
+    if (a.verdict === 'no' && a.note) await event(`${owner} denied ${tool} on Talk: ${a.note}`, answeredAt(a))
+  } finally {
+    rmSync(pending, { force: true })
+  }
 }
 
 // --- tools ---
@@ -489,7 +530,7 @@ async function handle({ id, method, params }: { id?: unknown; method?: string; p
       if (channel) mark()
       log('mcp', { channel, client: String(params?.clientInfo?.version ?? ''), ...(why && { why }) })
       // A capability that is off is left out: Claude Code before 2.1.234 counted false as declared.
-      const capabilities = { tools: {}, ...(channel && { experimental: { 'claude/channel': {} } }) }
+      const capabilities = { tools: {}, ...(channel && { experimental: { 'claude/channel': {}, ...(RELAY && { 'claude/channel/permission': {} }) } }) }
       return out({ id, result: { protocolVersion: '2025-06-18', capabilities, serverInfo: { name: 'talkline', version: VERSION }, instructions: channel ? CHANNEL : INSTRUCTIONS } })
     }
     case 'notifications/initialized':
@@ -527,6 +568,10 @@ async function handle({ id, method, params }: { id?: unknown; method?: string; p
       await out({ id, result: { content: [{ type: 'text', text: r.text }], ...(r.isError && { isError: true }) } })
       return r.after?.()
     }
+    case 'notifications/claude/channel/permission_request': {
+      const r: Promise<void> = relay(params ?? {}).catch(oops).finally(() => relays.delete(r))
+      return void relays.add(r)
+    }
     case 'notifications/cancelled':
       return cancellers.get(params?.requestId)?.() // a cancelled ask stays open on Talk: wait_for_reply collects it
   }
@@ -536,8 +581,10 @@ async function handle({ id, method, params }: { id?: unknown; method?: string; p
 }
 
 let wanted = false // --channel
-export async function mcp(flag: boolean) {
+let expiry = 10 // minutes a relayed prompt waits for his answer (--expires): no 600 s hook timeout binds here
+export async function mcp(flag: boolean, expires?: number) {
   wanted = flag
+  expiry = expires ?? expiry
   let exit!: (code: number) => void
   const exited = new Promise<number>((r) => (exit = r))
   if (!refusal) {
@@ -558,7 +605,7 @@ export async function mcp(flag: boolean) {
     if (closing) return
     closing = true
     for (const c of cancels) c()
-    await Promise.race([Promise.all([...mine.values()].map((a) => a.closed)), pause(900)])
+    await Promise.race([Promise.all([...[...mine.values()].map((a) => a.closed), ...relays]), pause(900)])
     sock?.close()
     exit(0)
   }

@@ -1201,13 +1201,17 @@ test('hook permission: asks on Talk when away and gives Claude Code the answer',
   await decided(cli(['hook', 'permission', '--expires', '0.01'], { input, env: { CLAUDE_CODE_SESSION_ATTENDED: '0' } }), { behavior: 'deny', message: 'No answer on Talk', interrupt: true })
 })
 
-test('hook permission: leaves the prompt to the terminal unless idle shows 2 minutes away', { timeout: 30_000 }, async () => {
-  // A fake ioreg that reports the idle time written to IDLE_FILE, or fails like a Mac without ioreg.
+// A fake ioreg that reports the idle time set with idle(seconds), and fails like a Mac without ioreg before that.
+function fakeIdle() {
   const bin = mkdtempSync(path.join(tmp, 'ioreg-'))
   const idleFile = path.join(bin, 'idle')
   writeFileSync(path.join(bin, 'ioreg'), '#!/bin/sh\ncat "$IDLE_FILE" 2>/dev/null || exit 1\n', { mode: 0o755 })
   const idle = (seconds: number) => writeFileSync(idleFile, `"HIDIdleTime" = ${seconds * 1e9}\n`)
-  const env = { PATH: `${bin}${path.delimiter}${process.env.PATH}`, IDLE_FILE: idleFile, TALKLINE_AWAY: '' }
+  return { idle, env: { PATH: `${bin}${path.delimiter}${process.env.PATH}`, IDLE_FILE: idleFile, TALKLINE_AWAY: '' } }
+}
+
+test('hook permission: leaves the prompt to the terminal unless idle shows 2 minutes away', { timeout: 30_000 }, async () => {
+  const { idle, env } = fakeIdle()
   const input = JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'make deploy' }, session_id: 's5', cwd: '/x/demo' })
 
   // --expires keeps a wrong ask short, so it fails here and not at the test timeout.
@@ -1453,13 +1457,16 @@ test('mcp: the handshake, plain until the channel gate opens', { timeout: 30_000
     s.close()
     assert.equal(await s.done, 0)
   }
-  // TALKLINE_CHANNEL=1 stands in for the flag: a channel, with its own instructions.
+  // TALKLINE_CHANNEL=1 stands in for the flag: a channel, with its own instructions, and the permission relay.
   const s = mcp({ channel: true })
   const result = await s.init()
-  assert.deepEqual(result.capabilities, { tools: {}, experimental: { 'claude/channel': {} } })
+  assert.deepEqual(result.capabilities, { tools: {}, experimental: { 'claude/channel': {}, 'claude/channel/permission': {} } })
   assert.match(result.instructions, /^Prince's messages from Talk arrive as <channel source="talkline" message_id="…" at="…">\./)
-  s.close()
-  assert.equal(await s.done, 0)
+  // TALKLINE_RELAY=0 leaves the relay out: the key is absent, not false.
+  const off = mcp({ channel: true, env: { TALKLINE_RELAY: '0' } })
+  assert.deepEqual((await off.init()).capabilities, { tools: {}, experimental: { 'claude/channel': {} } })
+  await closeAll(s, off)
+  assert.deepEqual([await s.done, await off.done], [0, 0])
 })
 
 test('mcp: seven tools, with the keys each needs and the buzz rules', { timeout: 30_000 }, async () => {
@@ -2003,6 +2010,150 @@ test('mcp channel: what no transcript shows goes back to the Stop hook, and the 
   assert.deepEqual(lines(await stop('hpb', { CLAUDE_PID: '9001' })), ['after'])
   assert.deepEqual(c1.events().map((e) => e.content), ['seen', 'lost'])
   await closeAll(c1)
+})
+
+// A permission prompt Claude Code relays to `s`, and the question Prince gets for it.
+async function relayed(s: Mcp, request_id: string, tool_name: string, ti: object | string, first: string) {
+  const asked = fromAgent((b) => !!b.text?.startsWith(first))
+  const input_preview = typeof ti === 'string' ? ti : JSON.stringify(ti)
+  s.notify('notifications/claude/channel/permission_request', { request_id, tool_name, description: 'Run shell command', input_preview })
+  const { b } = await asked
+  return { text: b.text!, code: codeIn(b.text) }
+}
+// The verdicts `s` gave Claude Code.
+const verdicts = (s: Mcp) => s.notes.filter((n) => n.method === 'notifications/claude/channel/permission').map((n) => n.params)
+const CUT = '\n\nClaude Code cut part of this request. If unsure, reply no and check at the Mac.'
+
+test('mcp relay: his yes allows and his no denies, under the request id; a note comes once, as an event', { timeout: 30_000 }, async () => {
+  await caughtUp()
+  const [c1] = await channels(1, 'c29')
+  const env = { CLAUDE_PID: '9001' }
+  const pending = path.join(TL, 'sessions', 'c291.pending')
+  // The question's code is the request id, and Claude's reason shows.
+  const id = 'rzqvk'
+  const a = await relayed(c1, id, 'Bash', { command: 'git push', description: 'Push the branch' }, 'c1: run this command?\n')
+  assert.equal(a.code, id)
+  assert.ok(a.text.startsWith('c1: run this command?\nClaude says: Push the branch\nReply yes rzqvk or no rzqvk by '), a.text)
+  assert.ok(a.text.endsWith('\n\ngit push'), a.text)
+  // Claude Code's permission_prompt text waits while the relay asks. The hook leaves the prompt to the relay.
+  const prompt = JSON.stringify({ notification_type: 'permission_prompt', message: 'Claude needs your permission to use Bash', cwd: '/x/demo', session_id: 'h29' })
+  const permission = JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'git push' }, session_id: 'h29', cwd: '/x/demo' })
+  const events = path.join(TL, 'events.jsonl')
+  const logged = readFileSync(events, 'utf8').length
+  const ignored = ignoring()
+  result(await cli(['hook', 'notification'], { input: prompt, env }), 0, '')
+  result(await cli(['hook', 'permission'], { input: permission, env }), 0, '')
+  await ignored()
+  assert.match(readFileSync(events, 'utf8').slice(logged), /"kind":"permission_prompt","sent":false,"why":"pending".*"kind":"permission","sent":false,"why":"relay"/s)
+  // AskUserQuestion still leaves its question for the permission_prompt text.
+  result(await cli(['hook', 'permission'], { input: JSON.stringify({ tool_name: 'AskUserQuestion', tool_input: { questions: [] }, session_id: 'h29', cwd: '/x/demo' }), env }), 0, '')
+  assert.ok(existsSync(path.join(TL, 'sessions', 'h29.prompt')))
+
+  const approved = fromAgent((b) => !!b.text?.includes('\nApproved '), 'edit')
+  await send({ text: `yes ${id}` })
+  assert.match((await approved).b.text!, /^c1: run this command\?\nClaude says: Push the branch\nApproved .+\n\ngit push$/)
+  await until(() => verdicts(c1).length)
+  assert.deepEqual(verdicts(c1), [{ request_id: id, behavior: 'allow' }])
+  await until(() => !existsSync(pending))
+  // Closed, the relay mutes nothing: the text sends.
+  const got = fromAgent((b) => !!b.text?.startsWith('demo needs you at the Mac: '))
+  result(await cli(['hook', 'notification'], { input: prompt, env }), 0, '')
+  await got
+
+  // A reused request id gets a fresh code; the verdict still carries the id. A note comes as one event, with the
+  // answering message's id, and his typed answer itself goes nowhere.
+  const b = await relayed(c1, id, 'Write', { file_path: '/x/demo/a.txt', content: 'hi' }, 'c1: write /x/demo/a.txt?\n')
+  assert.notEqual(b.code, id)
+  const no = await send({ text: `no ${b.code} not on prod` })
+  await until(() => verdicts(c1).length === 2)
+  assert.deepEqual(verdicts(c1)[1], { request_id: id, behavior: 'deny' })
+  const e = await eventFor(c1, no.id)
+  assert.equal(e.content, 'Prince denied Write on Talk: not on prod')
+  await flush()
+  await pause(300)
+  assert.deepEqual(c1.events().map((x) => x.meta.message_id), [String(no.id)], 'one event')
+  assert.ok(!readdirSync(path.join(TL, 'sessions')).some((f) => f.endsWith('.held') && readFileSync(path.join(TL, 'sessions', f), 'utf8').includes(`"id":${no.id},`)), 'filed nowhere')
+
+  // AskUserQuestion and ExitPlanMode stay at the Mac: no question, no verdict.
+  const quiet = ignoring()
+  for (const tool_name of ['AskUserQuestion', 'ExitPlanMode'])
+    c1.notify('notifications/claude/channel/permission_request', { request_id: 'qwxyz', tool_name, description: '', input_preview: '{}' })
+  await c1.request('ping') // it reads its input in order
+  await quiet()
+  assert.equal(verdicts(c1).length, 2)
+  assert.ok(!existsSync(pending))
+
+  // Claude Code gone: the open question closes Cancelled, with no verdict.
+  await relayed(c1, 'qwxyb', 'Bash', { command: 'ls' }, 'c1: run this command?\n')
+  const cancelled = fromAgent((b) => !!b.text?.includes('\nCancelled: no answer needed'), 'edit')
+  await closeAll(c1)
+  assert.equal((await cancelled).b.text, 'c1: run this command?\nCancelled: no answer needed\n\nls')
+  assert.equal(verdicts(c1).length, 2)
+})
+
+test('mcp relay: previews, cut or whole, at the Mac or away, answered or not', { timeout: 30_000 }, async () => {
+  await caughtUp()
+  const file = path.join(tmp, 'projects', 'c1', 'report.txt')
+  mkdirSync(path.dirname(file), { recursive: true })
+  writeFileSync(file, 'twelve bytes')
+  const [c1] = await channels(1, 'c33')
+  const answer = async (a: { code: string }, word = 'no') => {
+    const n = verdicts(c1).length
+    await send({ text: `${word} ${a.code}` })
+    await until(() => verdicts(c1).length > n)
+  }
+  // A command with a line break, which the preview keeps as \n, shows JSON-quoted, like any value with one.
+  const two = await relayed(c1, 'tqbxa', 'Bash', '{"command": "echo ok # note\\nls"}', 'c1: run this command?\n')
+  assert.ok(two.text.endsWith('\n\n"echo ok # note\\nls"'), two.text)
+  await answer(two)
+  // A field Claude Code cut, or a preview that won't parse, adds a warning.
+  const elided = await relayed(c1, 'tqbxb', 'Bash', { command: 'echo a⋯ 1200 code points elided ⋯b' }, 'c1: run this command?\n')
+  assert.ok(elided.text.endsWith(`\n\necho a⋯ 1200 code points elided ⋯b${CUT}`), elided.text)
+  await answer(elided)
+  const broken = await relayed(c1, 'tqbxc', 'mcp__db__query', '{"sql": "drop tab', 'c1: use mcp__db__query?\n')
+  assert.ok(broken.text.endsWith(`\n\n{"sql": "drop tab${CUT}`), broken.text)
+  await answer(broken)
+  // send_file names the real file and its size.
+  const sendIt = await relayed(c1, 'tqbxd', 'mcp__talkline__send_file', { path: 'report.txt' }, 'c1: send ')
+  assert.ok(sendIt.text.startsWith('c1: send report.txt (12 B) to Talk?\n'), sendIt.text)
+  await answer(sendIt, 'yes')
+  assert.deepEqual(verdicts(c1).map((v) => v.behavior), ['deny', 'deny', 'deny', 'allow'])
+  await closeAll(c1)
+
+  // At the keyboard: no question.
+  const near = mcp({ sid: 'c33near', claudePid: 9001, label: 'c1', channel: true, env: { TALKLINE_AWAY: 'never' } })
+  await near.init()
+  const ignored = ignoring()
+  near.notify('notifications/claude/channel/permission_request', { request_id: 'tqbxe', tool_name: 'Bash', description: '', input_preview: '{"command": "ls"}' })
+  await near.request('ping')
+  await until(() => readFileSync(path.join(TL, 'events.jsonl'), 'utf8').includes('"kind":"relay","sent":false,"why":"keyboard"'))
+  assert.ok(!existsSync(path.join(TL, 'sessions', 'c33near.pending')))
+  await ignored()
+  await closeAll(near)
+
+  // No answer: one deny, and the question says so.
+  const short = mcp({ sid: 'c33short', claudePid: 9001, label: 'c1', channel: true, args: ['--expires', '0.01'] })
+  await short.init()
+  const expired = fromAgent((b) => !!b.text?.includes('\nExpired, denied'), 'edit')
+  await relayed(short, 'tqbxf', 'Bash', { command: 'ls' }, 'c1: run this command?\n')
+  assert.equal((await expired).b.text, 'c1: run this command?\nExpired, denied\n\nls')
+  await until(() => verdicts(short).length)
+  assert.deepEqual(verdicts(short), [{ request_id: 'tqbxf', behavior: 'deny' }])
+  assert.deepEqual(short.events(), [])
+  await closeAll(short)
+
+  // Back at the Mac before he answers: the terminal dialog takes it, with no verdict.
+  const { idle, env } = fakeIdle()
+  idle(300)
+  const back = mcp({ sid: 'c33back', claudePid: 9001, label: 'c1', channel: true, env })
+  await back.init()
+  const handed = fromAgent((b) => !!b.text?.includes('\nBack at the Mac: answer there'), 'edit')
+  await relayed(back, 'tqbxg', 'Bash', { command: 'ls' }, 'c1: run this command?\n')
+  idle(0.5)
+  await handed
+  await until(() => !existsSync(path.join(TL, 'sessions', 'c33back.pending')))
+  assert.deepEqual(verdicts(back), [])
+  await closeAll(back)
 })
 
 test('unpair --yes removes the helper and deletes the profile', { timeout: 30_000 }, async () => {

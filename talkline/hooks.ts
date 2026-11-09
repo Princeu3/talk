@@ -8,7 +8,8 @@ import { setTimeout as pause } from 'node:timers/promises'
 import type { Socket } from 'socket.io-client'
 import type { Message, MessageBody } from '../shared/types.ts'
 import { ask, asked, CHAT, PLAIN, record, typed } from './ask.ts'
-import { CLI, dmKey, file, gate, history, hhmm, home, log, lstart, markers, mcpMarker, noteSent, patchProfile, react, read, readProfile, say, send, sessionId, type Marker, type Paired } from './talk.ts'
+import { fileSize } from '../src/lib/format.ts'
+import { CLI, dmKey, file, gate, history, hhmm, home, log, lstart, markers, mcpMarker, noteSent, patchProfile, react, read, readProfile, RELAY, say, send, sessionId, type Marker, type Paired } from './talk.ts'
 
 export const SETTINGS = path.join(homedir(), '.claude', 'settings.json')
 // Ours, also from an older checkout path.
@@ -43,7 +44,20 @@ export function idleSeconds() {
 }
 
 // Keyboard or mouse used since `t`, by one idle reading. Unknown idle never counts.
-const touchedSince = (t: number, idle = idleSeconds()) => (idle ?? Infinity) * 1000 <= Date.now() - t
+export const touchedSince = (t: number, idle = idleSeconds()) => (idle ?? Infinity) * 1000 <= Date.now() - t
+// Why a permission prompt opened at `t0` stays at the Mac, or nothing once the owner has been away 2 minutes. Claude
+// Code asks once, so this waits, looking every 2 s; touching the Mac first leaves the prompt to the terminal. Over SSH
+// or off macOS, idle time can't see who sits at the terminal: the prompt stays there unless TALKLINE_AWAY=always.
+export async function stays(t0: number) {
+  let idle = idleSeconds()
+  if (idle === null) return 'unknown idle'
+  for (;;) {
+    if (touchedSince(t0, idle)) return 'keyboard' // TALKLINE_AWAY=never: at once
+    if ((idle ?? Infinity) >= 120) return
+    await pause(2000)
+    idle = idleSeconds()
+  }
+}
 
 // --- settings.json ---
 
@@ -191,7 +205,8 @@ export async function hook(event: string, input: Input, print: (out: string) => 
   if (event === 'notification') {
     const kind = String(input.notification_type)
     if (!KINDS.includes(kind)) return
-    if (kind === 'permission_prompt' && live(session('pending'), TEN_MINUTES)) return log('notification', { kind, sent: false, why: 'pending' })
+    // A permission ask already waits on Talk: the hook's, under this run's session id, or the relay's, under the key.
+    if (kind === 'permission_prompt' && [session('pending'), keyed('pending')].some((f) => live(f, TEN_MINUTES))) return log('notification', { kind, sent: false, why: 'pending' })
     // Claude Code sends idle_prompt after 60 s without typing, so 60 s idle means the owner left before Claude finished. Unknown counts as away.
     const idle = idleSeconds()
     if (idle !== null && idle < (kind === 'idle_prompt' ? 60 : 120)) return log('notification', { kind, sent: false, why: 'keyboard' })
@@ -237,53 +252,18 @@ export async function hook(event: string, input: Input, print: (out: string) => 
   // These need the terminal. Keep the input, so the permission_prompt text can show the question.
   if (tool === 'AskUserQuestion' || tool === 'ExitPlanMode') return writeFileSync(session('prompt'), JSON.stringify({ tool, ti: input.tool_input ?? {} }), { mode: 0o600 })
   const skip = (why: string) => log('notification', { kind: 'permission', sent: false, why })
+  // A channel session's talkline mcp relays this same prompt (4.6): one question, not two.
+  if (m?.channel && RELAY) return skip('relay')
   const t0 = Date.now()
-  let idle = idleSeconds()
-  // Over SSH or off macOS, idle time can't see who sits at the terminal: the prompt stays there unless TALKLINE_AWAY=always.
-  if (idle === null) return skip('unknown idle')
-  if (touchedSince(t0, idle)) return skip('keyboard') // TALKLINE_AWAY=never
-  const ti = input.tool_input ?? {}
-  const target = String(ti.file_path ?? ti.notebook_path ?? '')
-  // The whole request, so a yes approves only what the owner saw: past 6,000 chars, its start and end.
-  // 6,000 fits Talk's 64 KB message limit even when every char escapes to 6 bytes of JSON.
-  const cut = (t: string) =>
-    t.length <= 6000 ? t : `${t.slice(0, 3000)}\n… ${t.length - 6000} more characters not shown. If unsure, reply no and check at the Mac …\n${t.slice(-3000)}`
-  const dir = String(input.cwd ?? '')
-  // Display only: a yes approves the raw input, cut as before at 6,000 characters. /tmp/…/scratchpad is this
-  // session's scratchpad, and ~ your home, each only at the start of a path. ~ shows only in the question line:
-  // in a command or file content a quoted ~ stays a literal ~, so '~/x' would read as a harmless folder.
-  const at = (prefix: string) => new RegExp(`(?<=^|[\\s'"=:(])${prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=/|[\\s'";|&)]|$)`, 'g')
-  const pad = String(input.scratchpad_dir ?? '')
-  const scratch = (t: string) => (pad ? t.replace(at(pad), '/tmp/…/scratchpad') : t)
-  const tidy = (t: string) => scratch(t).replace(at(homedir()), '~')
-  const one = (s: string) => (BREAK.test(s) ? json(s) : s)
-  const where = one(dir && target.startsWith(dir + '/') ? target.slice(dir.length + 1) : tidy(target))
-  const mark = (s: unknown, m: string) => String(s ?? '').split(BREAK).map((l) => m + l).join('\n') // a mark on every shown line
-  // Text-direction controls show as escapes, so a command can't read one way on Talk and run another.
-  const bare = (t: string) => t.replace(/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, esc)
-  const fields = () => Object.entries(ti).map(([k, v]) => `${one(k)}: ${typeof v === 'string' ? one(v) : json(v)}`).join('\n')
-  const [action, detail] =
-    tool === 'Bash' ? [`run this command${ti.run_in_background ? ' in the background' : ''}${ti.dangerouslyDisableSandbox ? ' outside the sandbox' : ''}`, String(ti.command ?? '')]
-    : tool === 'Edit' ? [`edit ${where}`, `${mark(ti.old_string, '- ')}\n${mark(ti.new_string, '+ ')}${ti.replace_all ? '\n(every match)' : ''}`]
-    : tool === 'Write' ? [`write ${where}`, String(ti.content ?? '')]
-    : tool === 'MultiEdit' || tool === 'NotebookEdit' ? [`edit ${where}`, fields()]
-    : tool === 'WebFetch' ? [`fetch ${one(String(ti.url))}`, '']
-    : [`use ${tool.replace(/^mcp__(.+?)__/, '$1 ')}`, fields()]
-  // Only Bash's description is Claude's reason. An MCP tool's description field is content, shown with the fields.
-  const why = tool === 'Bash' ? String(ti.description ?? '').replace(/[\s\u0085]+/g, ' ').trim().slice(0, 120) : '' // \s misses NEL
   // Claude Code 2.1.319 sets CLAUDE_CODE_SESSION_ATTENDED to "1" in interactive and desktop sessions, "0" in -p, background and daemon runs.
   // A channel session's expiry denies instead: Claude goes on, and can tell the owner on Talk what didn't run.
   const waits = !m?.channel && process.env.CLAUDE_CODE_SESSION_ATTENDED !== '0' // unset (older versions) counts as attended
   writeFileSync(session('pending'), String(process.pid))
   try {
-    // Claude Code asks once, so wait here until 2 minutes without keyboard or mouse; touching the Mac first leaves it to the terminal.
-    while ((idle ?? Infinity) < 120) {
-      await pause(2000)
-      if (touchedSince(t0, (idle = idleSeconds()))) return skip('keyboard')
-    }
+    const stay = await stays(t0)
+    if (stay) return skip(stay)
     const { verdict, note } = await ask(p, {
-      question: bare(`${label}: ${action}?${why ? `\nClaude says: ${tidy(why)}` : ''}`),
-      detail: cut(bare(scratch(detail))),
+      ...describe(label, tool, input.tool_input ?? {}, String(input.cwd ?? ''), String(input.scratchpad_dir ?? '')),
       risk: 'high',
       urgent: true,
       ringAfter: 180,
@@ -305,6 +285,47 @@ export async function hook(event: string, input: Input, print: (out: string) => 
   }
 }
 
+// The whole request, so a yes approves only what the owner saw: past 6,000 chars, its start and end.
+// 6,000 fits Talk's 64 KB message limit even when every char escapes to 6 bytes of JSON.
+export const cut = (t: string) =>
+  t.length <= 6000 ? t : `${t.slice(0, 3000)}\n… ${t.length - 6000} more characters not shown. If unsure, reply no and check at the Mac …\n${t.slice(-3000)}`
+// Text-direction controls show as escapes, so a command can't read one way on Talk and run another.
+export const bare = (t: string) => t.replace(/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, esc)
+
+// What a permission ask shows for a tool call, from the PermissionRequest hook's input or the relay's preview.
+// Display only: a yes approves the raw input, cut as before at 6,000 characters. /tmp/…/scratchpad is this
+// session's scratchpad, and ~ your home, each only at the start of a path. ~ shows only in the question line:
+// in a command or file content a quoted ~ stays a literal ~, so '~/x' would read as a harmless folder.
+export function describe(label: string, tool: string, ti: Record<string, unknown>, dir: string, pad: string) {
+  const target = String(ti.file_path ?? ti.notebook_path ?? '')
+  const at = (prefix: string) => new RegExp(`(?<=^|[\\s'"=:(])${prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=/|[\\s'";|&)]|$)`, 'g')
+  const scratch = (t: string) => (pad ? t.replace(at(pad), '/tmp/…/scratchpad') : t)
+  const tidy = (t: string) => scratch(t).replace(at(homedir()), '~')
+  const one = (s: string) => (BREAK.test(s) ? json(s) : s)
+  const where = one(dir && target.startsWith(dir + '/') ? target.slice(dir.length + 1) : tidy(target))
+  const mark = (s: unknown, m: string) => String(s ?? '').split(BREAK).map((l) => m + l).join('\n') // a mark on every shown line
+  const fields = () => Object.entries(ti).map(([k, v]) => `${one(k)}: ${typeof v === 'string' ? one(v) : json(v)}`).join('\n')
+  // send_file's file, as the tool would send it: the real file's name, and its size.
+  const sending = () => {
+    const f = path.resolve(dir, String(ti.path ?? ''))
+    try {
+      const st = statSync(f)
+      if (st.isFile()) return `${one(path.basename(realpathSync(f)))} (${fileSize(st.size)})`
+    } catch {} // missing, or a path it can't read: the tool refuses those too
+    return `${one(path.basename(f))} (not a file)`
+  }
+  const [action, detail] =
+    tool === 'Bash' ? [`run this command${ti.run_in_background ? ' in the background' : ''}${ti.dangerouslyDisableSandbox ? ' outside the sandbox' : ''}`, one(String(ti.command ?? ''))]
+    : tool === 'Edit' ? [`edit ${where}`, `${mark(ti.old_string, '- ')}\n${mark(ti.new_string, '+ ')}${ti.replace_all ? '\n(every match)' : ''}`]
+    : tool === 'Write' ? [`write ${where}`, String(ti.content ?? '')]
+    : tool === 'MultiEdit' || tool === 'NotebookEdit' ? [`edit ${where}`, fields()]
+    : tool === 'WebFetch' ? [`fetch ${one(String(ti.url))}`, '']
+    : tool === 'mcp__talkline__send_file' ? [`send ${sending()} to Talk`, fields()]
+    : [`use ${tool.replace(/^mcp__(.+?)__/, '$1 ')}`, fields()]
+  // Only Bash's description is Claude's reason. An MCP tool's description field is content, shown with the fields.
+  const why = tool === 'Bash' ? String(ti.description ?? '').replace(/[\s\u0085]+/g, ' ').trim().slice(0, 120) : '' // \s misses NEL
+  return { question: bare(`${label}: ${action}?${why ? `\nClaude says: ${tidy(why)}` : ''}`), detail: cut(bare(scratch(detail))) }
+}
 
 // --- the router: route() files each owner message in one session's .held, take() hands a session its lines ---
 
