@@ -114,7 +114,7 @@ Claude Code may ask at start:
 
 | Prompt | When | Answer |
 | --- | --- | --- |
-| Do you trust the files in this folder? | A folder Claude Code hasn't seen | Yes |
+| Quick safety check: Is this a project you created or one you trust? | A folder Claude Code hasn't seen | "Yes, I trust this folder" |
 | WARNING: Loading development channels | Every `claudet` start | "I am using this for local development" |
 | New MCP server found in this project | A project `.mcp.json` server. Never talkline: `claudet` brings its own and turns off a project one of that name. | Your call, for other servers |
 
