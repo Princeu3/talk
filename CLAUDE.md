@@ -6,6 +6,7 @@ Node 24+ runs `server/*.ts` directly (type stripping): imports need `.ts` extens
 - `npm run dev`: server on :3000 plus Vite on :5173 (needs `SETUP_CODE` for a first account)
 - `npm run check`: typecheck
 - `npm test`: end-to-end tests (spawns the server)
+- `node talkline/cli.ts <command>`: the Claude Code bridge (Phase 0): pair, notify, ask, hooks; see `talkline/README.md`
 - `railway up`: deploy the live server by hand (project `talk`, volume at `/data`)
 - Pushes to `master` deploy the push relay (`talk-push`) and the demo server (`talk-demo`, App Review uses it) through Railway's GitHub integration; GitHub Actions runs CI (`.github/workflows/ci.yml`)
 - `railway up relay --path-as-root -p cfe9ad88-4f60-417e-808b-bfe41b9d4da4 -e production -s relay`: deploy the push relay (project `talk-push` in the personal Railway workspace, never the work one); plain `railway up .` from `relay/` fails with "prefix not found"
@@ -31,6 +32,7 @@ Node 24+ runs `server/*.ts` directly (type stripping): imports need `.ts` extens
 - CI builds the iPhone app with Xcode 26.6, whose type checker is slower than local Xcode 27: split long SwiftUI bodies into separate properties and keep operators out of `ForEach` closures. Reproduce a CI "unable to type-check" locally by adding `-Xfrontend -solver-disable-prune-disjunctions -Xfrontend -solver-disable-prepared-overloads -Xfrontend -solver-disable-optimize-operator-defaults -Xfrontend -solver-disable-binding-optimizations` to `OTHER_SWIFT_FLAGS`.
 - App Store Connect pages render blank in browser-pane screenshots: read and click them through `javascript_tool` (`innerText`, `[role=dialog]`), or use the API key in `~/.appstoreconnect/talk.env` (`docs/app-store/TESTFLIGHT.md`).
 - Test browser profiles may keep year-cached 500s for old attachments; a 500 with no server log line is that cache, not a bug.
+- On Prince's Mac, Claude Code hooks run `talkline/cli.ts` from this checkout: do talkline work in a git worktree and keep this checkout on `master` with `talkline/` present, or every session's hooks fail.
 
 ## Design
 - Palette: soft white `#e8e9df`, sage `#a9b887`, deep olive `#2e3d28`, split 60/30/10: backgrounds / your own bubbles and selected states / actions, badges, focus. Use the tokens in `src/styles.css`, never raw hex or `text-white` in components (the black call and photo overlays are the exception).
