@@ -1,7 +1,8 @@
 // The Talk client under talkline: the profile on disk, HTTP with the helper's
 // token (or a Phase 0 session cookie), the socket, sealed messages and the events
 // log. All crypto comes from the apps' own src/lib/crypto.ts.
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { appendFileSync, chmodSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -67,6 +68,52 @@ export const sessionId = (v: unknown) => String(v ?? '').replace(/[^A-Za-z0-9_-]
 // What a session sent the owner, a message id a line, so the Stop inbox gives a swipe-reply to it back to that session.
 export const noteSent = (sid: string, id: number) => (home(), appendFileSync(file(`sessions/${sid}.sent`), `${id}\n`, { mode: 0o600 }))
 
+// One ps field of a process: '' once it's gone, undefined when ps can't say within 2 s (a stuck ps must not
+// block a hook or the whole talkline mcp). SIGKILL, since execFileSync waits for the child to exit and SIGTERM can
+// be ignored. TZ=UTC keeps a start time's text the same across a time-zone change.
+export function ps(pid: number, field: 'lstart' | 'args') {
+  try {
+    return execFileSync('ps', ['-o', `${field}=`, '-p', String(pid)], { encoding: 'utf8', env: { PATH: process.env.PATH, LC_ALL: 'C', TZ: 'UTC' }, stdio: ['ignore', 'pipe', 'ignore'], timeout: 2000, killSignal: 'SIGKILL' }).trim()
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'ETIMEDOUT' ? undefined : ''
+  }
+}
+// When a process started, as ps prints it. A reused pid has another start time.
+export const lstart = (pid: number) => ps(pid, 'lstart')
+// This process's start time, read once it can be: it never changes.
+let mine: string | undefined
+export const ownStart = () => (mine ??= lstart(process.pid))
+
+// mcp/<claudePid>.json: a running `talkline mcp`. `key` names its session files, `got` is when it last took
+// a message from the owner, and `waiting` is true while an ask or wait_for_reply call waits.
+export interface Marker {
+  pid: number
+  lstart: string
+  key: string
+  channel: boolean
+  label: string
+  started: number
+  got?: number
+  waiting?: boolean
+}
+// shortcut: dead markers stay in mcp/ until their CLAUDE_PID starts a new server; sweep them at start if the folder grows.
+export function marker(name: string): Marker | undefined {
+  try {
+    const m: Marker = JSON.parse(readFileSync(file(`mcp/${name}`), 'utf8'))
+    // A dead pid throws, before any ps. A stuck ps counts as live: a hook stands aside for a channel session rather than ask beside its relay.
+    return m.lstart && process.kill(m.pid, 0) && (lstart(m.pid) ?? m.lstart) === m.lstart ? m : undefined
+  } catch {}
+}
+export const markers = () => (existsSync(file('mcp')) ? readdirSync(file('mcp')) : []).filter((f) => f.endsWith('.json')).flatMap((f) => marker(f) ?? [])
+// The live talkline mcp of the Claude Code process a hook or a CLI run belongs to, if any.
+export const mcpMarker = () => (Number(process.env.CLAUDE_PID) ? marker(`${Number(process.env.CLAUDE_PID)}.json`) : undefined)
+// The key a hook or a CLI run files its session's .sent, .last and .held under: a live talkline mcp's
+// for this Claude Code process, which keeps its key across /clear, else the session id.
+export const sessionKey = (sid: string) => mcpMarker()?.key || sid
+// The permission relay (4.6): a channel session's prompts reach the owner through its talkline mcp, not the
+// PermissionRequest hook. TALKLINE_RELAY=0 turns it off, for both.
+export const RELAY = process.env.TALKLINE_RELAY !== '0'
+
 // --- HTTP ---
 
 // Per request and per socket connect. The Stop and Notification hooks lower it, so a dead network can't hold up Claude Code.
@@ -78,12 +125,14 @@ export const authHeader = (p: Profile): Record<string, string> =>
 // A helper's token is never refreshed: 401 means its owner removed it (or denied it).
 export const REMOVED = 'Removed in Talk. Run unpair --yes, then link a new helper.'
 
-export async function call(server: string, method: string, url: string, body?: unknown, headers: Record<string, string> = {}) {
+// JSON, or raw bytes as they are.
+export async function call(server: string, method: string, url: string, body?: unknown, headers: Record<string, string> = {}, ms = limits.ms) {
+  const raw = body instanceof Uint8Array
   const r = await fetch(server + url, {
     method,
-    headers: { 'content-type': 'application/json', ...headers },
-    body: body === undefined ? undefined : JSON.stringify(body),
-    signal: AbortSignal.timeout(limits.ms),
+    headers: { 'content-type': raw ? 'application/octet-stream' : 'application/json', ...headers },
+    body: body === undefined ? undefined : raw ? (body as Uint8Array<ArrayBuffer>) : JSON.stringify(body),
+    signal: AbortSignal.timeout(ms),
   }).catch(() => {
     throw new Error(`Could not reach ${server}.`)
   })
@@ -156,6 +205,14 @@ export async function send(s: Socket, p: Paired, key: CryptoKey, body: Omit<Mess
   throw new Error('Talk did not confirm the message.')
 }
 
+// Sealed bytes as an attachment, by POST. 120 s, for 50 MB on a slow link.
+export async function upload(p: Paired, sealed: Uint8Array<ArrayBuffer>) {
+  const r = await call(p.server, 'POST', `/api/conversations/${p.dm.id}/attachments`, sealed, authHeader(p), 120_000)
+  if (r.status === 401 && p.token) throw new Error(REMOVED)
+  if (r.status >= 300) throw new Error(`Talk refused the file: ${r.data?.error ?? r.status}`)
+  return r.data.id as string
+}
+
 // One text on a socket of its own: notify, the pair hello, the notification hook.
 export async function say(p: Paired, text: string, opts?: { quiet?: boolean }) {
   const s = await connect(p)
@@ -193,15 +250,28 @@ export async function history(p: Paired, cursor: number) {
 }
 
 // The first message id each body of the owner's came under, by the body's IV: lines of "<iv> <id>".
+// Read by byte offset: a process that lives for hours sees what other processes recorded since.
 // shortcut: the seen file grows forever (about 25 bytes per owner message) and each run reads it whole; pair can reset it if it gets big.
-// shortcut: read once per process, so two talkline processes running at once could each take one replayed body in a narrow window; lock the file if that matters.
-let ivs: Map<string, number> | undefined
+// shortcut: ask's catch-up gates outside inbox.lock, so two processes could each take one replayed body in a narrow window; codes never repeat, so a replay can't answer an ask.
+const ivs = new Map<string, number>()
+let seenTo = 0
 function seen() {
-  if (ivs) return ivs
-  ivs = new Map()
-  for (const l of existsSync(file('seen')) ? readFileSync(file('seen'), 'utf8').split('\n') : []) {
-    const [iv, id] = l.split(' ')
-    if (id && !ivs.has(iv)) ivs.set(iv, Number(id))
+  const size = statSync(file('seen'), { throwIfNoEntry: false })?.size ?? 0
+  if (size < seenTo) seenTo = 0 // the file was reset
+  if (size > seenTo) {
+    const fd = openSync(file('seen'), 'r')
+    const buf = Buffer.alloc(size - seenTo)
+    try {
+      readSync(fd, buf, 0, buf.length, seenTo)
+    } finally {
+      closeSync(fd)
+    }
+    const end = buf.lastIndexOf(10) + 1 // a half-written line waits for the next read
+    for (const l of buf.subarray(0, end).toString().split('\n')) {
+      const [iv, id] = l.split(' ')
+      if (id && !ivs.has(iv)) ivs.set(iv, Number(id))
+    }
+    seenTo += end
   }
   return ivs
 }

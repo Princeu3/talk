@@ -8,9 +8,9 @@ import { text as readAll } from 'node:stream/consumers'
 import { parseArgs } from 'node:util'
 import { b64, deriveIdentity, safetyCode, unwrapConvKey } from '../src/lib/crypto.ts'
 import type { Me } from '../shared/types.ts'
-import { ask, cancel } from './ask.ts'
+import { ask, cancels } from './ask.ts'
 import { hook, idleSeconds, ourHooks, readSettings, SETTINGS, setHooks } from './hooks.ts'
-import { api, call, CLI, connect, file, limits, log, noteSent, paired, patchProfile, readProfile, REMOVED, saveProfile, say, sessionId, type Paired } from './talk.ts'
+import { api, call, CLI, connect, file, limits, log, noteSent, paired, patchProfile, readProfile, REMOVED, saveProfile, say, sessionId, sessionKey, type Paired } from './talk.ts'
 
 const PAIR = `pair '<agent link>' [--name "Claude AI"]   (make the link in Talk: Settings > Agents)`
 const USAGE = `Usage: node ${CLI} <command>
@@ -21,6 +21,7 @@ const USAGE = `Usage: node ${CLI} <command>
   hooks install [--approvals] [--settings <path>]
   hooks uninstall [--settings <path>]
   hook notification|stop|permission [--expires <minutes>]   (Claude Code runs these)
+  mcp [--channel] [--expires <minutes>]   (Claude Code runs this: Talk tools for the session, over stdio)
   doctor [--settings <path>]
   stats
   unpair --yes
@@ -36,15 +37,15 @@ const print = (text: string) => write(process.stdout, text + '\n')
 for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const)
   process.on(sig, () => {
     process.exitCode = 128 + constants.signals[sig]
-    if (!cancel) process.exit()
-    cancel()
+    if (!cancels.size) process.exit()
+    for (const c of cancels) c()
     setTimeout(() => process.exit(), 1000).unref()
   })
 
 // Run from Claude Code, whose Bash sets CLAUDE_CODE_SESSION_ID (the hooks' session_id): name the session, and send a swipe-reply back to it.
 const sid = sessionId(process.env.CLAUDE_CODE_SESSION_ID)
 const label = sid ? `${path.basename(process.cwd())}: ` : ''
-const sent = (id: number) => void (sid && noteSent(sid, id))
+const sent = (id: number) => void (sid && noteSent(sessionKey(sid), id))
 
 async function main(): Promise<number> {
   const { values: o, positionals: [cmd, ...args] } = parseArgs({
@@ -53,10 +54,16 @@ async function main(): Promise<number> {
       // owner: unused since Phase 1, kept so an old pair command reaches the link hint, not "Unknown option".
       owner: { type: 'string' }, name: { type: 'string' }, detail: { type: 'string' }, risk: { type: 'string' },
       'ring-after': { type: 'string' }, expires: { type: 'string' }, settings: { type: 'string' },
-      quiet: { type: 'boolean' }, urgent: { type: 'boolean' }, approvals: { type: 'boolean' }, yes: { type: 'boolean' },
+      quiet: { type: 'boolean' }, urgent: { type: 'boolean' }, approvals: { type: 'boolean' }, yes: { type: 'boolean' }, channel: { type: 'boolean' },
     },
   })
   const settings = o.settings ?? SETTINGS
+  // --expires: the minutes a question stays open. Closing it edits it, and Talk allows edits for 15 minutes.
+  const minutes = (max: number, why = 'closing the question edits it, and Talk allows edits for 15 minutes') => {
+    const m = o.expires === undefined ? undefined : Number(o.expires)
+    if (m !== undefined && !(m > 0 && m <= max)) throw new Error(`--expires takes minutes, more than 0 and at most ${max}: ${why}.`)
+    return m
+  }
   switch (cmd) {
     case 'pair':
       return pair(args[0], o.name ?? 'Claude AI')
@@ -67,10 +74,8 @@ async function main(): Promise<number> {
     case 'ask': {
       const risk = o.risk ?? 'high'
       const ringAfter = Number(o['ring-after'] ?? 180)
-      const expires = Number(o.expires ?? 10)
       if (!args.length || (risk !== 'low' && risk !== 'high') || !(ringAfter >= 0)) break
-      if (!(expires > 0 && expires <= 14))
-        throw new Error('--expires takes minutes, more than 0 and at most 14: closing the question edits it, and Talk allows edits for 15 minutes.')
+      const expires = minutes(14) ?? 10
       const { verdict, note } = await ask(paired(), { question: label + args.join(' '), detail: o.detail, risk, urgent: !!o.urgent, ringAfter, expires, source: 'cli', posted: sent })
       if (verdict === 'cancelled') return Number(process.exitCode)
       await print(note ? `${verdict}\n${note}` : verdict) // only a no carries a note
@@ -91,12 +96,18 @@ async function main(): Promise<number> {
       }
       try {
         const raw = await readAll(process.stdin) // decodes UTF-8 across chunk boundaries
-        const out = await hook(event, JSON.parse(raw.trim() || '{}'), o.expires === undefined ? undefined : Number(o.expires))
-        if (out) await print(out)
+        // Only the permission hook asks, so only it reads --expires. 8, the default, leaves 2 minutes to close the
+        // question: a ring step takes up to 10 s, a Talk request 15.
+        const expires = event === 'permission' ? minutes(8, "the hook closes its question within Claude Code's 600 s hook timeout") : undefined
+        await hook(event, JSON.parse(raw.trim() || '{}'), print, expires)
       } catch (e) {
         log('error', { where: `hook ${event}`, message: (e as Error).message })
       }
       return 0
+    }
+    case 'mcp': {
+      const expires = minutes(14) // a bad one fails before the import reads the profile
+      return (await import('./mcp.ts')).mcp(!!o.channel, expires)
     }
     case 'doctor':
       return doctor(settings)
