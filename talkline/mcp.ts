@@ -186,9 +186,9 @@ const oops = (e: Error) => log('error', { where: 'mcp', message: e.message })
 const event = (content: string, meta: Record<string, string>) =>
   out({ method: 'notifications/claude/channel', params: { content: content.replace(/<(?=\/?channel\b)/gi, '&lt;'), meta } })
 // Channel mode: this key's lines go to Claude as events, oldest first, once Claude Code can take them, and never
-// while a call waits here: that call takes them.
+// while a call waits here (that call takes them) or once Stop wrote .nochannel (Stop takes them).
 async function push() {
-  const t = channel && ready && !waits ? await lines(Infinity, Infinity, () => channel && !waits) : undefined
+  const t = channel && ready && !waits ? await lines(Infinity, Infinity, () => channel && !waits && !existsSync(file(`sessions/${self}.nochannel`))) : undefined
   if (!t) return
   for (const h of t.hs)
     await event(clip(h.text ?? h.line, CAP), {

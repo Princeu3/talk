@@ -199,7 +199,8 @@ export async function hook(event: string, input: Input, print: (out: string) => 
   const m = mcpMarker() // this session's talkline mcp, if one runs: a channel or plain
   const self = m?.key || sid // .sent, .last and .held: a live talkline mcp's key, which outlives /clear
   const keyed = (ext: string) => file(`sessions/${self}.${ext}`)
-  const label = path.basename(String(input.cwd ?? '')) || 'Claude Code'
+  // The talkline mcp's label, which routing matches; input.cwd follows Claude's `cd`.
+  const label = m?.label || path.basename(String(input.cwd ?? '')) || 'Claude Code'
   const sent = (id: number) => noteSent(self, id)
 
   if (event === 'notification') {
@@ -232,8 +233,10 @@ export async function hook(event: string, input: Input, print: (out: string) => 
     // The owner's messages since the last read, handed to Claude as context, oldest first. Route and take
     // share 2 s of waiting for inbox.lock, inside the 5 s Claude Code gives a Stop.
     const end = Date.now() + 2000
-    // A channel hands its session the messages, but for what it delivered that no transcript shows (plan B).
-    if (m?.channel && !(input.transcript_path && (await lost(self, input.transcript_path, 2000)))) return
+    // A channel hands its session the messages, but for what it delivered that no transcript shows (plan B). The
+    // check goes on after .nochannel turns the process plain: lines under 10 s old then wait for a later Stop.
+    const unseen = !!input.transcript_path && existsSync(keyed('delivered')) && (await lost(self, input.transcript_path, 2000))
+    if (m?.channel && !unseen) return
     const key = await dmKey(p)
     await route(p, key, self, { wait: end - Date.now() })
     const answer = m ? 'use the send_message tool, or the ask tool for a yes or no' : `run node "${CLI}" notify "<text>", or ask "<question>?" for a yes or no`
@@ -528,6 +531,12 @@ export async function route(p: Paired, key: CryptoKey, self: string, o: { sock?:
 export async function take(p: Paired, key: CryptoKey, self: string, o: { cap?: number; limit?: number; wait?: number } = {}) {
   const at = (f: string) => file(`sessions/${f}`)
   const mine = at(`${self}.taking.${process.pid}`)
+  // Whole files: a tmp file, then rename. A key never starts with a dot.
+  const put = (to: string, hs: Held[]) => {
+    if (!hs.length) return rmSync(to, { force: true })
+    writeFileSync(at(`.${process.pid}.tmp`), hs.map((h) => JSON.stringify(h) + '\n').join(''), { mode: 0o600 })
+    renameSync(at(`.${process.pid}.tmp`), to)
+  }
   const got = await locked(o.wait ?? 10_000, async () => {
     const adopted = readdirSync(file('sessions')).filter((f) => {
       const pid = Number(f.slice(self.length + 8))
@@ -539,12 +548,6 @@ export async function take(p: Paired, key: CryptoKey, self: string, o: { cap?: n
       .filter((h, i, a) => !i || h.id !== a[i - 1].id) // a kill mid-take can leave a line in two files
     let n = 0
     for (let size = 0; n < all.length && n < (o.limit ?? Infinity) && (!n || size + 1 + all[n].line.length <= (o.cap ?? Infinity)); n++) size += 1 + all[n].line.length
-    // Whole files: a tmp file, then rename. A key never starts with a dot.
-    const put = (to: string, hs: Held[]) => {
-      if (!hs.length) return rmSync(to, { force: true })
-      writeFileSync(at(`.${process.pid}.tmp`), hs.map((h) => JSON.stringify(h) + '\n').join(''), { mode: 0o600 })
-      renameSync(at(`.${process.pid}.tmp`), to)
-    }
     put(mine, all.slice(0, n))
     put(at(`${self}.held`), all.slice(n))
     for (const f of adopted) if (at(f) !== mine) rmSync(at(f), { force: true })
@@ -552,9 +555,21 @@ export async function take(p: Paired, key: CryptoKey, self: string, o: { cap?: n
   })
   if (!got?.lines.length) return
   // The first 👀 alone, before delivery: 403 means the owner blocked the agent, so nothing more reaches Claude.
-  const status = await react(p, key, got.lines[0].id, '👀').catch(() => 0)
+  // 404 means he unsent it: it goes, and the next line takes its place.
+  let status: number
+  while ((status = await react(p, key, got.lines[0].id, '👀').catch(() => 0)) === 404) {
+    log('inbox', { count: 0, why: 'unsent', id: got.lines.shift()!.id })
+    put(mine, got.lines)
+    if (!got.lines.length) return
+  }
   if (status === 403) return void (rmSync(mine, { force: true }), log('inbox', { count: 0, why: 'blocked' }))
-  if (status < 200 || status >= 300) return // Talk out of reach: the next take delivers them
+  // Talk out of reach: the lines go back to .held for any later take, a Stop's too, since no other process adopts
+  // a live one's .taking. Without the lock in time they stay in .taking, for this process's next take.
+  if (status < 200 || status >= 300)
+    return void (await locked(o.wait ?? 10_000, async () => {
+      appendFileSync(at(`${self}.held`), got.lines.map((h) => JSON.stringify(h) + '\n').join(''), { mode: 0o600 })
+      rmSync(mine, { force: true })
+    }))
   return {
     lines: got.lines,
     // Delete first: a kill after delivery and before this delivers them twice, the only duplicate. Then the rest's 👀, and read.

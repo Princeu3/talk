@@ -1004,6 +1004,22 @@ test('hook stop: once the owner blocks the agent, nothing more reaches Claude', 
   assert.equal(await stop('s3'), '') // nor after an unblock
 })
 
+test('hook stop: a held message he unsent is dropped, and the session still gets what he sent next', { timeout: 30_000 }, async () => {
+  await caughtUp()
+  // un2 wrote to him, and he swipe-replied; un1's Stop came first, so the reply waits in un2.held. Then he unsent it.
+  const n = fromAgent()
+  result(await cli(['notify', 'here'], { env: { CLAUDE_CODE_SESSION_ID: 'un2' } }), 0, '')
+  const { m, b } = await n
+  const gone = await send({ text: 'for un2, then unsent', reply: { id: m.id, from: agent.id, preview: b.text! } })
+  assert.equal(await stop('un1'), '')
+  assert.equal((await api(prince, 'DELETE', `/api/messages/${gone.id}`)).status, 200)
+  // With no receiver, his next message goes to the next session to stop: un2, whose 👀 on the unsent line gets 404.
+  await send({ text: 'after the unsend' })
+  assert.deepEqual(lines(await stop('un2')), ['after the unsend'])
+  assert.ok(!readdirSync(path.join(TL, 'sessions')).some((f) => f === 'un2.held' || f.startsWith('un2.taking.')), 'nothing left for un2')
+  assert.match(readFileSync(path.join(TL, 'events.jsonl'), 'utf8'), new RegExp(`"why":"unsent","id":${gone.id}\\}`))
+})
+
 test('hook stop: a server that never answers holds Claude Code up for seconds, not minutes', { timeout: 30_000 }, async () => {
   const conns: Conn[] = []
   const hole = createServer((conn) => void conns.push(conn))
@@ -1595,6 +1611,29 @@ test('mcp read_messages: the read block, marked, with 👀 on each, once', { tim
   await s.done
 })
 
+test("mcp read_messages: with Talk out of reach, the lines go back to .held, so the session's Stop gets them", { timeout: 30_000 }, async () => {
+  await caughtUp()
+  const s = mcp({ sid: 'm8' })
+  const said = await sentBy(s, 'ping')
+  // A swipe-reply to this session, routed by another session's Stop, waits in its .held.
+  await send({ text: 'still there?', reply: { id: said.id, from: agent.id, preview: 'proj: ping' } })
+  assert.equal(await stop('x8'), '')
+  const down = new Promise((r) => server.once('exit', r))
+  server.kill()
+  await down
+  try {
+    assert.equal(await s.tool('read_messages'), 'No new messages.')
+  } finally {
+    await startServer()
+  }
+  assert.deepEqual(readdirSync(path.join(TL, 'sessions')).filter((f) => f.startsWith('m8.')).sort(), ['m8.held', 'm8.sent'])
+  await reconnected()
+  // A Stop never takes a .taking file of a process still running, such as this one's.
+  assert.deepEqual(lines(await stop('h8', { CLAUDE_PID: String(s.claudePid) })), [`(reply to message ${said.id}, quoted: "proj: ping") still there?`])
+  s.close()
+  await s.done
+})
+
 test('mcp wait_for_reply: returns when he writes, times out, and a cancelled wait takes nothing', { timeout: 30_000 }, async () => {
   await caughtUp()
   const s = mcp({ sid: 'm7' })
@@ -1853,12 +1892,13 @@ test('mcp channel: the hooks of a channel session leave the messages to it and b
   await ignored()
   assert.match(readFileSync(events, 'utf8').slice(logged), /"ev":"notification","kind":"idle_prompt","sent":false,"why":"answered"/)
   // Three minutes on, it sends, without "needs you at the Mac": a reply reaches the session. A swipe-reply to it does.
+  // It names the session c1, as routing does, not demo: the hook's cwd follows Claude's cd.
   const then = new Date(Date.now() - 180_000)
   utimesSync(key('sent'), then, then)
-  const got = fromAgent((b) => !!b.text?.startsWith('demo: '))
+  const got = fromAgent((b) => !!b.text?.startsWith('c1: '))
   result(await cli(['hook', 'notification'], { input: idle, env }), 0, '')
   const n = await got
-  assert.equal(n.b.text, 'demo: Claude is waiting for your input\nAll done.')
+  assert.equal(n.b.text, 'c1: Claude is waiting for your input\nAll done.')
   assert.ok(readFileSync(key('sent'), 'utf8').endsWith(`\n${n.m.id}\n`), 'noted under the key')
   const back = await send({ text: 'on my way', reply: { id: n.m.id, from: agent.id, preview: n.b.text!.slice(0, 200) } })
   assert.equal((await eventFor(c1, back.id)).meta.reply_to, String(n.m.id))
@@ -1867,7 +1907,7 @@ test('mcp channel: the hooks of a channel session leave the messages to it and b
   const closed = fromAgent((b) => !!b.text?.includes('\nExpired, denied'), 'edit')
   const input = JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'ls' }, session_id: 'h18', cwd: '/x/demo' })
   await decided(cli(['hook', 'permission', '--expires', '0.01'], { input, env: { ...env, TALKLINE_RELAY: '0' } }), { behavior: 'deny', message: 'No answer on Talk' })
-  assert.match((await closed).b.text!, /^demo: run this command\?\nExpired, denied\n\nls$/)
+  assert.match((await closed).b.text!, /^c1: run this command\?\nExpired, denied\n\nls$/)
   await closeAll(c1)
 })
 
@@ -1986,29 +2026,43 @@ test("mcp channel: his text can't close the channel tag, a quote goes raw for Cl
 test('mcp channel: what no transcript shows goes back to the Stop hook, and the session runs plain from then on', { timeout: 30_000 }, async () => {
   await caughtUp()
   const [c1] = await channels(1, 'cpb')
+  const at = path.join(TL, 'sessions', 'cpb1.delivered')
+  // .delivered once it holds n lines, and the same lines 11 s older, past the 10 s a Stop gives the transcript.
+  const delivered = (n: number) =>
+    until(() => {
+      const ds: { id: number; t: number }[] = existsSync(at) ? readFileSync(at, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []
+      return ds.length === n ? ds : undefined
+    })
+  const older = (ds: { t: number }[]) => writeFileSync(at, ds.map((d) => JSON.stringify({ ...d, t: d.t - 11_000 }) + '\n').join(''))
+  const transcript = path.join(tmp, 'transcripts', 'cpb.jsonl')
+  const stopped = async () => {
+    const r = await cli(['hook', 'stop'], { input: JSON.stringify({ session_id: 'hpb', cwd: '/x/demo', transcript_path: transcript }), env: { CLAUDE_PID: '9001' } })
+    assert.equal(r.code, 0, r.stderr)
+    return lines(JSON.parse(r.stdout).hookSpecificOutput.additionalContext)
+  }
   const seen = await send({ text: 'seen' })
   const lost = await send({ text: 'lost' })
   await eventFor(c1, lost.id)
-  // Both went out over 10 s ago, and Claude Code's transcript shows only the first.
-  const at = path.join(TL, 'sessions', 'cpb1.delivered')
-  const out = await until(() => {
-    const ds: { id: number; t: number }[] = existsSync(at) ? readFileSync(at, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []
-    return ds.length === 2 ? ds : undefined
-  })
+  // Both went out over 10 s ago, and Claude Code's transcript shows only the first. 'young' went out just now.
+  const out = await delivered(2)
   assert.deepEqual(out.map((d) => d.id), [seen.id, lost.id])
-  writeFileSync(at, out.map((d) => JSON.stringify({ ...d, t: d.t - 11_000 }) + '\n').join(''))
-  const transcript = path.join(tmp, 'transcripts', 'cpb.jsonl')
+  older(out)
+  await eventFor(c1, (await send({ text: 'young' })).id)
+  await delivered(3)
   mkdirSync(path.dirname(transcript), { recursive: true })
   writeFileSync(transcript, JSON.stringify({ type: 'user', message: { content: `<channel source="talkline" message_id="${seen.id}" at="9:00">seen</channel>` } }) + '\n')
-  const r = await cli(['hook', 'stop'], { input: JSON.stringify({ session_id: 'hpb', cwd: '/x/demo', transcript_path: transcript }), env: { CLAUDE_PID: '9001' } })
-  assert.equal(r.code, 0, r.stderr)
-  assert.deepEqual(lines(JSON.parse(r.stdout).hookSpecificOutput.additionalContext), ['lost'])
-  // Within 5 s the process reads .nochannel and runs plain: Stop hands over what comes next.
+  assert.deepEqual(await stopped(), ['lost'])
+  // Sent after the Stop wrote .nochannel, which the process reads within 5 s: it isn't pushed, and waits for a Stop.
+  await send({ text: 'gap' })
   await until(() => c1.marker().channel === false)
   assert.ok(!existsSync(path.join(TL, 'sessions', 'cpb1.nochannel')))
+  // A plain Stop once 'young' is 10 s old: no transcript shows it either, so it comes back, with 'gap'.
+  older(await delivered(1))
+  assert.deepEqual(await stopped(), ['young', 'gap'])
+  // From then on Stop hands over what comes next.
   await send({ text: 'after' })
   assert.deepEqual(lines(await stop('hpb', { CLAUDE_PID: '9001' })), ['after'])
-  assert.deepEqual(c1.events().map((e) => e.content), ['seen', 'lost'])
+  assert.deepEqual(c1.events().map((e) => e.content), ['seen', 'lost', 'young'])
   await closeAll(c1)
 })
 
@@ -2056,7 +2110,7 @@ test('mcp relay: his yes allows and his no denies, under the request id; a note 
   assert.deepEqual(verdicts(c1), [{ request_id: id, behavior: 'allow' }])
   await until(() => !existsSync(pending))
   // Closed, the relay mutes nothing: the text sends.
-  const got = fromAgent((b) => !!b.text?.startsWith('demo needs you at the Mac: '))
+  const got = fromAgent((b) => !!b.text?.startsWith('c1 needs you at the Mac: '))
   result(await cli(['hook', 'notification'], { input: prompt, env }), 0, '')
   await got
 
