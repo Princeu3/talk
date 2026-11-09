@@ -96,8 +96,10 @@ async function main(): Promise<number> {
       }
       try {
         const raw = await readAll(process.stdin) // decodes UTF-8 across chunk boundaries
-        // 8, the default, leaves 2 minutes to close the question: a ring step takes up to 10 s, a Talk request 15.
-        await hook(event, JSON.parse(raw.trim() || '{}'), print, minutes(8, "the hook closes its question within Claude Code's 600 s hook timeout"))
+        // Only the permission hook asks, so only it reads --expires. 8, the default, leaves 2 minutes to close the
+        // question: a ring step takes up to 10 s, a Talk request 15.
+        const expires = event === 'permission' ? minutes(8, "the hook closes its question within Claude Code's 600 s hook timeout") : undefined
+        await hook(event, JSON.parse(raw.trim() || '{}'), print, expires)
       } catch (e) {
         log('error', { where: `hook ${event}`, message: (e as Error).message })
       }

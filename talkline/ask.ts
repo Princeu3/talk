@@ -267,6 +267,8 @@ export async function ask(p: Paired, o: AskOptions): Promise<{ verdict: Verdict;
     return { verdict, note, id, at }
   } finally {
     // Talk refused the question or the session (then no answer can come), or it settled: all of it goes.
+    // A posted ask Talk dropped closes too, or a failing catch-up read would retry every 2 s while the process lives.
+    if (askIds.length) settle('cancelled')
     cancels.delete(cancel)
     timers.forEach(clearTimeout)
     s.close()

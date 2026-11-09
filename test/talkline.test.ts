@@ -1207,6 +1207,11 @@ test('hook permission: asks on Talk when away and gives Claude Code the answer',
     await ignored()
     assert.match(readFileSync(events, 'utf8').slice(logged), /"ev":"error","where":"hook permission","message":"--expires takes minutes, more than 0 and at most 8: /)
   }
+  // Stop and Notification don't use it, so a bad one changes nothing there.
+  await caughtUp()
+  await send({ text: 'and run the linter' })
+  const stopped = await cli(['hook', 'stop', '--expires', '9'], { input: JSON.stringify({ session_id: 's1', cwd: '/x/demo' }) })
+  assert.match(stopped.stdout, /and run the linter/)
 
   // Away: asked on Talk, and Claude Code's own permission_prompt notification adds nothing meanwhile.
   const a = await asking(['hook', 'permission'], question, { input })
@@ -1445,8 +1450,15 @@ test('a removed helper stops at once', { timeout: 30_000 }, async () => {
   const a = await during(run, pending('Gone AI'))
   await allow(a)
   assert.equal((await run.done).code, 0)
-  assert.equal((await api(prince, 'DELETE', `/api/agents/${a.id}`)).status, 200)
   const env = { TALKLINE_HOME: home }
+  // An open ask ends too, closed in the asks file, so none of its catch-up reads keeps trying.
+  const asks = path.join(home, 'asks')
+  const open = start(['ask', 'Ship it?'], { env })
+  const code = (await until(() => /^[1-9]\d* ([a-z]{5})$/m.exec(existsSync(asks) ? readFileSync(asks, 'utf8') : '')))[1]
+  assert.equal((await api(prince, 'DELETE', `/api/agents/${a.id}`)).status, 200)
+  const gone = await open.done
+  assert.equal(gone.code, 3, gone.stderr)
+  assert.match(readFileSync(asks, 'utf8'), new RegExp(`^-1 ${code}$`, 'm'))
   const r = await cli(['notify', 'Still here?'], { env })
   assert.equal(r.code, 3, r.stderr)
   assert.equal(r.stderr, 'Removed in Talk. Run unpair --yes, then link a new helper.\n')
@@ -2151,6 +2163,12 @@ test('mcp channel: what no transcript shows goes back to the Stop hook, and the 
   assert.deepEqual(lines(await stop('hpb', { CLAUDE_PID: '9001' })), ['after'])
   assert.deepEqual(c1.events().map((e) => e.content), ['before /clear', 'seen', 'lost', 'young'])
   await closeAll(c1)
+  // With nothing sent after a .nochannel, the 5 s check alone turns a session plain.
+  const [c2] = await channels(1, 'cpbt')
+  await eventFor(c2, (await send({ text: 'ready' })).id) // past its first delivery, so only the timer reads the file
+  writeFileSync(path.join(TL, 'sessions', 'cpbt1.nochannel'), '')
+  await until(() => c2.marker().channel === false)
+  await closeAll(c2)
 })
 
 // A permission prompt Claude Code relays to `s`, and the question Prince gets for it.
