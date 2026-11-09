@@ -298,7 +298,13 @@ async function caughtUp() {
 }
 
 // A process's start time as ps prints it, which markers and inbox.lock carry.
-const lstartOf = (pid: number) => execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8', env: { PATH: process.env.PATH, LC_ALL: 'C' } }).trim()
+const lstartOf = (pid: number) => execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8', env: { PATH: process.env.PATH, LC_ALL: 'C', TZ: 'UTC' } }).trim()
+// A PATH whose `cmd` hangs, as a stuck ioreg or ps would.
+function stuck(cmd: string) {
+  const bin = mkdtempSync(path.join(tmp, `${cmd}-`))
+  writeFileSync(path.join(bin, cmd), '#!/bin/sh\nexec sleep 30\n', { mode: 0o755 })
+  return `${bin}${path.delimiter}${process.env.PATH}`
+}
 // The marker a talkline mcp would write for Claude Code pid `claudePid`: by default a plain process waiting in an
 // ask, played by the test runner, so it is live. Returns its remover.
 function marker(claudePid: number, key: string, o: object = {}) {
@@ -1250,10 +1256,8 @@ test('hook permission: leaves the prompt to the terminal unless idle shows 2 min
   let ignored = ignoring()
   result(await cli(hook, { input, env }), 0, '') // idle unknown
   // An ioreg that hangs reads as unknown after 2 s, rather than holding the hook until Claude Code ends it.
-  const stuck = mkdtempSync(path.join(tmp, 'ioreg-'))
-  writeFileSync(path.join(stuck, 'ioreg'), '#!/bin/sh\nexec sleep 30\n', { mode: 0o755 })
   const t0 = Date.now()
-  result(await cli(hook, { input, env: { ...env, PATH: `${stuck}${path.delimiter}${process.env.PATH}` } }), 0, '')
+  result(await cli(hook, { input, env: { ...env, PATH: stuck('ioreg') } }), 0, '')
   assert.ok(Date.now() - t0 < 10_000, `took ${Date.now() - t0} ms`)
   idle(300)
   result(await cli(hook, { input, env: { ...env, SSH_CONNECTION: '10.0.0.2 52000 10.0.0.1 22' } }), 0, '')
@@ -1500,7 +1504,10 @@ test('mcp: the handshake, plain until the channel gate opens', { timeout: 30_000
   // TALKLINE_RELAY=0 leaves the relay out: the key is absent, not false.
   const off = mcp({ channel: true, env: { TALKLINE_RELAY: '0' } })
   assert.deepEqual((await off.init()).capabilities, { tools: {}, experimental: { 'claude/channel': {} } })
-  assert.deepEqual(await closeAll(s, off), [0, 0])
+  // With ps stuck, its marker can't carry a start time, so hooks would read it as dead and ask beside a relay: plain.
+  const blind = mcp({ channel: true, env: { PATH: stuck('ps') } })
+  assert.deepEqual((await blind.init()).capabilities, { tools: {} })
+  assert.deepEqual(await closeAll(s, off, blind), [0, 0, 0])
 })
 
 test('mcp: seven tools, with the keys each needs and the buzz rules', { timeout: 30_000 }, async () => {
@@ -2179,6 +2186,13 @@ test('mcp relay: his yes allows and his no denies, under the request id; a note 
   result(await cli(['hook', 'permission'], { input: permission, env }), 0, '')
   await ignored()
   assert.match(readFileSync(events, 'utf8').slice(logged), /"kind":"permission_prompt","sent":false,"why":"pending".*"kind":"permission","sent":false,"why":"relay"/s)
+  // A stuck ps can't check c1's marker: the hook still counts it live and leaves the prompt to the relay, within seconds.
+  const t0 = Date.now()
+  const stalled = ignoring()
+  result(await cli(['hook', 'permission'], { input: permission, env: { ...env, PATH: stuck('ps') } }), 0, '')
+  await stalled()
+  assert.ok(Date.now() - t0 < 10_000, `took ${Date.now() - t0} ms`)
+  assert.match(readFileSync(events, 'utf8').slice(logged), /"kind":"permission","sent":false,"why":"relay".*"kind":"permission","sent":false,"why":"relay"/s)
   // AskUserQuestion still leaves its question for the permission_prompt text.
   result(await cli(['hook', 'permission'], { input: JSON.stringify({ tool_name: 'AskUserQuestion', tool_input: { questions: [] }, session_id: 'h29', cwd: '/x/demo' }), env }), 0, '')
   assert.ok(existsSync(path.join(TL, 'sessions', 'h29.prompt')))

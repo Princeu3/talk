@@ -10,7 +10,7 @@ import { sealFile } from '../src/lib/crypto.ts'
 import type { Message, MessageBody, Reply } from '../shared/types.ts'
 import { ask, asked, cancels, claim } from './ask.ts'
 import { AT_MAC, bare, block, CAP, clip, cut, delivered, describe, json, PERMISSION, route, sendable, stays, take, type Held } from './hooks.ts'
-import { connect, dmKey, edit, file, hhmm, home, log, lstart, noteSent, ps, react, readProfile, RELAY, REMOVED, send, sessionId, upload, type Paired } from './talk.ts'
+import { connect, dmKey, edit, file, hhmm, home, log, noteSent, ownStart, ps, react, readProfile, RELAY, REMOVED, send, sessionId, upload, type Paired } from './talk.ts'
 
 const VERSION = '2' // raise it when a tool's contract changes
 const MAX_FILE = 50 * 1024 * 1024 // Talk's limit (server/index.ts)
@@ -50,8 +50,10 @@ const version = (v: unknown) => String(v).split('.').reduce((t, x) => t * 1e6 + 
 // shortcut: the parent's command line is the only sign Claude Code registered the channel; use Claude Code's own signal if one ships.
 function whyPlain(client?: { name?: string; version?: string }) {
   if (refusal) return profile?.cookie ? 'phase0' : 'unpaired'
+  // A marker without its start time reads as dead, and then the permission hook would ask beside the relay.
+  if (ownStart() === undefined) return 'ps'
   if (process.env.TALKLINE_CHANNEL === '1') return
-  const args = ps(process.ppid, 'args')
+  const args = ps(process.ppid, 'args') ?? ''
   if (!/\s--dangerously-load-development-channels(\s+[^-\s]\S*)*?\s+server:talkline(\s|$)/.test(args) || /\s(-p|--print)(\s|$)/.test(args)) return 'flag'
   if (client?.name === 'claude-code' && version(client.version) < version('2.1.234')) return 'version'
 }
@@ -72,7 +74,7 @@ function mark(first = false) {
   if (!first && !own()) return
   mkdirSync(path.dirname(MARKER), { recursive: true, mode: 0o700 })
   const tmp = `${MARKER}.${process.pid}.tmp`
-  writeFileSync(tmp, JSON.stringify({ pid: process.pid, lstart: lstart(process.pid), key: self, channel, label, started, got, waiting: waits > 0 }), { mode: 0o600 })
+  writeFileSync(tmp, JSON.stringify({ pid: process.pid, lstart: ownStart(), key: self, channel, label, started, got, waiting: waits > 0 }), { mode: 0o600 })
   renameSync(tmp, MARKER)
 }
 const waiting = (d: number) => {

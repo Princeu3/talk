@@ -9,7 +9,7 @@ import type { Socket } from 'socket.io-client'
 import type { Message, MessageBody } from '../shared/types.ts'
 import { ask, asked, CHAT, PLAIN, record, typed } from './ask.ts'
 import { fileSize } from '../src/lib/format.ts'
-import { CLI, dmKey, file, gate, history, hhmm, home, log, lstart, markers, mcpMarker, noteSent, patchProfile, react, read, readProfile, RELAY, say, send, sessionId, type Marker, type Paired } from './talk.ts'
+import { CLI, dmKey, file, gate, history, hhmm, home, log, lstart, markers, mcpMarker, noteSent, ownStart, patchProfile, react, read, readProfile, RELAY, say, send, sessionId, type Marker, type Paired } from './talk.ts'
 
 export const SETTINGS = path.join(homedir(), '.claude', 'settings.json')
 // Ours, also from an older checkout path.
@@ -391,7 +391,6 @@ function held(m: Message, b: MessageBody): Held {
 // pid (Phase 1's) counts as dead. A dead holder's lock is stolen inside mkdir(inbox.lock.steal), so two
 // stealers can't both take it; a .steal left by a crash goes after 10 s.
 const LOCK = file('inbox.lock')
-let lockLine: string | undefined
 function grab(me: string) {
   try {
     writeFileSync(LOCK, me, { flag: 'wx', mode: 0o600 })
@@ -399,8 +398,8 @@ function grab(me: string) {
   } catch {}
   const was = readOr(LOCK)
   const [pid, ...start] = (was ?? '').split(' ')
-  // Gone a moment ago, ours, still being written, or held: wait.
-  if (was === undefined || was === me || (!was && fresh(LOCK, 10_000)) || (start.length && lstart(Number(pid)) === start.join(' '))) return false
+  // Gone a moment ago, ours, still being written, or held (a stuck ps can't say it isn't): wait.
+  if (was === undefined || was === me || (!was && fresh(LOCK, 10_000)) || (start.length && (lstart(Number(pid)) ?? start.join(' ')) === start.join(' '))) return false
   const steal = `${LOCK}.steal`
   try {
     mkdirSync(steal)
@@ -421,7 +420,9 @@ function grab(me: string) {
 }
 // Runs f holding inbox.lock, once it is free within `wait` ms; undefined if it never was.
 async function locked<T>(wait: number, f: () => Promise<T>) {
-  const me = (lockLine ??= `${process.pid} ${lstart(process.pid)}`)
+  const start = ownStart()
+  if (start === undefined) return // a stuck ps: others couldn't check this holder, so take nothing this time
+  const me = `${process.pid} ${start}`
   for (const end = Date.now() + wait; !grab(me); await pause(100)) if (Date.now() >= end) return
   const release = () => void (readOr(LOCK) === me && rmSync(LOCK, { force: true }))
   process.once('exit', release) // a watchdog's or a signal's process.exit skips finally

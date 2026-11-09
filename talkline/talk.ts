@@ -68,16 +68,20 @@ export const sessionId = (v: unknown) => String(v ?? '').replace(/[^A-Za-z0-9_-]
 // What a session sent the owner, a message id a line, so the Stop inbox gives a swipe-reply to it back to that session.
 export const noteSent = (sid: string, id: number) => (home(), appendFileSync(file(`sessions/${sid}.sent`), `${id}\n`, { mode: 0o600 }))
 
-// One ps field of a process, or '' once it's gone.
+// One ps field of a process: '' once it's gone, undefined when ps can't say within 2 s (a stuck ps must not
+// block a hook or the whole talkline mcp). TZ=UTC keeps a start time's text the same across a time-zone change.
 export function ps(pid: number, field: 'lstart' | 'args') {
   try {
-    return execFileSync('ps', ['-o', `${field}=`, '-p', String(pid)], { encoding: 'utf8', env: { PATH: process.env.PATH, LC_ALL: 'C' }, stdio: ['ignore', 'pipe', 'ignore'] }).trim()
-  } catch {
-    return ''
+    return execFileSync('ps', ['-o', `${field}=`, '-p', String(pid)], { encoding: 'utf8', env: { PATH: process.env.PATH, LC_ALL: 'C', TZ: 'UTC' }, stdio: ['ignore', 'pipe', 'ignore'], timeout: 2000 }).trim()
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'ETIMEDOUT' ? undefined : ''
   }
 }
 // When a process started, as ps prints it. A reused pid has another start time.
 export const lstart = (pid: number) => ps(pid, 'lstart')
+// This process's start time, read once it can be: it never changes.
+let mine: string | undefined
+export const ownStart = () => (mine ??= lstart(process.pid))
 
 // mcp/<claudePid>.json: a running `talkline mcp`. `key` names its session files, `got` is when it last took
 // a message from the owner, and `waiting` is true while an ask or wait_for_reply call waits.
@@ -95,7 +99,8 @@ export interface Marker {
 export function marker(name: string): Marker | undefined {
   try {
     const m: Marker = JSON.parse(readFileSync(file(`mcp/${name}`), 'utf8'))
-    return m.lstart && process.kill(m.pid, 0) && lstart(m.pid) === m.lstart ? m : undefined // a dead pid throws, before any ps
+    // A dead pid throws, before any ps. A stuck ps counts as live: a hook stands aside for a channel session rather than ask beside its relay.
+    return m.lstart && process.kill(m.pid, 0) && (lstart(m.pid) ?? m.lstart) === m.lstart ? m : undefined
   } catch {}
 }
 export const markers = () => (existsSync(file('mcp')) ? readdirSync(file('mcp')) : []).filter((f) => f.endsWith('.json')).flatMap((f) => marker(f) ?? [])
