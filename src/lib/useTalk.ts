@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, ApiError, socket } from './api.ts'
 import * as c from './crypto.ts'
 import { fits, names, userName } from './format.ts'
-import type { Conversation, FileRef, GroupCall, LinkPreview, Me, Message, MessageBody, Reaction, ReactionBody, Voice } from '../../shared/types.ts'
+import type { Agent, Conversation, FileRef, GroupCall, LinkPreview, Me, Message, MessageBody, Reaction, ReactionBody, Voice } from '../../shared/types.ts'
 
 export interface Decrypted extends Message {
   content: MessageBody | null // null: could not decrypt
@@ -77,6 +77,15 @@ async function shrink(b64: string, type?: string) {
   } finally {
     bmp.close()
   }
+}
+
+// A pending helper proved its key with the secret from a link this browser made: HMAC-SHA256 of
+// 'talk-pair-v1:' + its key. 'no secret': the link came from another browser (or was used here already).
+async function checkAgent(a: Agent): Promise<'no secret' | 'bad proof' | 'ok'> {
+  const s = localStorage.getItem(`talk:agent-link:${a.invite}`)
+  if (!s) return 'no secret'
+  const key = await crypto.subtle.importKey('raw', c.unb64(s), { name: 'HMAC', hash: 'SHA-256' }, false, ['verify'])
+  return (await crypto.subtle.verify('HMAC', key, c.unb64(a.proof), new TextEncoder().encode(`talk-pair-v1:${a.pubkey}`))) ? 'ok' : 'bad proof'
 }
 
 export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
@@ -469,8 +478,8 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
     return p
   }
 
-  // One user id makes (or reuses) a DM; more make a group.
-  const createConversation = async (userIds: string[], title?: string) => {
+  // One user id makes (or reuses) a DM; more make a group. `pins` are keys to wrap for in place of the listed ones.
+  const createConversation = async (userIds: string[], title?: string, pins?: Record<string, string>) => {
     const m = meRef.current!
     if (userIds.length === 1) {
       const existing = m.conversations.find((x) => x.kind === 'dm' && x.members.includes(userIds[0]))
@@ -482,13 +491,43 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
     const members = await Promise.all(
       ids.map(async (uid) => ({
         userId: uid,
-        wrappedKey: await c.wrapConvKey(raw, privateKey, m.users.find((u) => u.id === uid)!.pubkey, id, uid),
+        wrappedKey: await c.wrapConvKey(raw, privateKey, pins?.[uid] ?? m.users.find((u) => u.id === uid)!.pubkey, id, uid),
       })),
     )
     const kind = userIds.length === 1 ? 'dm' : 'group'
     await api('POST', '/api/conversations', { id, kind, title: kind === 'group' ? title : undefined, members })
     await load()
     return id
+  }
+
+  // My public key from my private key, X25519(priv, 9): never the server's copy, which it could swap.
+  const ownPubkey = async () => {
+    const base = new Uint8Array(32)
+    base[0] = 9 // the X25519 base point
+    const pt = await crypto.subtle.importKey('raw', base, { name: 'X25519' }, false, [])
+    return c.b64(new Uint8Array(await crypto.subtle.deriveBits({ name: 'X25519', public: pt }, privateKey, 256)))
+  }
+
+  // A 10-minute, one-use helper link. Its fragment (never sent to the server) pins my id, my key and
+  // a secret that talkline proves it holds; this browser keeps the secret to check that proof at Allow.
+  const linkAgent = async () => {
+    const m = meRef.current!
+    const k = await ownPubkey()
+    if (k !== m.user.pubkey) throw new Error('This server has a different key for you. Don’t link a helper here.')
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone
+    const { code, expiresAt } = await api<{ code: string; expiresAt: number }>('POST', '/api/invites', { agent: true, tz })
+    const s = c.b64(crypto.getRandomValues(new Uint8Array(32)))
+    // shortcut: only the browser that made the link can Allow, and unused entries stay; sync the secret across devices if owners link on one and allow on another.
+    localStorage.setItem(`talk:agent-link:${code}`, s)
+    return { link: `${location.origin}/?agent=${code}#o=${m.user.id}&k=${k}&s=${s}`, expiresAt }
+  }
+
+  // Allow: the DM is the approval. Its key is wrapped for the helper key whose proof just checked and for
+  // my key from my private key, never for keys from `users` or a reloaded `me`, where the server could swap one.
+  const allowAgent = async (a: Agent) => {
+    if ((await checkAgent(a)) !== 'ok') throw new Error('This helper didn’t prove it has your link. Deny it.')
+    await createConversation([a.id], undefined, { [meRef.current!.user.id]: await ownPubkey(), [a.id]: a.pubkey })
+    localStorage.removeItem(`talk:agent-link:${a.invite}`)
   }
 
   // A group event as a centered line ("Alice added Bob"), sealed like any message.
@@ -595,7 +634,7 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
   return {
     me, messages, pending, hasOlder, activeId, totalUnread, typers, focus, setFocus,
     open, loadOlder, backfill, history, openAt, send, retry, discard, sendWithFiles, fileUrl, createConversation, addMembers,
-    react, edit, unsend, forward, typing, setMine, rename, removeMember, leave, block, report,
+    react, edit, unsend, forward, typing, setMine, rename, removeMember, leave, block, report, linkAgent, checkAgent, allowAgent,
   }
 }
 

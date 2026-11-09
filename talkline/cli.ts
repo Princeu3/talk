@@ -1,17 +1,19 @@
 #!/usr/bin/env node
-// talkline: the Claude Code bridge to Talk (Phase 0). Commands below; see talkline/README.md.
+// talkline: the Claude Code bridge to Talk (Phase 1). Commands below; see talkline/README.md.
+import { createHmac } from 'node:crypto'
 import { existsSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { constants, hostname } from 'node:os'
 import { text as readAll } from 'node:stream/consumers'
 import { parseArgs } from 'node:util'
-import { b64, deriveIdentity, newConvKeyBytes, safetyCode, unwrapConvKey, wrapConvKey } from '../src/lib/crypto.ts'
+import { b64, deriveIdentity, safetyCode, unwrapConvKey } from '../src/lib/crypto.ts'
 import type { Me } from '../shared/types.ts'
 import { ask, cancel } from './ask.ts'
 import { hook, idleSeconds, ourHooks, readSettings, SETTINGS, setHooks } from './hooks.ts'
-import { api, call, CLI, file, limits, log, paired, patchProfile, readProfile, request, saveProfile, say, type Paired } from './talk.ts'
+import { api, call, CLI, connect, file, limits, log, paired, patchProfile, readProfile, REMOVED, request, saveProfile, say, type Paired } from './talk.ts'
 
+const PAIR = `pair '<agent link>' [--name "Claude AI"]   (make the link in Talk: Settings > Agents)`
 const USAGE = `Usage: node ${CLI} <command>
-  pair <invite link> --owner <name> [--name "Claude AI"]
+  ${PAIR}
   notify <text> [--quiet]
   ask <question> [--detail <text>] [--risk low|high] [--urgent] [--ring-after <seconds>] [--expires <minutes>]
       prints yes, no or expired, and exits 0, 1 or 2 (128 + the signal if stopped, 130 for Ctrl+C)
@@ -42,6 +44,7 @@ async function main(): Promise<number> {
   const { values: o, positionals: [cmd, ...args] } = parseArgs({
     allowPositionals: true,
     options: {
+      // owner: unused since Phase 1, kept so an old pair command reaches the link hint, not "Unknown option".
       owner: { type: 'string' }, name: { type: 'string' }, detail: { type: 'string' }, risk: { type: 'string' },
       'ring-after': { type: 'string' }, expires: { type: 'string' }, settings: { type: 'string' },
       quiet: { type: 'boolean' }, urgent: { type: 'boolean' }, approvals: { type: 'boolean' }, yes: { type: 'boolean' },
@@ -50,7 +53,7 @@ async function main(): Promise<number> {
   const settings = o.settings ?? SETTINGS
   switch (cmd) {
     case 'pair':
-      return pair(args[0], o.owner, o.name ?? 'Claude AI')
+      return pair(args[0], o.name ?? 'Claude AI')
     case 'notify':
       if (!args.length) break
       await say(paired(), args.join(' '), { quiet: o.quiet })
@@ -97,74 +100,87 @@ async function main(): Promise<number> {
       if (!o.yes) throw new Error('unpair deletes the agent account on the server and the local profile. Run unpair --yes to do it.')
       const p = readProfile()
       if (!p) throw new Error('Not paired.')
-      await api(p, 'DELETE', '/api/me', { auth: p.agent.auth })
+      if (p.token) {
+        // 401: the owner removed it already.
+        const r = await request(p, 'DELETE', '/api/me')
+        if (r.status !== 200 && r.status !== 401) throw new Error(`DELETE /api/me: ${r.data?.error ?? r.status}`)
+      } else await api(p, 'DELETE', '/api/me', { auth: p.agent.auth })
       rmSync(file('profile.json'))
-      await print(`Deleted ${p.agent.name} from ${p.server}. Run hooks uninstall to remove the hooks.`)
+      await print(`${p.token ? 'Removed' : 'Deleted'} ${p.agent.name} from ${p.server}. Run hooks uninstall to remove the hooks.`)
       return 0
     }
   }
   throw new Error(USAGE)
 }
 
-async function pair(link: string | undefined, owner: string | undefined, name: string) {
+// Pairing v1. The link (made in Talk: Settings > Agents) pins the owner's id and key, and holds a secret
+// this Mac proves it has. The owner's browser checks that proof, then opens the DM: that is the Allow.
+async function pair(link: string | undefined, name: string) {
   const url = URL.parse(link ?? '')
-  const invite = url?.searchParams.get('invite')
-  if (!url || !invite || !owner)
-    throw new Error(`Usage: node ${CLI} pair <invite link> --owner <name> [--name "Claude AI"]\nMake the link in Talk: Settings > Create invite link.`)
+  if (url?.searchParams.has('invite'))
+    throw new Error('That link invites a person. In Talk, open Settings > Agents > Link a helper, then pair with that link.')
+  const code = url?.searchParams.get('agent')
+  const [o, k, s] = ['o', 'k', 's'].map((x) => new URLSearchParams(url?.hash.slice(1)).get(x) ?? '')
+  // k (the owner's key) and s (the secret) are 32 bytes each; a link cut short, by a missing quote say, fails here.
+  if (!url || !code || !o || !/^[\w-]{43}$/.test(k) || !/^[\w-]{43}$/.test(s)) throw new Error(`Usage: node ${CLI} ${PAIR}`)
   let p = readProfile()
-  if (p?.owner) throw new Error(`Already paired as ${p.agent.name} with ${p.owner.name}. Run unpair first.`)
-  // A profile without owner is an earlier run that registered, then failed: resume it (its invite is used up).
+  if (p?.dm) throw new Error(`Already paired as ${p.agent.name} with ${p.owner?.name}. Run unpair first.`)
+  if (p && !p.token) throw new Error(`${p.agent.name} is a Phase 0 pairing that never finished. Run unpair --yes first.`)
+  // A profile with a token and no dm registered, then stopped before the Allow: wait again, with the owner it pinned.
   const passphrase = p?.agent.passphrase ?? b64(crypto.getRandomValues(new Uint8Array(24)))
   const ident = await deriveIdentity(p?.agent.name ?? name, passphrase)
   if (!p) {
-    const r = await call(url.origin, 'POST', '/api/register', { invite, name, pubkey: ident.publicKey, auth: ident.auth })
+    const proof = createHmac('sha256', Buffer.from(s, 'base64url')).update(`talk-pair-v1:${ident.publicKey}`).digest('base64url')
+    const r = await call(url.origin, 'POST', '/api/agents', { code, name, pubkey: ident.publicKey, proof, where: hostname().slice(0, 64) })
+    if (r.status === 403)
+      throw new Error("This link was used already or has expired. If Talk lists a helper waiting for Allow that this Mac didn't pair, Deny it. Then make a new link.")
     if (r.status === 409) throw new Error(`The name ${name} is taken. Pick another with --name.`)
-    if (r.status === 403) throw new Error('This invite is not valid or has expired.')
-    if (r.status === 400) throw new Error(`Talk won't take the name "${name}": use 1 to 32 letters, digits, spaces, dots, dashes or underscores.`)
-    if (r.status !== 200 || !r.cookie) throw new Error(`Could not register: ${r.data?.error ?? r.status}`)
-    p = { server: url.origin, agent: { id: r.data.id, name, pubkey: ident.publicKey, passphrase, auth: ident.auth }, cookie: r.cookie }
+    if (r.status === 400) throw new Error(r.data?.error) // names the " AI" rule
+    if (r.status !== 200) throw new Error(`Could not register: ${r.data?.error ?? r.status}`)
+    p = { server: url.origin, agent: { id: r.data.id, name, pubkey: ident.publicKey, passphrase, auth: ident.auth }, token: r.data.token, owner: { id: o, name: '', pubkey: k } }
     saveProfile(p)
   }
-  const agentId = p.agent.id
-  const named = (await api<Me>(p, 'GET', '/api/me')).users.filter((u) => !u.deleted && u.id !== agentId && u.name.toLowerCase() === owner.toLowerCase())
-  // Talk folds only ASCII case, so "élodie" and "Élodie" can be two people: then only the exact name will do.
-  const o = named.length > 1 ? named.find((u) => u.name === owner) : named[0]
-  if (!o)
-    throw new Error(named.length ? `${named.map((u) => u.name).join(', ')} all match ${owner}. Run pair again with the exact name.` : `No user named ${owner} on ${p.server}. Check the spelling and run pair again.`)
-
-  // The creator wraps the DM key for both members, itself included. 409 means the DM exists: unwrap its key.
-  const id = crypto.randomUUID()
-  const raw = newConvKeyBytes()
-  const members = await Promise.all([p.agent, o].map(async (u) => ({ userId: u.id, wrappedKey: await wrapConvKey(raw, ident.privateKey, u.pubkey, id, u.id) })))
-  const r = await request(p, 'POST', '/api/conversations', { id, kind: 'dm', title: null, members })
-  let dm: Paired['dm'] = { id, key: b64(raw) }
-  if (r.status === 409 && r.data?.error === 'exists') {
-    const me = await api<Me>(p, 'GET', '/api/me')
-    const conv = me.conversations.find((c) => c.id === r.data.id)
-    // One of us two made our DM and wrapped its key. Anyone else who wrapped it knows the key.
-    const by = conv?.kind === 'dm' && conv.members.includes(o.id) ? [p.agent, o].find((u) => u.id === conv.wrappedBy) : undefined
-    if (!conv || !by) throw new Error(`The server points at a chat with ${o.name} whose key neither of you made. Don't use this server.`)
-    dm = { id: conv.id, key: b64((await unwrapConvKey(conv.wrappedKey, ident.privateKey, by.pubkey, conv.id, agentId)).raw) }
-  } else if (r.status !== 200) throw new Error(`Could not open a chat with ${o.name}: ${r.data?.error ?? r.status}`)
-  const full: Paired = { ...p, owner: { id: o.id, name: o.name, pubkey: o.pubkey }, dm }
-  // Saved only once the hello is through: a failed hello leaves the owner unset, so pair can resume.
-  const hello = await say(
-    full,
-    `Hi, I'm ${full.agent.name} on ${hostname()}. I'll message you here when I need you. When I ask you something, reply yes or no with the code I send, like "yes kxqzm".`,
-  )
-  saveProfile({ ...full, cursor: hello.id })
-  const w = Math.max(full.agent.name.length, o.name.length) + 3
-  await print(`Paired with ${o.name} as "${full.agent.name}" on ${full.server}.
-
-Before you rely on it, compare safety codes. In Talk, open Settings > Safety codes:
-  ${full.agent.name.padEnd(w)}${await safetyCode(full.agent.pubkey)}
-  ${o.name.padEnd(w)}${await safetyCode(o.pubkey)}
-Both must match: the first with the ${full.agent.name} row, the second with your own row, marked (you).
-If either differs, run unpair --yes and don't use this pairing.
-
-Next: node ${CLI} hooks install`)
-  log('pair')
-  return 0
+  const helper = p
+  const pin = helper.owner! // saved with the token
+  try {
+    // Waits for Allow, Deny or Ctrl+C, with no timeout: the same command waits again.
+    let allowed!: (dm: Paired['dm'], ownerName: string) => void
+    let died!: (e: Error) => void
+    const waited = new Promise<Paired>((resolve, reject) => {
+      allowed = (dm, ownerName) => resolve({ ...helper, owner: { ...pin, name: ownerName }, dm })
+      died = reject
+    })
+    waited.catch(() => {}) // Deny can come before anything awaits it
+    const sock = await connect(helper, died) // Deny drops the socket: REMOVED
+    await print(`Waiting for you to tap Allow in Talk (Settings > Agents). The safety code there must read: ${await safetyCode(helper.agent.pubkey)}`)
+    const look = async () => {
+      const me = await api<Me>(helper, 'GET', '/api/me')
+      const conv = me.conversations.find((c) => c.kind === 'dm' && c.members.includes(pin.id))
+      if (!conv) return
+      // Only the pinned key opens a key it sealed, so a chat the server made, or sealed with a key of its own, fails here.
+      const key = await unwrapConvKey(conv.wrappedKey, ident.privateKey, pin.pubkey, conv.id, helper.agent.id).catch(() => null)
+      if (!key) throw new Error("The chat wasn't sealed by the key in your link. Don't use this server.")
+      allowed({ id: conv.id, key: b64(key.raw) }, me.users.find((u) => u.id === pin.id)?.name ?? '')
+    }
+    const check = () => void look().catch(died)
+    sock.on('sync', check)
+    sock.on('connect', check) // a reconnect may have missed a sync
+    check()
+    const full = await waited.finally(() => sock.close())
+    // Saved only once the hello is through: a refused hello (the owner blocked this helper) leaves dm unset, so pair resumes.
+    const hello = await say(
+      full,
+      `Hi, I'm ${full.agent.name} on ${hostname()}. I'll message you here when I need you. When I ask you something, reply yes or no with the code I send, like "yes kxqzm".`,
+    )
+    saveProfile({ ...full, cursor: hello.id })
+    await print(`Paired with ${full.owner.name} as "${full.agent.name}" on ${full.server}.\n\nNext: node ${CLI} hooks install`)
+    log('pair')
+    return 0
+  } catch (e) {
+    if ((e as Error).message !== REMOVED) throw e
+    rmSync(file('profile.json'), { force: true })
+    throw new Error('Denied in Talk. Make a new link to try again.')
+  }
 }
 
 async function doctor(settings: string) {
@@ -186,6 +202,8 @@ async function doctor(settings: string) {
     if (!p.owner || !p.dm) throw new Error('pairing did not finish; run pair again')
     return file('profile.json')
   })
+  // A Phase 0 profile still works, through its cookie, as a person account. A note, not a failure.
+  if (p?.cookie) await check('pairing', () => `Phase 0, so everyone on ${p.server} can see and message this helper; run unpair --yes, then link a new one.`)
   if (p?.owner && p.dm) {
     const owner = p.owner
     const dm = p.dm

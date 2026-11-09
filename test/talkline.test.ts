@@ -1,17 +1,18 @@
-// Runs talkline, the Claude Code bridge, against a temp server as a user with
-// a temp HOME, while the owner (Prince) and a stranger (Mallory) sit on
-// sockets: pairing, notify, asks and their answers, rings, hooks, unpair.
-import { test, before, after } from 'node:test'
+// Runs talkline, the Claude Code bridge, against a temp server as Prince's
+// helper with a temp HOME, while the owner (Prince) and a stranger (Mallory) sit
+// on sockets: pairing, notify, asks and their answers, rings, hooks, unpair.
+// The test plays Prince's web client: it makes the link, checks the proof, allows.
+import { test, describe, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { createServer, type AddressInfo, type Socket as Conn } from 'node:net'
-import { tmpdir } from 'node:os'
+import { hostname, tmpdir } from 'node:os'
 import path from 'node:path'
 import { setTimeout as pause } from 'node:timers/promises'
 import { io as connect, type Socket } from 'socket.io-client'
 import * as c from '../src/lib/crypto.ts'
-import type { CallRing, Me, Message, MessageBody, ReactionBody, User } from '../shared/types.ts'
+import type { Agent, CallRing, Me, Message, MessageBody, ReactionBody, User } from '../shared/types.ts'
 
 const PORT = 6000 + Math.floor(Math.random() * 1000)
 const BASE = `http://localhost:${PORT}`
@@ -37,7 +38,6 @@ let agent: User // the talkline account, as /api/me lists it
 let dm: string // Prince's DM with the agent
 let dmKey: CryptoKey
 let hello: Message // the agent's first message
-let mallorysDm: string // Mallory's own DM with the agent
 let notified: Message // a text the notification hook sent for session n1
 
 // Waits for the server's own "talk on" line: another server on the port would answer /healthz too.
@@ -56,12 +56,21 @@ async function startServer() {
   })
 }
 
-// Stops the server and starts it again on the same port and data: sockets drop, sessions stay.
+// Stops the server and starts it again on the same port and data: sockets drop, sessions stay,
+// and ring history, kept in memory, is gone.
 async function restart() {
   const exited = new Promise((r) => server.once('exit', r))
   server.kill()
   await exited
   await startServer()
+}
+
+// After a restart: Prince's and Mallory's sockets are back.
+async function reconnected() {
+  for (let i = 0; !(so.connected && sm.connected); i++) {
+    assert.ok(i < 100, 'the test sockets did not reconnect')
+    await pause(100)
+  }
 }
 
 before(async () => {
@@ -97,6 +106,45 @@ async function register(name: string, invite: string): Promise<Client> {
 
 const me = async (cl: Client) => (await (await api(cl, 'GET', '/api/me')).r.json()) as Me
 const invite = async (cl: Client) => (await (await api(cl, 'POST', '/api/invites')).r.json()).code as string
+
+// Polls `f` until it gives something; fails after 10 s.
+async function until<T>(f: () => T | Promise<T>): Promise<NonNullable<T>> {
+  for (let i = 0; i < 100; i++) {
+    const v = await f()
+    if (v) return v
+    await pause(100)
+  }
+  throw new Error('timed out')
+}
+
+// Ring hours are 08:00–22:00 where the owner is, so links carry a zone where it is 09:00–21:00 now.
+// These zones sit at most 6 h apart, so one always is.
+const hourIn = (tz: string) => Number(new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: 'numeric', hourCycle: 'h23' }).format(Date.now()))
+const DAY = ['Pacific/Kiritimati', 'Asia/Tokyo', 'Asia/Kolkata', 'Europe/London', 'America/New_York'].find((z) => hourIn(z) >= 9 && hourIn(z) < 21)!
+
+// A helper link from Prince, as his browser makes it: a 10-minute code, then his id, his key (or `k`) and a secret in the fragment.
+async function link(k = prince.ident.publicKey) {
+  const r = await api(prince, 'POST', '/api/invites', { agent: true, tz: DAY })
+  assert.equal(r.status, 200)
+  const s = c.b64(crypto.getRandomValues(new Uint8Array(32)))
+  return { url: `${BASE}/?agent=${(await r.r.json()).code}#o=${prince.id}&k=${k}&s=${s}`, s }
+}
+// The helper named `name`, once it waits for Allow in Prince's agents.
+const pending = (name: string) => until(async () => (await me(prince)).agents?.find((a) => a.name === name))
+// Prince's browser checks a pending helper's proof with the secret it kept.
+async function proven(a: Agent, s: string) {
+  const key = await crypto.subtle.importKey('raw', c.unb64(s), { name: 'HMAC', hash: 'SHA-256' }, false, ['verify'])
+  return crypto.subtle.verify('HMAC', key, c.unb64(a.proof), new TextEncoder().encode(`talk-pair-v1:${a.pubkey}`))
+}
+// Allow: Prince opens the DM, its key wrapped for his own key and the helper key whose proof he checked.
+async function allow(a: Agent) {
+  const id = crypto.randomUUID()
+  const raw = c.newConvKeyBytes()
+  const pins = { [prince.id]: prince.ident.publicKey, [a.id]: a.pubkey }
+  const members = await Promise.all(Object.entries(pins).map(async ([userId, pubkey]) => ({ userId, wrappedKey: await c.wrapConvKey(raw, prince.ident.privateKey, pubkey, id, userId) })))
+  assert.equal((await api(prince, 'POST', '/api/conversations', { id, kind: 'dm', title: null, members })).status, 200)
+  return { id, raw }
+}
 const socket = (cl: Client) =>
   new Promise<Socket>((resolve, reject) => {
     const s = connect(BASE, { extraHeaders: { cookie: cl.cookie }, transports: ['websocket'], query: { v: '1' } })
@@ -191,7 +239,7 @@ function start(args: string[], { input = '', env = {} }: Opts = {}) {
       resolve({ code, stdout, stderr })
     }),
   )
-  return { child, done }
+  return { child, done, out: () => stdout }
 }
 type Running = ReturnType<typeof start>
 const cli = (args: string[], opts?: Opts) => start(args, opts).done
@@ -214,7 +262,7 @@ async function asking(args: string[], first: string, opts?: Opts) {
   const { m, b } = await during(run, asked)
   const code = b.text!.match(/^Reply yes ([a-km-z]{5}) or no \1 by /m)?.[1]
   assert.ok(code, `no code in ${JSON.stringify(b.text)}`)
-  return { ...run, m, text: b.text!, code }
+  return { ...run, m, b, text: b.text!, code }
 }
 const ask = (question: string, ...flags: string[]) => asking(['ask', question, ...flags], `${question}\n`)
 
@@ -244,51 +292,99 @@ async function stop(sid: string) {
   return r.stdout && (JSON.parse(r.stdout).hookSpecificOutput.additionalContext as string)
 }
 
-test('pair: resumes after a wrong owner name, prints both safety codes, says hello', { timeout: 30_000 }, async () => {
-  const link = `${BASE}/?invite=${await invite(prince)}`
-  let r = await cli(['pair', link, '--owner', 'Nobody'])
+test('pair: a helper link, the code to check, a resumed wait, Allow, and the hello', { timeout: 30_000 }, async () => {
+  for (const owner of [[], ['--owner', 'prince']]) {
+    const r = await cli(['pair', `${BASE}/?invite=x`, ...owner])
+    assert.equal(r.code, 3, r.stderr)
+    assert.match(r.stderr, /^That link invites a person\. In Talk, open Settings > Agents > Link a helper, then pair with that link\./)
+  }
+  const l = await link()
+  let r = await cli(['pair', l.url, '--name', 'Claude'])
   assert.equal(r.code, 3, r.stderr)
-  assert.match(r.stderr, /No user named Nobody/)
-  const saved = profile()
-  assert.equal(saved.owner, undefined)
-  assert.ok(saved.agent.id, 'the account is saved before the owner lookup')
+  assert.match(r.stderr, /^Helper names end in “AI”, like “Claude AI”\./)
+  assert.ok(!existsSync(PROFILE))
 
-  // Talk folds only ASCII case, so these are two people: a name that matches both must be exact.
-  for (const name of ['Élodie', 'élodie']) await register(name, await invite(prince))
-  r = await cli(['pair', link, '--owner', 'ÉLODIE'])
+  // Waiting: Prince's browser lists the helper and checks its proof; talkline prints the code to compare.
+  const waiting = start(['pair', l.url])
+  const a = await during(waiting, pending('Claude AI'))
+  assert.ok(await proven(a, l.s), 'the proof checks with the link secret')
+  assert.equal(a.where, hostname().slice(0, 64))
+  const code = await c.safetyCode(a.pubkey)
+  await during(waiting, until(() => waiting.out().includes(`The safety code there must read: ${code}`)))
+  waiting.child.kill()
+  await waiting.done
+  // The link is used up, so this waits only by resuming the saved profile.
+  const again = start(['pair', l.url])
+  await during(again, until(() => again.out().includes(code)))
+  assert.deepEqual((await me(prince)).agents?.map((x) => x.id), [a.id])
+  again.child.kill()
+  await again.done
+
+  // Allowed while pair wasn't running, then blocked: pair finds the chat, Talk refuses the hello, and no dm is saved.
+  const allowed = await allow(a)
+  dm = allowed.id
+  dmKey = await crypto.subtle.importKey('raw', allowed.raw, 'AES-GCM', false, ['encrypt', 'decrypt'])
+  agent = (await me(prince)).users.find((u) => u.id === a.id)!
+  assert.deepEqual(agent, { id: a.id, name: 'Claude AI', pubkey: a.pubkey, owner: prince.id })
+  assert.equal((await api(prince, 'PUT', `/api/blocks/${a.id}`)).status, 200)
+  r = await cli(['pair', l.url])
   assert.equal(r.code, 3, r.stderr)
-  assert.match(r.stderr, /odie all match ÉLODIE\. Run pair again with the exact name\./)
+  assert.match(r.stderr, /isn’t taking messages from you/)
+  assert.equal(profile().dm, undefined, 'no dm saved before the hello')
+  assert.equal((await api(prince, 'DELETE', `/api/blocks/${a.id}`)).status, 200)
 
-  // A hello Talk refuses (Prince blocked the agent) leaves the owner unset, so the next run resumes.
-  await api(prince, 'PUT', `/api/blocks/${saved.agent.id}`)
-  r = await cli(['pair', link, '--owner', 'prince'])
-  assert.equal(r.code, 3, r.stderr)
-  assert.equal(profile().owner, undefined, 'no owner saved before the hello')
-  await api(prince, 'DELETE', `/api/blocks/${saved.agent.id}`)
-
-  // The invite is used up, so this only passes by resuming the saved profile.
-  r = await cli(['pair', link, '--owner', 'prince'])
+  const hi = fromAgent((b) => !!b.text?.startsWith("Hi, I'm Claude AI on "))
+  r = await cli(['pair', l.url])
   assert.equal(r.code, 0, r.stderr)
-  const m = await me(prince)
-  const found = m.users.find((u) => u.id === saved.agent.id)
-  const conv = m.conversations.find((x) => x.kind === 'dm' && x.members.includes(saved.agent.id))
-  assert.ok(found && conv, 'the agent and its DM with Prince')
-  agent = found
-  dm = conv.id
-  dmKey = (await c.unwrapConvKey(conv.wrappedKey, prince.ident.privateKey, agent.pubkey, dm, prince.id)).key
-  assert.equal(agent.name, 'Claude AI')
-  assert.match(r.stdout, /Paired with prince as "Claude AI"/i)
-  for (const pubkey of [agent.pubkey, prince.ident.publicKey]) assert.ok(r.stdout.includes(await c.safetyCode(pubkey)), r.stdout)
+  hello = (await hi).m
+  assert.match(r.stdout, /^Paired with Prince as "Claude AI" on /m)
+  const saved = profile()
+  assert.match(saved.token, /^[\w-]{43}$/)
+  assert.equal(saved.cookie, undefined)
+  assert.deepEqual(
+    [saved.agent.id, saved.owner, saved.dm, saved.cursor],
+    [a.id, { id: prince.id, name: 'Prince', pubkey: prince.ident.publicKey }, { id: dm, key: c.b64(allowed.raw) }, hello.id],
+  )
   assert.equal(statSync(PROFILE).mode & 0o777, 0o600)
   assert.equal(statSync(TL).mode & 0o777, 0o700)
-  const history = (await (await api(prince, 'GET', `/api/conversations/${dm}/messages`)).r.json()) as Message[]
-  const bodies = await Promise.all(history.map((x) => open(x.body)))
-  assert.equal(bodies.find((b) => b.text?.startsWith("Hi, I'm Claude AI on "))?.from, agent.id, 'the hello')
-  hello = history[bodies.findIndex((b) => b.text?.startsWith("Hi, I'm Claude AI on "))]
 
-  r = await cli(['pair', link, '--owner', 'prince'])
+  r = await cli(['pair', l.url])
   assert.equal(r.code, 3, r.stderr)
   assert.match(r.stderr, /Already paired/)
+})
+
+// doctor, with talkline's hooks in a settings file of its own.
+async function doctor() {
+  const settings = path.join(mkdtempSync(path.join(tmp, 'claude-')), 'settings.json')
+  assert.equal((await cli(['hooks', 'install', '--settings', settings])).code, 0)
+  return cli(['doctor', '--settings', settings])
+}
+
+test('doctor passes for a paired helper', { timeout: 30_000 }, async () => {
+  const r = await doctor()
+  assert.equal(r.code, 0, r.stdout)
+  assert.ok(!r.stdout.includes('Phase 0'), r.stdout)
+})
+
+test('pair refuses a chat sealed by another key than its link pinned', { timeout: 30_000 }, async () => {
+  // As if the server swapped Prince's key: the link pins Mallory's, and Prince seals the chat with his own.
+  const run = start(['pair', (await link(mallory.ident.publicKey)).url, '--name', 'Spare AI'], { env: { TALKLINE_HOME: path.join(tmp, 'tl-spare') } })
+  await allow(await during(run, pending('Spare AI')))
+  const r = await run.done
+  assert.equal(r.code, 3, r.stderr)
+  assert.match(r.stderr, /^The chat wasn't sealed by the key in your link\. Don't use this server\./)
+})
+
+test('pair: Deny ends the wait', { timeout: 30_000 }, async () => {
+  const home = path.join(tmp, 'tl-deny')
+  const run = start(['pair', (await link()).url, '--name', 'Denied AI'], { env: { TALKLINE_HOME: home } })
+  const a = await during(run, pending('Denied AI'))
+  await during(run, until(() => run.out().includes('Waiting for you to tap Allow'))) // printed once its socket is up
+  assert.equal((await api(prince, 'DELETE', `/api/agents/${a.id}`)).status, 200)
+  const r = await run.done
+  assert.equal(r.code, 3, r.stderr)
+  assert.match(r.stderr, /^Denied in Talk\. Make a new link to try again\./)
+  assert.ok(!existsSync(path.join(home, 'profile.json')))
 })
 
 test('notify texts the owner, with --quiet too', { timeout: 30_000 }, async () => {
@@ -342,7 +438,7 @@ test('ask: a typo in the code fixed with Edit answers', { timeout: 30_000 }, asy
 test('ask: answers from someone else, or claiming to be from someone else, are ignored', { timeout: 30_000 }, async () => {
   const a = await ask('Ship it?')
   const ignored = ignoring(a)
-  // Mallory opens her own DM with the agent and answers there.
+  // Mallory can't open a DM with the helper: only its owner can, one to one.
   const id = crypto.randomUUID()
   const raw = c.newConvKeyBytes()
   const members = await Promise.all(
@@ -351,11 +447,8 @@ test('ask: answers from someone else, or claiming to be from someone else, are i
       wrappedKey: await c.wrapConvKey(raw, mallory.ident.privateKey, pubkey, id, userId),
     })),
   )
-  assert.equal((await api(mallory, 'POST', '/api/conversations', { id, kind: 'dm', title: null, members })).status, 200)
-  mallorysDm = id
-  const key = await crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['encrypt'])
-  const sent = await sm.timeout(5000).emitWithAck('send', { convId: id, body: await c.sealMessage(key, id, { from: mallory.id, text: `yes ${a.code}` }), cid: crypto.randomUUID() })
-  assert.ok(sent.message, sent.error)
+  assert.equal((await api(mallory, 'POST', '/api/conversations', { id, kind: 'dm', title: null, members })).status, 403)
+  assert.ok(!(await me(mallory)).users.some((u) => u.id === agent.id), 'nor does she see it')
   // Prince's account sends a body that says it is from Mallory.
   await send({ from: mallory.id, text: `yes ${a.code}` })
   await ignored()
@@ -409,7 +502,8 @@ test('ask: a swipe-reply or 👍 answers a low-risk ask; a high-risk one needs t
   result(await high.done, 1, 'no')
 })
 
-// Asks `q` urgently, ringing after 1 s; waits for the ring.
+// Asks `q` urgently, ringing after 1 s; waits for the ring. Talk rings a helper's owner only for an
+// ask it names, 10 minutes apart: a ring at all shows talkline sent the ask's id.
 async function ringing(q: string, ...flags: string[]) {
   const rang = next<CallRing>(so, 'call:ring')
   const a = await ask(q, '--urgent', '--ring-after', '1', ...flags)
@@ -441,6 +535,8 @@ test('ask --urgent: rings while unread, re-posts after an answered ring, stays q
 })
 
 test('ask --urgent: a ring nobody answers ends with the ask, and leaves a call log', { timeout: 30_000 }, async () => {
+  await restart() // forgets the last ring, 10 minutes apart
+  await reconnected() // the ring comes at about 1 s, which can beat the sockets back
   const { ring, ...a } = await ringing('Rebase now?', '--expires', '0.05')
   const ended = next<{ id: string; reason: string }>(so, 'call:end', (e) => e.id === ring.id)
   const logged = fromAgent((b) => !!b.call)
@@ -452,6 +548,8 @@ test('ask --urgent: a ring nobody answers ends with the ask, and leaves a call l
 })
 
 test('ask: Ctrl+C hangs up the ring, marks the question Cancelled and exits 130', { timeout: 30_000 }, async () => {
+  await restart()
+  await reconnected()
   const { ring, ...a } = await ringing('Reset the branch?')
   const ended = next<{ id: string; reason: string }>(so, 'call:end', (e) => e.id === ring.id)
   const closed = fromAgent(() => true, 'edit')
@@ -483,10 +581,7 @@ test('ask: answers given while talkline was frozen or offline count once it runs
     a.child.kill('SIGCONT')
   }
   result(await a.done, 0, 'yes')
-  for (let i = 0; !(so.connected && sm.connected); i++) {
-    assert.ok(i < 100, 'the test sockets did not reconnect')
-    await pause(100)
-  }
+  await reconnected()
 })
 
 test('hooks install and uninstall leave the rest of the settings file alone', { timeout: 30_000 }, async () => {
@@ -785,55 +880,136 @@ test('hook permission: Claude Code stopping the hook marks the question Cancelle
   assert.ok(!existsSync(path.join(TL, 'sessions', 's5.pending')))
 })
 
-test('calls to the agent are declined, from anyone', { timeout: 30_000 }, async () => {
+test("the owner's calls to the agent are declined", { timeout: 30_000 }, async () => {
   const a = await ask('Restart the server?')
-  for (const [s, convId] of [[so, dm], [sm, mallorysDm]] as const) {
-    const ended = next<{ id: string; reason: string }>(s, 'call:end')
-    const call = await s.timeout(5000).emitWithAck('call:start', { convId, kind: 'audio' })
-    assert.ok(call.id, call.error)
-    assert.deepEqual(await ended, { id: call.id, reason: 'declined' })
-  }
+  const ended = next<{ id: string; reason: string }>(so, 'call:end')
+  const call = await so.timeout(5000).emitWithAck('call:start', { convId: dm, kind: 'audio' })
+  assert.ok(call.id, call.error)
+  assert.deepEqual(await ended, { id: call.id, reason: 'declined' })
   await send({ text: `yes ${a.code}` })
   result(await a.done, 0, 'yes')
 })
 
-test('a rejected session signs in again', { timeout: 30_000 }, async () => {
-  writeFileSync(PROFILE, JSON.stringify({ ...profile(), cookie: 'talk_session=x.1.y' }))
-  const got = fromAgent()
-  const r = await cli(['notify', 'Back online'])
-  assert.equal(r.code, 0, r.stderr)
-  assert.equal((await got).b.text, 'Back online')
-  assert.match(profile().cookie, /^talk_session=/)
-  assert.notEqual(profile().cookie, 'talk_session=x.1.y')
+// A Phase 0 profile, a person account with a session cookie, keeps working. Legacy AI is paired by hand, as Phase 0 did.
+describe('a Phase 0 profile', () => {
+  let helper: { file: string; agent: User; dm: string; dmKey: CryptoKey }
+  before(async () => {
+    helper = { file: readFileSync(PROFILE, 'utf8'), agent, dm, dmKey }
+    const legacy = await register('Legacy AI', await invite(prince))
+    const id = crypto.randomUUID()
+    const raw = c.newConvKeyBytes()
+    const members = await Promise.all(
+      [[legacy.id, legacy.ident.publicKey], [prince.id, prince.ident.publicKey]].map(async ([userId, pubkey]) => ({
+        userId,
+        wrappedKey: await c.wrapConvKey(raw, legacy.ident.privateKey, pubkey, id, userId),
+      })),
+    )
+    assert.equal((await api(legacy, 'POST', '/api/conversations', { id, kind: 'dm', title: null, members })).status, 200)
+    agent = { id: legacy.id, name: 'Legacy AI', pubkey: legacy.ident.publicKey }
+    dm = id
+    dmKey = await crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['encrypt', 'decrypt'])
+    const owner = { id: prince.id, name: 'Prince', pubkey: prince.ident.publicKey }
+    const passphrase = 'Legacy AI correct horse battery' // as register() made it
+    writeFileSync(PROFILE, JSON.stringify({ server: BASE, agent: { ...agent, passphrase, auth: legacy.ident.auth }, cookie: legacy.cookie, owner, dm: { id, key: c.b64(raw) } }))
+  })
+  after(() => {
+    writeFileSync(PROFILE, helper.file)
+    ;({ agent, dm, dmKey } = helper)
+  })
 
-  // Over HTTP too: the Stop hook reads history before anything else.
-  writeFileSync(PROFILE, JSON.stringify({ ...profile(), cookie: 'talk_session=x.1.y' }))
-  result(await cli(['hook', 'stop'], { input: '{}' }), 0, '')
-  assert.match(profile().cookie, /^talk_session=/)
-  assert.notEqual(profile().cookie, 'talk_session=x.1.y')
+  test('an urgent ask still rings: Talk ignores its ask id and level from a person', { timeout: 30_000 }, async () => {
+    const { ring, ...a } = await ringing('Roll back?')
+    assert.equal(ring.convId, dm)
+    const ended = next<{ id: string; reason: string }>(so, 'call:end', (e) => e.id === ring.id)
+    await send({ text: `yes ${a.code}` })
+    result(await a.done, 0, 'yes')
+    assert.equal((await ended).reason, 'cancelled')
+  })
+
+  test('doctor passes, and says the pairing is Phase 0', { timeout: 30_000 }, async () => {
+    const r = await doctor()
+    assert.equal(r.code, 0, r.stdout)
+    assert.ok(r.stdout.includes(`ok   pairing: Phase 0, so everyone on ${BASE} can see and message this helper; run unpair --yes, then link a new one.\n`), r.stdout)
+  })
+
+  test('a rejected session signs in again', { timeout: 30_000 }, async () => {
+    writeFileSync(PROFILE, JSON.stringify({ ...profile(), cookie: 'talk_session=x.1.y' }))
+    const got = fromAgent()
+    const r = await cli(['notify', 'Back online'])
+    assert.equal(r.code, 0, r.stderr)
+    assert.equal((await got).b.text, 'Back online')
+    assert.match(profile().cookie, /^talk_session=/)
+    assert.notEqual(profile().cookie, 'talk_session=x.1.y')
+
+    // Over HTTP too: the Stop hook reads history before anything else.
+    writeFileSync(PROFILE, JSON.stringify({ ...profile(), cookie: 'talk_session=x.1.y' }))
+    result(await cli(['hook', 'stop'], { input: '{}' }), 0, '')
+    assert.match(profile().cookie, /^talk_session=/)
+    assert.notEqual(profile().cookie, 'talk_session=x.1.y')
+  })
+
+  test('a gone account tries to sign in once, then not again for 10 minutes', { timeout: 30_000 }, async () => {
+    // Ten failed logins a minute lock everyone on the server out, and every hook run is a new process.
+    const good = readFileSync(PROFILE, 'utf8')
+    writeFileSync(PROFILE, JSON.stringify({ ...profile(), cookie: 'talk_session=x.1.y', agent: { ...profile().agent, auth: '0'.repeat(64) } }))
+    const stop = () => cli(['hook', 'stop'], { input: '{}' })
+    result(await stop(), 0, '')
+    const failedAt = profile().loginFailedAt
+    assert.ok(failedAt > 0, 'the 401 is saved')
+    result(await stop(), 0, '')
+    assert.equal(profile().loginFailedAt, failedAt, 'no second try')
+    await cli(['doctor'])
+    assert.ok(profile().loginFailedAt > failedAt, 'doctor tries at once')
+    writeFileSync(PROFILE, good)
+  })
 })
 
-test('a gone account tries to sign in once, then not again for 10 minutes', { timeout: 30_000 }, async () => {
-  // Ten failed logins a minute lock everyone on the server out, and every hook run is a new process.
-  const good = readFileSync(PROFILE, 'utf8')
-  writeFileSync(PROFILE, JSON.stringify({ ...profile(), cookie: 'talk_session=x.1.y', agent: { ...profile().agent, auth: '0'.repeat(64) } }))
-  const stop = () => cli(['hook', 'stop'], { input: '{}' })
-  result(await stop(), 0, '')
-  const failedAt = profile().loginFailedAt
-  assert.ok(failedAt > 0, 'the 401 is saved')
-  result(await stop(), 0, '')
-  assert.equal(profile().loginFailedAt, failedAt, 'no second try')
-  await cli(['doctor'])
-  assert.ok(profile().loginFailedAt > failedAt, 'doctor tries at once')
-  writeFileSync(PROFILE, good)
+test('a removed helper stops at once', { timeout: 30_000 }, async () => {
+  const home = path.join(tmp, 'tl-gone')
+  const run = start(['pair', (await link()).url, '--name', 'Gone AI'], { env: { TALKLINE_HOME: home } })
+  const a = await during(run, pending('Gone AI'))
+  await allow(a)
+  assert.equal((await run.done).code, 0)
+  assert.equal((await api(prince, 'DELETE', `/api/agents/${a.id}`)).status, 200)
+  const env = { TALKLINE_HOME: home }
+  const r = await cli(['notify', 'Still here?'], { env })
+  assert.equal(r.code, 3, r.stderr)
+  assert.equal(r.stderr, 'Removed in Talk. Run unpair --yes, then link a new helper.\n')
+  // Over HTTP too
+  assert.match((await cli(['doctor'], { env })).stdout, /^FAIL session: Removed in Talk\. Run unpair --yes, then link a new helper\.$/m)
+  assert.equal(JSON.parse(readFileSync(path.join(home, 'profile.json'), 'utf8')).loginFailedAt, undefined, 'a token is never signed in again')
 })
 
-test('unpair --yes deletes the agent account and the profile', { timeout: 30_000 }, async () => {
+test('ask: the message carries its code for the web, and the closing edit drops it', { timeout: 30_000 }, async () => {
+  const a = await ask('Push the tag?')
+  assert.equal(a.b.ask?.code, a.code)
+  assert.ok(Math.abs(a.b.ask!.expires - (a.m.createdAt + 10 * 60_000)) < 5000, `expires ${a.b.ask?.expires}`)
+  const closed = fromAgent(() => true, 'edit')
+  await send({ text: `yes ${a.code}` })
+  result(await a.done, 0, 'yes')
+  const { m, b } = await closed
+  assert.equal(m.id, a.m.id)
+  assert.equal(b.ask, undefined)
+  assert.match(b.text!, /^Push the tag\?\nApproved \d\d:\d\d/)
+  assert.ok(readFileSync(path.join(TL, 'asks'), 'utf8').includes(`\n${a.m.id} ${a.code}\n`), 'the asks file keeps the code')
+})
+
+test('a replayed owner message reaches Claude once', { timeout: 30_000 }, async () => {
+  await stop('s7') // whatever earlier tests left
+  const ship = await send({ text: 'ship it' })
+  assert.match(await stop('s7'), /\n\[[^\]]+\] ship it$/)
+  // The server stores the same sealed body again, under a new id.
+  const again = await so.timeout(5000).emitWithAck('send', { convId: dm, body: ship.body, cid: crypto.randomUUID() })
+  assert.ok(again.message?.id > ship.id, again.error)
+  assert.equal(await stop('s7'), '')
+})
+
+test('unpair --yes removes the helper and deletes the profile', { timeout: 30_000 }, async () => {
   assert.equal((await cli(['unpair'])).code, 3)
   assert.ok(existsSync(PROFILE))
   const r = await cli(['unpair', '--yes'])
   assert.equal(r.code, 0, r.stderr)
-  assert.match(r.stdout, /Deleted Claude AI from /)
+  assert.match(r.stdout, /^Removed Claude AI from /)
   assert.ok(!existsSync(PROFILE))
-  assert.equal((await me(prince)).users.find((u) => u.id === agent.id)?.deleted, true)
+  assert.deepEqual((await me(prince)).users.find((u) => u.id === agent.id), { id: agent.id, name: 'Deleted account', pubkey: agent.pubkey, deleted: true, owner: prince.id })
 })

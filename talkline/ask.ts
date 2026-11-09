@@ -1,7 +1,7 @@
 // Yes/no questions over Talk: a one-time code, the answer rules, expiry and the
 // urgent ring. Only the owner's own account can answer (`gate` in talk.ts).
 import { randomInt } from 'node:crypto'
-import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, readFileSync } from 'node:fs'
 import { openMessage } from '../src/lib/crypto.ts'
 import type { Me, ReactionBody } from '../shared/types.ts'
 import { api, connect, dmKey, edit, file, gate, history, hhmm, log, react, read, send, type Paired } from './talk.ts'
@@ -33,23 +33,25 @@ export const BARE = /^\s*(yes|no)[\s.!]*$/i // a swipe-reply
 // Set while an ask is open, for the signal handler in cli.ts: it closes the ask before the process exits.
 export let cancel: (() => void) | undefined
 
-// 5 letters, a-z without l.
-export const newCode = () => Array.from({ length: 5 }, () => 'abcdefghijkmnopqrstuvwxyz'[randomInt(25)]).join('')
-
-// The last 500 ask records, a line each: "<id> <code>", id 0 for the code before the ask is stored.
-// The Stop hook keeps answers to asks from Claude by them, however long it waits to read.
+// Every ask record, a line each: "<id> <code>", id 0 for the code before the ask is stored. Never
+// pruned, so a code never repeats in this chat: an old "yes <code>" the server sends again can't answer
+// a new ask. The Stop hook keeps answers to asks from Claude by them, however long it waits to read.
+// shortcut: the asks file grows forever (about 30 bytes an ask) and each run reads it whole; pair can reset it if it gets big.
 const ASKS = file('asks')
 const records = () => (existsSync(ASKS) ? readFileSync(ASKS, 'utf8').split('\n').filter(Boolean).map((l) => l.split(' ')) : [])
 export function asked() {
   const r = records()
   return { ids: new Set(r.map(([id]) => Number(id))), codes: new Set(r.map(([, code]) => code)) }
 }
-// Written aside and renamed, so a reader sees the old file or the new one, whole.
-// shortcut: two asks recorded in the same instant can drop a line; lock the file if that ever bites.
-function record(id: number, code: string) {
-  const tmp = `${ASKS}.${process.pid}.tmp`
-  writeFileSync(tmp, [...records().slice(-499), [id, code]].map((l) => l.join(' ') + '\n').join(''), { mode: 0o600 })
-  renameSync(tmp, ASKS)
+const record = (id: number, code: string) => appendFileSync(ASKS, `${id} ${code}\n`, { mode: 0o600 })
+
+// 5 letters, a-z without l, never one this chat has had.
+export function newCode() {
+  const used = asked().codes
+  for (;;) {
+    const code = Array.from({ length: 5 }, () => 'abcdefghijkmnopqrstuvwxyz'[randomInt(25)]).join('')
+    if (!used.has(code)) return code
+  }
 }
 
 export async function ask(p: Paired, o: AskOptions): Promise<Verdict> {
@@ -67,6 +69,9 @@ export async function ask(p: Paired, o: AskOptions): Promise<Verdict> {
   const expiresAt = sentAt + o.expires * 60_000
   const closed = (status: string) => [o.question, status, o.detail].filter(Boolean).join('\n')
   const text = closed(`Reply yes ${code} or no ${code} by ${hhmm(expiresAt)}${o.risk === 'low' ? ', or tap 👍' : ''}`)
+  // `ask` gives the web its Approve and Deny buttons; `text` still holds the whole ask for older apps. Closing edits drop it.
+  // shortcut: an urgent ask goes time-sensitive at once, not message, then time-sensitive, then one ring; split those steps once a build can show Time Sensitive.
+  const asking = () => send(s, p, key, { text, ask: { code, expires: expiresAt } }, o.urgent ? { level: 'time-sensitive' } : {})
   const askIds: number[] = [] // the ask message, then any re-post after a ring
   let hinted = false
   let rang = false
@@ -125,16 +130,18 @@ export async function ask(p: Paired, o: AskOptions): Promise<Verdict> {
   let work: Promise<unknown> = Promise.resolve()
   const queue = (f: () => Promise<unknown>) => void (work = work.then(f).catch(() => {}))
   const ring = async () => {
-    // shortcut: ring hours for permission asks live here; Phase 1 moves ring caps to the server.
+    // Talk enforces a helper's ring hours where its owner is. shortcut: a Phase 0 profile (a cookie)
+    // keeps this Mac's 08–22 for permission asks; re-pairing moves it to the server's rules.
     const hour = new Date().getHours()
-    if (o.source === 'permission' && (hour < 8 || hour >= 22)) return
+    if (!p.token && o.source === 'permission' && (hour < 8 || hour >= 22)) return
     // Read already? Asked now, so reads made while the socket was down count too.
     const me = await api<Me>(p, 'GET', '/api/me').catch(() => null)
     if (answer) return
     if (!me) return log('ring', { result: 'error', error: 'read state unknown' }) // it rings only for an unread question
     if ((me.conversations.find((c) => c.id === p.dm.id)?.reads?.[p.owner.id] ?? 0) >= askIds.at(-1)!) return
     rang = true
-    const r = await s.timeout(10_000).emitWithAck('call:start', { convId: p.dm.id, kind: 'audio' }).catch(() => ({ error: 'timeout' }))
+    // `ask` names the question the ring is for: Talk rings once per ask.
+    const r = await s.timeout(10_000).emitWithAck('call:start', { convId: p.dm.id, kind: 'audio', ask: askIds.at(-1) }).catch(() => ({ error: 'timeout' }))
     if (r.error) return log('ring', { result: 'error', error: r.error })
     call = r.id
   }
@@ -153,7 +160,7 @@ export async function ask(p: Paired, o: AskOptions): Promise<Verdict> {
     log('ring', { result: 'accepted' })
     await callLog(1) // any ms > 0 reads as answered; we hang up at once
     if (answer) return
-    post((await send(s, p, key, { text })).id)
+    post((await asking()).id)
     await edit(p, key, askIds.at(-2)!, closed('Sent again below'))
   }
   const ended = async (id: string, reason: string) => {
@@ -167,7 +174,7 @@ export async function ask(p: Paired, o: AskOptions): Promise<Verdict> {
   s.on('call:accepted', (c: { id: string }) => queue(() => accepted(c.id)))
   s.on('call:end', (c: { id: string; reason: string }) => queue(() => ended(c.id, c.reason)))
 
-  post((await send(s, p, key, { text })).id)
+  post((await asking()).id)
   log('ask', { risk: o.risk, urgent: o.urgent, source: o.source })
   const timers = [setTimeout(() => settle('expired'), expiresAt - Date.now())]
   if (o.urgent) timers.push(setTimeout(() => queue(ring), o.ringAfter * 1000))

@@ -4,7 +4,8 @@ import { api } from '../lib/api.ts'
 import { safetyCode } from '../lib/crypto.ts'
 import { convName, userName } from '../lib/format.ts'
 import { enablePush, needsInstall, pushSupported } from '../lib/push.ts'
-import { Avatar } from './Sidebar.tsx'
+import { AiBadge, Avatar } from './Sidebar.tsx'
+import Agents from './Agents.tsx'
 import { loadTheme, setTheme, type Theme } from '../lib/theme.ts'
 import { Close, Monitor, Moon, Sun } from './icons.tsx'
 
@@ -156,7 +157,7 @@ export function NewChat({ talk, onClose, onOpen }: { talk: Talk; onClose: () => 
 
   return (
     <Sheet title="New chat" onClose={onClose}>
-      <PeoplePicker talk={talk} ids={me.users.filter((u) => u.id !== me.user.id && !u.deleted).map((u) => u.id)} picked={picked} onToggle={(id) => setPicked(toggle(picked, id))} />
+      <PeoplePicker talk={talk} ids={me.users.filter((u) => u.id !== me.user.id && !u.deleted && !u.owner).map((u) => u.id)} picked={picked} onToggle={(id) => setPicked(toggle(picked, id))} />
       {group && (
         <input
           value={title}
@@ -183,7 +184,7 @@ export function AddPeople({ talk, convId, onClose }: { talk: Talk; convId: strin
   return (
     <Sheet title="Add people" onClose={onClose}>
       <p className="mb-3 text-sm text-mut">New members can read the whole history of this group.</p>
-      <PeoplePicker talk={talk} ids={me.users.filter((u) => !conv.members.includes(u.id) && !u.deleted).map((u) => u.id)} picked={picked} onToggle={(id) => setPicked(toggle(picked, id))} />
+      <PeoplePicker talk={talk} ids={me.users.filter((u) => !conv.members.includes(u.id) && !u.deleted && !u.owner).map((u) => u.id)} picked={picked} onToggle={(id) => setPicked(toggle(picked, id))} />
       {error && <p className="mt-2 text-sm text-danger" role="alert">{error}</p>}
       <button onClick={() => run(() => talk.addMembers(convId, [...picked]))} disabled={busy || !picked.size} className={`${primary} mt-4`}>Add</button>
     </Sheet>
@@ -265,6 +266,8 @@ export function Settings({ talk, onClose, onSignOut }: { talk: Talk; onClose: ()
         <p className="mt-2 text-sm text-mut">The link works once and expires in 7 days. Send it over a channel you trust.</p>
       </section>
 
+      <Agents talk={talk} />
+
       <section className="mb-7">
         <h3 className="mb-2 font-semibold">Notifications</h3>
         {push === 'granted' ? (
@@ -294,7 +297,10 @@ export function Settings({ talk, onClose, onSignOut }: { talk: Talk; onClose: ()
         {me.users.filter((u) => !u.deleted).map((u) => (
           <div key={u.id} className="flex items-center gap-3 py-1.5">
             <Avatar name={u.name} size={32} />
-            <span className="flex-1 font-medium">{u.id === me.user.id ? `${u.name} (you)` : u.name}</span>
+            <span className="flex flex-1 items-center font-medium">
+              {u.id === me.user.id ? `${u.name} (you)` : u.name}
+              {u.owner && <AiBadge />}
+            </span>
             <SafetyCode pubkey={u.pubkey} />
           </div>
         ))}

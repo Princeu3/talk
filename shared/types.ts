@@ -6,6 +6,18 @@ export interface User {
   name: string
   pubkey: string // X25519 public key, base64url
   deleted?: boolean // account deleted; kept so keys it sealed still open
+  owner?: string // set only for helpers: the person who linked it
+}
+
+// A helper as its owner sees it, pending ones included. A helper is pending until its owner's DM with it exists.
+export interface Agent {
+  id: string
+  name: string
+  pubkey: string
+  where: string // the helper's host name
+  proof: string // HMAC-SHA256 of 'talk-pair-v1:' + pubkey under the link's secret, for the owner's browser to check
+  invite: string // the link's code: names the secret the owner's browser kept
+  activeAt: number | null // when it last sent a message
 }
 
 export interface Conversation {
@@ -65,6 +77,7 @@ export interface MessageBody {
   forwarded?: boolean
   system?: boolean // a group event ("Alice added Bob"); `text` holds it, so older apps show it as a message
   preview?: LinkPreview
+  ask?: { code: string; expires: number } // an open talkline ask; `text` still holds the whole ask for older apps, and the closing edit drops `ask`
 }
 
 // A link's card. The sender's device makes it and seals it with the message,
@@ -126,6 +139,7 @@ export interface Me {
   conversations: Conversation[]
   blocked: string[] // user ids I blocked
   vapidPublicKey: string
+  agents?: Agent[] // people only: the helpers they linked
 }
 
 export interface SendPayload {
@@ -134,4 +148,5 @@ export interface SendPayload {
   quiet?: boolean // no push (call logs: the ring already notified)
   seen?: boolean // not unread for anyone (an answered call: both were there)
   cid?: string // client-made UUID; a resend with the same one acks the stored message
+  level?: 'time-sensitive' // honored for helpers only, within budget and ring hours
 }

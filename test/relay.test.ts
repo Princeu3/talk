@@ -76,6 +76,10 @@ test('relay signs and shapes pushes, refuses anything else', async () => {
   assert.equal(msg.headers['apns-topic'], 'test.talk')
   assert.deepEqual(msg.body, { aps: { alert: { title: 'Talk', body: 'New message' }, sound: 'default', 'mutable-content': 1, 'thread-id': convId }, convId, messageId: 7 })
 
+  // a helper's urgent ask: a flag APNs reads, never text
+  assert.equal((await push({ token: TOKEN, env: 'sandbox', type: 'message', convId, messageId: 8, level: 'time-sensitive' })).status, 200)
+  assert.equal((got.at(-1)!.body.aps as Record<string, unknown>)['interruption-level'], 'time-sensitive')
+
   assert.equal((await push({ token: TOKEN, env: 'sandbox', type: 'missed', convId, callId, kind: 'audio' })).status, 200)
   assert.equal((got.at(-1)!.body.aps as { alert: { body: string } }).alert.body, 'Missed voice call')
 
@@ -90,6 +94,7 @@ test('relay signs and shapes pushes, refuses anything else', async () => {
     { token: 'nothex', env: 'sandbox', type: 'message', convId, messageId: 1 },
     { token: TOKEN, env: 'staging', type: 'message', convId, messageId: 1 },
     { token: TOKEN, env: 'sandbox', type: 'alert', convId },
+    { token: TOKEN, env: 'sandbox', type: 'message', convId, messageId: 1, level: 'x' },
   ]) assert.equal((await push(bad)).status, 400, JSON.stringify(bad))
   assert.equal(got.length, before)
 

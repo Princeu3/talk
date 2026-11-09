@@ -23,4 +23,11 @@ export async function api<T>(method: string, url: string, body?: unknown): Promi
 
 // Connects only after sign-in; the session cookie authenticates the handshake.
 // v=2: this app knows group calls and the chat events that came with them (server/index.ts).
-export const socket = io({ autoConnect: false, transports: ['websocket'], query: { v: '2' } })
+// auth.tz, read again on every connect: the server keeps it only for people who linked a helper,
+// so their helpers' ring hours follow where they are. It travels in the CONNECT packet, not the URL.
+export const socket = io({
+  autoConnect: false,
+  transports: ['websocket'],
+  query: { v: '2' },
+  auth: (cb) => cb({ tz: Intl.DateTimeFormat().resolvedOptions().timeZone }),
+})
