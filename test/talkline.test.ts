@@ -1103,7 +1103,8 @@ test('route: messages spread over sessions reach exactly one, once, and answers 
   assert.deepEqual(Object.values(got).flat().sort(), want, 'every message but the answers, once')
   for (const [, l, to] of plan) if (l) assert.ok(to ? got[to].includes(l) : !got.s1.includes(l), `${l} went to ${to ?? 'c1, c2 or w17'}`)
 
-  // A process killed between take and delivery left a line in .taking: c1, back under that key, hands it over once.
+  // A process killed between take and delivery left a line in .taking: c1, back under that key, hands it over once,
+  // and the file goes, or its 5 s timer would hand it over again.
   await closeAll(c1, c2, w)
   const left = await send({ text: 'left behind' })
   await caughtUp()
@@ -1113,6 +1114,7 @@ test('route: messages spread over sessions reach exactly one, once, and answers 
   await eventFor(back, left.id)
   await pause(500)
   assert.deepEqual(back.events().map((e) => e.content), ['left behind'])
+  assert.ok(!held('c171'), 'the left-behind file was taken')
   await closeAll(back)
 })
 
@@ -1930,8 +1932,12 @@ test('mcp channel: an unswiped message goes to the session he last traded with; 
   more.stop()
   assert.equal(more.seen.length, 0, 'one Went to reply')
   // c1 writes, so it is the one he last traded with.
-  await sentBy(c1, 'C')
+  const said = await sentBy(c1, 'C')
   await eventFor(c1, (await send({ text: 'hey' })).id)
+  // Then c2 writes, but he swipe-replies to c1: he wrote to c1 last, so his next message goes there too.
+  await sentBy(c2, 'D')
+  await eventFor(c1, (await send({ text: 'about C', reply: { id: said.id, from: agent.id, preview: 'c1: C' } })).id)
+  await eventFor(c1, (await send({ text: 'and this' })).id)
   // A session that has traded nothing ranks last.
   const c3 = mcp({ sid: 'c163', claudePid: 9003, label: 'twin', channel: true })
   await c3.init()
@@ -2115,11 +2121,24 @@ test('mcp channel: what no transcript shows goes back to the Stop hook, and the 
     })
   const older = (ds: { t: number }[]) => writeFileSync(at, ds.map((d) => JSON.stringify({ ...d, t: d.t - 11_000 }) + '\n').join(''))
   const transcript = path.join(tmp, 'transcripts', 'cpb.jsonl')
+  // A transcript line for Claude Code's event of message `id`.
+  const shows = (id: number) => JSON.stringify({ type: 'user', message: { content: `<channel source="talkline" message_id="${id}" at="9:00">…</channel>` } }) + '\n'
+  const stopRun = () => cli(['hook', 'stop'], { input: JSON.stringify({ session_id: 'hpb', cwd: '/x/demo', transcript_path: transcript }), env: { CLAUDE_PID: '9001' } })
   const stopped = async () => {
-    const r = await cli(['hook', 'stop'], { input: JSON.stringify({ session_id: 'hpb', cwd: '/x/demo', transcript_path: transcript }), env: { CLAUDE_PID: '9001' } })
+    const r = await stopRun()
     assert.equal(r.code, 0, r.stderr)
     return lines(JSON.parse(r.stdout).hookSpecificOutput.additionalContext)
   }
+  // After /clear Claude Code writes a new transcript file in the same folder. What an older one shows counts: Stop
+  // hands Claude nothing, and the channel stays on.
+  const cleared = await send({ text: 'before /clear' })
+  await eventFor(c1, cleared.id)
+  older(await delivered(1))
+  mkdirSync(path.dirname(transcript), { recursive: true })
+  writeFileSync(path.join(path.dirname(transcript), 'old.jsonl'), shows(cleared.id))
+  writeFileSync(transcript, JSON.stringify({ type: 'user', message: { content: 'after /clear' } }) + '\n')
+  result(await stopRun(), 0, '')
+  assert.ok(!existsSync(path.join(TL, 'sessions', 'cpb1.nochannel')))
   const seen = await send({ text: 'seen' })
   const lost = await send({ text: 'lost' })
   await eventFor(c1, lost.id)
@@ -2129,8 +2148,7 @@ test('mcp channel: what no transcript shows goes back to the Stop hook, and the 
   older(out)
   await eventFor(c1, (await send({ text: 'young' })).id)
   await delivered(3)
-  mkdirSync(path.dirname(transcript), { recursive: true })
-  writeFileSync(transcript, JSON.stringify({ type: 'user', message: { content: `<channel source="talkline" message_id="${seen.id}" at="9:00">seen</channel>` } }) + '\n')
+  appendFileSync(transcript, shows(seen.id))
   assert.deepEqual(await stopped(), ['lost'])
   // Sent after the Stop wrote .nochannel, which the process reads within 5 s: it isn't pushed, and waits for a Stop.
   await send({ text: 'gap' })
@@ -2142,7 +2160,7 @@ test('mcp channel: what no transcript shows goes back to the Stop hook, and the 
   // From then on Stop hands over what comes next.
   await send({ text: 'after' })
   assert.deepEqual(lines(await stop('hpb', { CLAUDE_PID: '9001' })), ['after'])
-  assert.deepEqual(c1.events().map((e) => e.content), ['seen', 'lost', 'young'])
+  assert.deepEqual(c1.events().map((e) => e.content), ['before /clear', 'seen', 'lost', 'young'])
   await closeAll(c1)
 })
 
@@ -2264,7 +2282,8 @@ test('mcp relay: previews, cut or whole, at the Mac or away, answered or not', {
   near.notify('notifications/claude/channel/permission_request', { request_id: 'tqbxe', tool_name: 'Bash', description: '', input_preview: '{"command": "ls"}' })
   await near.request('ping')
   await until(() => readFileSync(path.join(TL, 'events.jsonl'), 'utf8').includes('"kind":"relay","sent":false,"why":"keyboard"'))
-  assert.ok(!existsSync(path.join(TL, 'sessions', 'c33near.pending')))
+  // The relay logs before it removes .pending.
+  await until(() => !existsSync(path.join(TL, 'sessions', 'c33near.pending')))
   await ignored()
   await closeAll(near)
 

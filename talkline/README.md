@@ -130,16 +130,18 @@ The `Read` deny rule covers Claude's file tools, and `cat`, `head`, `tail`, `sed
 
 ### Which session gets your message
 
-Every message a session sends you starts with its name, the name of its folder: `Messaging: Tests pass. Deploy?`. Its questions do too (`Messaging: run this command?`), and so do status lines (`Messaging status: running tests`). 👀 on your message shows that a session got it.
+Every message a session sends you starts with its name, the name of the folder it started in: `Messaging: Tests pass. Deploy?`. Its questions do too (`Messaging: run this command?`), and so do status lines (`Messaging status: running tests`). In a session with no talkline mcp, the hooks' texts start with the name of the folder Claude is in when they run, which follows Claude's `cd`. So do `notify` and `ask`, in any session. 👀 on your message shows that a session got it.
 
 The first rule that fits decides:
 
 1. An answer to a question goes to that question, never to a session as chat. A typed answer after its question closed gets ⏳ and one reply: "Too late: <code> already closed, so this did nothing."
 2. `no <code> <note>` goes to the session that asked.
 3. A swipe-reply goes to the session that sent the message you swiped. If that session has ended, your message waits for it to resume, and gets ❓ and a reply that says so: send it again without a swipe to reach another session.
-4. A message that starts with a session's name and a colon, in any case, goes to that session: `messaging: run the tests`. If two running sessions have that name, it gets ❓ and a reply: swipe-reply instead.
-5. Anything else goes to the session you last traded messages with, among those that can take it now: channel sessions, and plain ones waiting in `ask` or `wait_for_reply`. With two or more running, a quiet "Went to <name>" reply says which, at most once every 10 minutes. If it went to the wrong one, send it again with the right name and a colon; Claude in the wrong one knows that other sessions share the chat.
+4. A message that starts with a session's name and a colon, in any case, goes to that session: `messaging: run the tests`. This works only for a session that can take it now (see rule 5). The name of a session that ended, one with no talkline mcp, or a plain one that isn't waiting picks nothing, and rules 5 and 6 decide: swipe-reply to reach such a session. If two sessions that can take it have that name, it gets ❓ and a reply: swipe-reply instead.
+5. Anything else goes to the session you last traded messages with, among those that can take it now: channel sessions, and plain ones waiting in `ask` or `wait_for_reply`. With two or more running, a quiet "Went to <name>" reply says which, at most once every 10 minutes. If it went to the wrong one, send it again with the right name and a colon, or swipe-reply to one of the right session's messages; Claude in the wrong one knows that other sessions share the chat.
 6. With no such session, it goes to the next session that ends a turn, as in Phase 1.
+
+The Too late and has-ended replies come only when a talkline mcp routes your message. When no channel session runs and no plain one waits in `ask` or `wait_for_reply`, a Stop hook may route it instead, and you get only the ⏳ or ❓.
 
 In a channel session Claude offers choices as a numbered message: swipe-reply with the number.
 
