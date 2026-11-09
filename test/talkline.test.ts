@@ -299,10 +299,10 @@ async function caughtUp() {
 
 // A process's start time as ps prints it, which markers and inbox.lock carry.
 const lstartOf = (pid: number) => execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8', env: { PATH: process.env.PATH, LC_ALL: 'C', TZ: 'UTC' } }).trim()
-// A PATH whose `cmd` hangs, as a stuck ioreg or ps would.
+// A PATH whose `cmd` hangs and ignores SIGTERM, as a stuck ioreg or ps might.
 function stuck(cmd: string) {
   const bin = mkdtempSync(path.join(tmp, `${cmd}-`))
-  writeFileSync(path.join(bin, cmd), '#!/bin/sh\nexec sleep 30\n', { mode: 0o755 })
+  writeFileSync(path.join(bin, cmd), '#!/bin/sh\ntrap "" TERM\nexec sleep 30\n', { mode: 0o755 })
   return `${bin}${path.delimiter}${process.env.PATH}`
 }
 // The marker a talkline mcp would write for Claude Code pid `claudePid`: by default a plain process waiting in an

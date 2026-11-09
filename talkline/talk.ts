@@ -69,10 +69,11 @@ export const sessionId = (v: unknown) => String(v ?? '').replace(/[^A-Za-z0-9_-]
 export const noteSent = (sid: string, id: number) => (home(), appendFileSync(file(`sessions/${sid}.sent`), `${id}\n`, { mode: 0o600 }))
 
 // One ps field of a process: '' once it's gone, undefined when ps can't say within 2 s (a stuck ps must not
-// block a hook or the whole talkline mcp). TZ=UTC keeps a start time's text the same across a time-zone change.
+// block a hook or the whole talkline mcp). SIGKILL, since execFileSync waits for the child to exit and SIGTERM can
+// be ignored. TZ=UTC keeps a start time's text the same across a time-zone change.
 export function ps(pid: number, field: 'lstart' | 'args') {
   try {
-    return execFileSync('ps', ['-o', `${field}=`, '-p', String(pid)], { encoding: 'utf8', env: { PATH: process.env.PATH, LC_ALL: 'C', TZ: 'UTC' }, stdio: ['ignore', 'pipe', 'ignore'], timeout: 2000 }).trim()
+    return execFileSync('ps', ['-o', `${field}=`, '-p', String(pid)], { encoding: 'utf8', env: { PATH: process.env.PATH, LC_ALL: 'C', TZ: 'UTC' }, stdio: ['ignore', 'pipe', 'ignore'], timeout: 2000, killSignal: 'SIGKILL' }).trim()
   } catch (e) {
     return (e as NodeJS.ErrnoException).code === 'ETIMEDOUT' ? undefined : ''
   }
