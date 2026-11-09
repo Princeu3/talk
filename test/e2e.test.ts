@@ -13,7 +13,7 @@ import * as c from '../src/lib/crypto.ts'
 import { blocked, parseHead } from '../server/unfurl.ts'
 import type { GroupCall, Me, Message, MessageBody, ReactionBody } from '../shared/types.ts'
 
-const PORT = 4000 + Math.floor(Math.random() * 1000)
+const PORT = 4200 + Math.floor(Math.random() * 800) // skips fetch's bad ports 4045 and 4190
 const BASE = `http://localhost:${PORT}`
 const dataDir = mkdtempSync(path.join(tmpdir(), 'talk-test-'))
 let server: ChildProcess

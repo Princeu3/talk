@@ -6,7 +6,7 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { createServer, type IncomingHttpHeaders } from 'node:http2'
 import { generateKeyPairSync, verify } from 'node:crypto'
 
-const PORT = 5000 + Math.floor(Math.random() * 1000)
+const PORT = 5100 + Math.floor(Math.random() * 900) // skips fetch's bad ports 5060 and 5061
 const RELAY = `http://localhost:${PORT}`
 const { privateKey, publicKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' })
 const TOKEN = 'ab'.repeat(32)

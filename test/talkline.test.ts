@@ -14,7 +14,7 @@ import { io as connect, type Socket } from 'socket.io-client'
 import * as c from '../src/lib/crypto.ts'
 import type { Agent, CallRing, Me, Message, MessageBody, ReactionBody, User } from '../shared/types.ts'
 
-const PORT = 6000 + Math.floor(Math.random() * 1000)
+const PORT = 7100 + Math.floor(Math.random() * 900) // skips fetch's bad ports 6000 to 6697
 const BASE = `http://localhost:${PORT}`
 const tmp = mkdtempSync(path.join(tmpdir(), 'talkline-test-'))
 const TL = path.join(tmp, 'tl')
