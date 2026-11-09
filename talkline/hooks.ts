@@ -264,7 +264,7 @@ export async function hook(event: string, input: Input, print: (out: string) => 
   // Claude Code 2.1.319 sets CLAUDE_CODE_SESSION_ATTENDED to "1" in interactive and desktop sessions, "0" in -p, background and daemon runs.
   // A channel session's expiry denies instead: Claude goes on, and can tell the owner on Talk what didn't run.
   const waits = !m?.channel && process.env.CLAUDE_CODE_SESSION_ATTENDED !== '0' // unset (older versions) counts as attended
-  writeFileSync(session('pending'), String(process.pid))
+  writeFileSync(session('pending'), String(process.pid), { mode: 0o600 })
   try {
     const stay = await stays(t0)
     if (stay) return skip(stay)

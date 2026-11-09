@@ -1584,6 +1584,8 @@ test('mcp ask: waits for the answer, or says pending; his words come back at onc
 
 test('mcp ask: a question Talk refuses leaves no socket open and nothing to cancel', { timeout: 30_000 }, async () => {
   await caughtUp()
+  const asks = path.join(TL, 'asks')
+  const before = existsSync(asks) ? readFileSync(asks, 'utf8').length : 0 // run alone, no ask has written it yet
   // A proxy in front of Talk, counting the socket.io connections open through it.
   const ws = new Set<Conn>()
   const proxy = createServer((conn) => {
@@ -1596,8 +1598,6 @@ test('mcp ask: a question Talk refuses leaves no socket open and nothing to canc
   await new Promise<void>((r) => proxy.listen(0, r))
   const good = readFileSync(PROFILE, 'utf8')
   writeFileSync(PROFILE, JSON.stringify({ ...profile(), server: `http://localhost:${(proxy.address() as AddressInfo).port}` }))
-  const asks = path.join(TL, 'asks')
-  const before = readFileSync(asks, 'utf8').length
   const s = mcp()
   try {
     await until(() => ws.size === 1) // its own
