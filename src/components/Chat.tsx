@@ -469,11 +469,15 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
     recRef.current?.cancel()
     setRec(null)
   }, [])
+  // The recorder's controls and time limit go with the composer, so a chat that turns read-only stops the recording.
+  const readOnly = conv && readOnlyNote(me, conv)
+  useEffect(() => {
+    if (readOnly) cancelRec()
+  }, [readOnly, cancelRec])
 
   if (!conv) return null
   const name = convName(me, conv)
   const helper = isHelper(me, conv)
-  const readOnly = readOnlyNote(me, conv)
 
   const cancelCompose = () => {
     if (editing) setText('')
@@ -533,7 +537,8 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
     }
   }
 
-  const openMenu = (m: Decrypted, el: Element) => setMenu({ m, at: el.getBoundingClientRect() })
+  // In a read-only chat, a removed helper's call log has no actions left, so it opens no menu.
+  const openMenu = (m: Decrypted, el: Element) => actions(m).length > 0 && setMenu({ m, at: el.getBoundingClientRect() })
   // Right-click on desktop; long-press on touch (iOS fires no contextmenu, Android does: both open the same menu).
   const menuHandlers = (m: Decrypted) => ({
     onContextMenu: (e: MouseEvent<HTMLElement>) => {
@@ -569,14 +574,14 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
       f()
     }
     return [
-      // Reply and Edit need the composer, which a read-only chat doesn't have.
+      // A read-only chat has no composer for Reply and Edit, and the server takes no report of a deleted account.
       !readOnly && c && { label: 'Reply', Icon: Reply, run: go(() => startReply(m)) },
       c?.text && { label: 'Copy', Icon: Copy, run: go(() => void navigator.clipboard.writeText(c.text!)) },
       (c?.text || c?.files) && { label: 'Forward', Icon: Forward, run: go(() => setAct({ kind: 'forward', m })) },
       !readOnly && mine && c?.text && Date.now() - m.createdAt < EDIT_MS && { label: 'Edit', Icon: Pencil, run: go(() => startEdit(m)) },
       mine
         ? { label: 'Delete', Icon: Trash, run: go(() => setAct({ kind: 'delete', m })), red: true }
-        : { label: 'Report', Icon: Flag, run: go(() => setAct({ kind: 'report', m })), red: true },
+        : !readOnly && { label: 'Report', Icon: Flag, run: go(() => setAct({ kind: 'report', m })), red: true },
     ].filter((x) => !!x)
   }
 
@@ -724,14 +729,16 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
                     {m.reacts && Object.keys(m.reacts).length > 0 && (
                       <ReactionPill reacts={m.reacts} myId={me.user.id} onClick={() => setAct({ kind: 'reactions', m })} />
                     )}
-                    <button
-                      type="button"
-                      onClick={(e) => openMenu(m, e.currentTarget.parentElement!)}
-                      aria-label="Message actions"
-                      className={`absolute top-1/2 ${mine ? 'right-full mr-1' : 'left-full ml-1'} flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-full text-mut opacity-0 hover:bg-raised focus-visible:opacity-100 group-hover:opacity-100 pointer-coarse:hidden`}
-                    >
-                      <More size={18} />
-                    </button>
+                    {actions(m).length > 0 && (
+                      <button
+                        type="button"
+                        onClick={(e) => openMenu(m, e.currentTarget.parentElement!)}
+                        aria-label="Message actions"
+                        className={`absolute top-1/2 ${mine ? 'right-full mr-1' : 'left-full ml-1'} flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-full text-mut opacity-0 hover:bg-raised focus-visible:opacity-100 group-hover:opacity-100 pointer-coarse:hidden`}
+                      >
+                        <More size={18} />
+                      </button>
+                    )}
                   </div>
                   {(last || m.editedAt || m.id === newest?.id) && (
                     <div className={`mt-1 px-2 text-xs text-mut ${mine ? 'self-end' : 'self-start'}`}>

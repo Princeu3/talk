@@ -31,4 +31,6 @@ test("a removed helper's open ask shows as closed", () => {
   assert.equal(closedAsk(me(user('h', { deleted: true })), 'h', ask), ask) // only a helper asks
   const done = { from: 'h', text: 'Run npm test?\nApproved 2:03 PM' } // the closing edit drops `ask`
   assert.equal(closedAsk(me(removed), 'h', done), done)
+  const odd = { from: 'h', text: 'Run npm test?', ask: { code: Object.create(null), expires: 1 } } // no string form
+  assert.equal(closedAsk(me(removed), 'h', odd), odd)
 })

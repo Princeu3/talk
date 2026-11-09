@@ -24,7 +24,8 @@ export function readOnlyNote(me: Me, conv: Conversation) {
 // A removed helper never sends its closing edit, so an ask it left open shows as closed.
 export function closedAsk(me: Me, senderId: string, body: MessageBody): MessageBody {
   const sender = me.users.find((u) => u.id === senderId)
-  if (!sender?.owner || !sender.deleted || !body.ask || typeof body.text !== 'string') return body
+  // The body is another account's JSON, so check the fields this reads before building a string from them.
+  if (!sender?.owner || !sender.deleted || typeof body.ask?.code !== 'string' || typeof body.text !== 'string') return body
   const open = `Reply yes ${body.ask.code} or no ${body.ask.code} by `
   return { ...body, text: body.text.split('\n').map((l) => (l.startsWith(open) ? 'Closed: helper removed' : l)).join('\n') }
 }

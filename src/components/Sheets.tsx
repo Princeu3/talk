@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactNode } from 'react'
 import type { Decrypted, Talk } from '../lib/useTalk.ts'
 import { api } from '../lib/api.ts'
 import { safetyCode } from '../lib/crypto.ts'
-import { convName, userName } from '../lib/format.ts'
+import { convName, readOnlyNote, userName } from '../lib/format.ts'
 import { enablePush, needsInstall, pushSupported } from '../lib/push.ts'
 import { AiBadge, Avatar } from './Sidebar.tsx'
 import Agents from './Agents.tsx'
@@ -87,7 +87,7 @@ export function ForwardSheet({ talk, m, onClose }: { talk: Talk; m: Decrypted; o
     <Sheet title="Forward to" onClose={onClose}>
       {error && <p className="mb-2 text-sm text-danger" role="alert">{error}</p>}
       <ul className="flex flex-col gap-1">
-        {me.conversations.map((conv) => (
+        {me.conversations.filter((conv) => !readOnlyNote(me, conv)).map((conv) => (
           <li key={conv.id}>
             <button onClick={() => run(() => talk.forward(m, conv.id))} disabled={busy} className="flex min-h-14 w-full items-center gap-3 rounded-2xl px-2 text-left hover:bg-raised disabled:opacity-40">
               <Avatar name={convName(me, conv)} size={36} />
