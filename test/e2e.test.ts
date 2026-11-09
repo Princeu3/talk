@@ -630,6 +630,9 @@ test('helper link: 10 minutes, one use, never a person invite', async () => {
   const ident = await c.deriveIdentity('Claude AI', 'helper passphrase', 1000)
   assert.equal((await api(null, 'POST', '/api/register', { invite: link.code, name: 'Sneaky', pubkey: ident.publicKey, auth: ident.auth })).status, 403)
   const proof = proofFor(randomBytes(32), ident.publicKey)
+  const personCode = await invite(owen)
+  await refused(await api(null, 'POST', '/api/agents', { code: personCode, name: 'Spare AI', pubkey: ident.publicKey, proof, where: 'studio.local' }), 'This link is not valid or has expired.')
+  await register('Iris', personCode) // still a person invite
   const pair = (name: string) => api(null, 'POST', '/api/agents', { code: link.code, name, pubkey: ident.publicKey, proof, where: 'studio.local' })
   await refused(await api(null, 'POST', '/api/agents', {}), 'bad request', 400)
   await refused(await pair('Claude'), 'Helper names end in “AI”, like “Claude AI”.', 400)
@@ -782,6 +785,24 @@ test('pause and push budgets', async () => {
   const tick = await seal(chatty, dm3, { from: chatty.id, text: 'tick' })
   for (let i = 0; i < 60; i++) assert.ok((await send(sc, dm3, tick, { quiet: true })).message)
   assert.equal((await send(sc, dm3, tick, { quiet: true })).error, 'Slow down: a helper can send 60 messages a minute.')
+})
+
+// The timeout fails a missing call:end instead of waiting on it forever.
+test('pause ends a helper’s live ring', { timeout: 10_000 }, async () => {
+  const pia = await register('Pia', await invite(await login('Alice')))
+  const h = await helper(pia, 'Pip AI')
+  const dm = await allow(pia, h)
+  const [so, sh] = await Promise.all([socket(pia), socket(h)])
+  const rung = next(so, 'call:ring')
+  const { id } = await ring(sh, dm, await ask(h, sh, dm))
+  assert.ok(id)
+  await rung
+  const sent = Date.now()
+  const ended = next<{ id: string; reason: string }>(so, 'call:end')
+  assert.equal((await api(pia, 'PATCH', `/api/conversations/${dm}/me`, { muted: true })).status, 200)
+  assert.deepEqual(await ended, { id, reason: 'cancelled' })
+  const ms = Date.now() - sent
+  assert.ok(ms < 1000, `${ms} ms`)
 })
 
 // Its own owner: 'pause and push budgets' spends Ruth's 6 loud pushes a minute.

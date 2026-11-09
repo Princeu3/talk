@@ -28,8 +28,14 @@ export function Avatar({ name, size = 44 }: { name: string; size?: number }) {
   )
 }
 
-// Next to a helper's name. Hidden from screen readers: helper names already end in "AI".
-export const AiBadge = () => <span aria-hidden className="ml-1.5 shrink-0 rounded-full bg-fill px-1.5 py-px text-xs font-semibold text-on-fill">AI</span>
+// Next to a helper's name. Anyone can end a name in "AI", but only the server sets `owner`, so this badge is
+// the trust signal: screen readers hear it as "helper", since a spoken "AI" would sound like part of the name.
+export const AiBadge = () => (
+  <span className="ml-1.5 shrink-0 rounded-full bg-fill px-1.5 py-px text-xs font-semibold text-on-fill">
+    <span aria-hidden>AI</span>
+    <span className="sr-only">, helper</span>
+  </span>
+)
 
 export const iconButton = 'pressable flex h-11 w-11 shrink-0 items-center justify-center rounded-full text-accent hover:bg-raised'
 

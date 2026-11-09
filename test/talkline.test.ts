@@ -5,7 +5,7 @@
 import { test, describe, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn, type ChildProcess } from 'node:child_process'
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { createServer, type AddressInfo, type Socket as Conn } from 'node:net'
 import { hostname, tmpdir } from 'node:os'
 import path from 'node:path'
@@ -590,6 +590,8 @@ test('ask --urgent: rings while unread, re-posts after an answered ring, stays q
   await send({ text: `yes ${a.code}` })
   result(await a.done, 0, 'yes')
 
+  await restart() // forgets the last ring, 10 minutes apart
+  await reconnected() // the ring comes at about 1 s, which can beat the sockets back
   const rings = watch<CallRing>(so, 'call:ring', () => true)
   const b = await ask('Tag the release?', '--urgent', '--ring-after', '1', '--expires', '0.5')
   assert.equal((await api(prince, 'POST', `/api/conversations/${dm}/read`, { upTo: b.m.id })).status, 200)
@@ -991,12 +993,18 @@ test('hook permission: a question people can read', { timeout: 30_000 }, async (
   let text = await asked('Bash', { command: `tail ${tmp}/logs/a.log ${pad}/s5`, description: `Check\u0085${tmp}/logs`, run_in_background: true }, 'demo: run this command in the background?\n')
   assert.ok(text.startsWith('demo: run this command in the background?\nClaude says: Check ~/logs\nReply yes '), text)
   assert.ok(text.includes(`\n\ntail ${tmp}/logs/a.log /tmp/…/scratchpad/s5`), text)
-  // An edit marks every shown line, whatever breaks it.
-  text = await asked('Edit', { file_path: '/x/demo/src/a.ts', old_string: 'a\nb', new_string: 'c d' }, 'demo: edit src/a.ts?\n')
-  assert.ok(text.endsWith('\n\n- a\n- b\n+ c\n+ d'), text)
-  // Another tool shows a field a line, so a line break, U+2028 too, can't fake one, in text or in a list. Its description is content, not Claude's reason.
-  text = await asked('mcp__mail__send', { to: 'a@x', body: 'hi\nto: b@x', cc: 'x\u2028to: b@x', bcc: ['x\u2028to: b@x'], description: 'ok' }, 'demo: use mail send?\nReply yes ')
-  assert.ok(text.endsWith('\n\nto: a@x\nbody: "hi\\nto: b@x"\ncc: "x\\u2028to: b@x"\nbcc: ["x\\u2028to: b@x"]\ndescription: ok'), text)
+  // Direction controls show as escapes, so a command reads on Talk as it runs.
+  text = await asked('Bash', { command: 'echo ok \u202e\u2066; echo PWNED \u2069 \u2066# done\u2069\u202c', description: 'Print \u202edone\u202c' }, 'demo: run this command?\n')
+  assert.ok(text.startsWith('demo: run this command?\nClaude says: Print \\u202edone\\u202c\nReply yes '), text)
+  assert.ok(text.endsWith('\n\necho ok \\u202e\\u2066; echo PWNED \\u2069 \\u2066# done\\u2069\\u202c'), text)
+  assert.ok(!/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/.test(text), text)
+  // An edit marks every shown line, whatever breaks it, and a path with a line break shows quoted.
+  text = await asked('Edit', { file_path: '/x/demo/src/a\u000b.ts', old_string: 'a\nb\u000bc', new_string: 'd\u2028e\u000cf' }, 'demo: edit ')
+  assert.ok(text.startsWith('demo: edit "src/a\\u000b.ts"?\n'), text)
+  assert.ok(text.endsWith('\n\n- a\n- b\n- c\n+ d\n+ e\n+ f'), text)
+  // Another tool shows a field a line, so a line break, U+2028 or FF too, can't fake one, in text or in a list. Its description is content, not Claude's reason.
+  text = await asked('mcp__mail__send', { to: 'a@x', body: 'hi\nto: b@x', cc: 'x\u2028to: b@x', bcc: ['x\u2028to: b@x'], subject: 'x\u000cto: b@x', description: 'ok' }, 'demo: use mail send?\nReply yes ')
+  assert.ok(text.endsWith('\n\nto: a@x\nbody: "hi\\nto: b@x"\ncc: "x\\u2028to: b@x"\nbcc: ["x\\u2028to: b@x"]\nsubject: "x\\fto: b@x"\ndescription: ok'), text)
 })
 
 test('hook permission: AskUserQuestion stays at the Mac, and its text shows the question', { timeout: 30_000 }, async () => {
@@ -1129,7 +1137,7 @@ test('ask: the message carries its code for the web, and the closing edit drops 
   const { m, b } = await closed
   assert.equal(m.id, a.m.id)
   assert.equal(b.ask, undefined)
-  assert.match(b.text!, /^Push the tag\?\nApproved \d\d:\d\d/)
+  assert.match(b.text!, /^Push the tag\?\nApproved \d{1,2}:\d\d/)
   assert.ok(readFileSync(path.join(TL, 'asks'), 'utf8').includes(`\n${a.m.id} ${a.code}\n`), 'the asks file keeps the code')
 })
 
@@ -1140,6 +1148,8 @@ test('a replayed owner message reaches Claude once', { timeout: 30_000 }, async 
   // The server stores the same sealed body again, under a new id.
   const again = await so.timeout(5000).emitWithAck('send', { convId: dm, body: ship.body, cid: crypto.randomUUID() })
   assert.ok(again.message?.id > ship.id, again.error)
+  // What an ask that loaded `seen` before the Stop above writes when it takes the copy.
+  appendFileSync(path.join(TL, 'seen'), `${ship.body.slice(0, 16)} ${again.message.id}\n`)
   assert.equal(await stop('s7'), '')
 })
 

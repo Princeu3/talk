@@ -60,7 +60,7 @@ export function log(ev: string, fields: Record<string, unknown> = {}) {
   } catch {}
 }
 
-export const hhmm = (t: number) => new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+export const hhmm = (t: number) => new Date(t).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
 
 // --- HTTP ---
 
@@ -196,7 +196,7 @@ function seen() {
   ivs = new Map()
   for (const l of existsSync(file('seen')) ? readFileSync(file('seen'), 'utf8').split('\n') : []) {
     const [iv, id] = l.split(' ')
-    if (id) ivs.set(iv, Number(id))
+    if (id && !ivs.has(iv)) ivs.set(iv, Number(id))
   }
   return ivs
 }

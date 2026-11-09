@@ -145,7 +145,8 @@ function Attachment({ talk, convId, file, onZoom }: { talk: Talk; convId: string
 }
 
 // Under a helper's open ask: the typed answer talkline reads ("yes kxqzm"), in one tap. They go when
-// the ask expires, or when talkline's closing edit ("Approved 14:03") drops `ask`.
+// the ask expires, or when talkline's closing edit ("Approved 14:03") drops `ask`. A removed helper
+// reads no answer and sends no closing edit, so its asks get no buttons.
 function AskButtons({ talk, convId, code, expires }: { talk: Talk; convId: string; code: string; expires: number }) {
   const [now, setNow] = useState(Date.now)
   const [sent, setSent] = useState(false)
@@ -243,7 +244,7 @@ function Bubble({ m, mine, first, last, talk, onCall, onZoom, onJump }: {
       )}
       {c.files?.map((f) => <Attachment key={f.id} talk={talk} convId={m.convId} file={f} onZoom={onZoom} />)}
       {c.text && <span><Linkified text={c.text} /></span>}
-      {c.ask && /^[a-km-z]{5}$/.test(c.ask.code) && typeof c.ask.expires === 'number' && !mine && !m.forged && isHelper(me, m.senderId) && (
+      {c.ask && /^[a-km-z]{5}$/.test(c.ask.code) && typeof c.ask.expires === 'number' && !mine && !m.forged && me.users.some((u) => u.id === m.senderId && !!u.owner && !u.deleted) && (
         <AskButtons talk={talk} convId={m.convId} code={c.ask.code} expires={c.ask.expires} />
       )}
       {c.preview && <LinkCard p={c.preview} />}
@@ -633,7 +634,7 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
         <button onClick={onBack} aria-label="Back to chats" className={`${iconButton} md:hidden`}>
           <Back />
         </button>
-        <button onClick={() => setInfo(true)} aria-label={`${name}: chat info`} className="flex min-h-11 min-w-0 flex-1 items-center gap-3 rounded-2xl px-1 text-left hover:bg-raised/60 md:px-2">
+        <button onClick={() => setInfo(true)} aria-label={`${name}${helper ? ', helper' : ''}: chat info`} className="flex min-h-11 min-w-0 flex-1 items-center gap-3 rounded-2xl px-1 text-left hover:bg-raised/60 md:px-2">
           <Avatar name={name} size={36} />
           <div className="min-w-0">
             <h2 className="flex items-center font-semibold leading-tight">

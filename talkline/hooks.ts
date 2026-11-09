@@ -240,12 +240,15 @@ export async function hook(event: string, input: Input, expires?: number): Promi
   const pad = String(input.scratchpad_dir ?? '')
   const scratch = (t: string) => (pad ? t.replace(at(pad), '/tmp/…/scratchpad') : t)
   const tidy = (t: string) => scratch(t).replace(at(homedir()), '~')
-  // A value with a line break shows as a quoted JSON string, so it can't pass for another field or line.
+  const esc = (c: string) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`
+  // A value with a line break, VT and FF included, shows as a quoted JSON string, so it can't pass for another field or line.
   // JSON.stringify leaves NEL, LS and PS raw, and the iPhone breaks lines on them.
-  const json = (v: unknown) => JSON.stringify(v).replace(/[\u0085\u2028\u2029]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`)
-  const one = (s: string) => (/[\r\n\u0085\u2028\u2029]/.test(s) ? json(s) : s)
+  const json = (v: unknown) => JSON.stringify(v).replace(/[\u0085\u2028\u2029]/g, esc)
+  const one = (s: string) => (/[\r\n\u000b\u000c\u0085\u2028\u2029]/.test(s) ? json(s) : s)
   const where = one(dir && target.startsWith(dir + '/') ? target.slice(dir.length + 1) : tidy(target))
-  const mark = (s: unknown, m: string) => String(s ?? '').split(/\r\n?|[\n\u0085\u2028\u2029]/).map((l) => m + l).join('\n') // a mark on every shown line
+  const mark = (s: unknown, m: string) => String(s ?? '').split(/\r\n?|[\n\u000b\u000c\u0085\u2028\u2029]/).map((l) => m + l).join('\n') // a mark on every shown line
+  // Text-direction controls show as escapes, so a command can't read one way on Talk and run another.
+  const bare = (t: string) => t.replace(/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, esc)
   const fields = () => Object.entries(ti).map(([k, v]) => `${one(k)}: ${typeof v === 'string' ? one(v) : json(v)}`).join('\n')
   const [action, detail] =
     tool === 'Bash' ? [`run this command${ti.run_in_background ? ' in the background' : ''}${ti.dangerouslyDisableSandbox ? ' outside the sandbox' : ''}`, String(ti.command ?? '')]
@@ -266,8 +269,8 @@ export async function hook(event: string, input: Input, expires?: number): Promi
       if (touchedSince(t0, (idle = idleSeconds()))) return skip('keyboard')
     }
     const { verdict, note } = await ask(p, {
-      question: `${label}: ${action}?${why ? `\nClaude says: ${tidy(why)}` : ''}`,
-      detail: cut(scratch(detail)),
+      question: bare(`${label}: ${action}?${why ? `\nClaude says: ${tidy(why)}` : ''}`),
+      detail: cut(bare(scratch(detail))),
       risk: 'high',
       urgent: true,
       ringAfter: 180,

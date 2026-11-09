@@ -217,6 +217,7 @@ export default function ChatInfo({ talk, convId, onClose, onCall, onAddPeople, o
 
   const others = conv.members.filter((u) => u !== me.user.id).sort((a, b) => userName(me, a).localeCompare(userName(me, b)))
   const blocked = me.blocked.includes(other)
+  const helper = isHelper(me, other)
   const call = (kind: CallKind) => {
     onCall?.(kind)
     onClose()
@@ -258,7 +259,7 @@ export default function ChatInfo({ talk, convId, onClose, onCall, onAddPeople, o
       {error && <p className="mb-3 text-sm text-danger" role="alert">{error}</p>}
 
       {/* a helper takes no calls */}
-      {!isHelper(me, other) && (
+      {!helper && (
         <div className="mb-5 flex gap-2">
           {([['audio', 'Voice', Phone], ['video', 'Video', Video]] as const).map(([kind, label, Icon]) => (
             <button
@@ -305,7 +306,8 @@ export default function ChatInfo({ talk, convId, onClose, onCall, onAddPeople, o
           <h4 className="text-sm font-semibold text-mut">Safety code</h4>
           <SafetyCode pubkey={user(other)!.pubkey} />
           <p className="mt-1 text-sm text-mut">
-            Compare it with the code {name} sees for themselves in Settings, in person or on a call. If they match, nobody swapped a key.
+            {/* a helper has no Settings to show its code */}
+            Compare it with the code {helper ? 'talkline printed when it was paired' : `${name} sees for themselves in Settings, in person or on a call`}. If they match, nobody swapped a key.
           </p>
         </section>
       )}
@@ -319,7 +321,7 @@ export default function ChatInfo({ talk, convId, onClose, onCall, onAddPeople, o
         <button onClick={() => setAsk('leave')} className={`${row} text-danger`}>
           <LogOut size={20} /> Leave group
         </button>
-      ) : (
+      ) : helper ? null /* Pause and Remove are in Settings > Agents; nobody reports their own helper */ : (
         <section>
           <button onClick={() => run(talk.block(other, !blocked))} className={`${row} ${blocked ? '' : 'text-danger'}`}>
             <Ban size={20} /> {blocked ? `Unblock ${name}` : `Block ${name}`}
