@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import type { Decrypted, Talk } from '../lib/useTalk.ts'
-import { convName, fold, isHelper, preview, shortTime, snippet, typingLabel, userName } from '../lib/format.ts'
+import { closedAsk, convName, fold, isHelper, preview, shortTime, snippet, typingLabel, userName } from '../lib/format.ts'
 import { BellOff, Close, Compose, Lock, Phone, Pin, Search, Settings, Video } from './icons.tsx'
 
 // Olive to soft white, so every avatar sits inside the app palette in both themes.
@@ -241,7 +241,7 @@ export default function Sidebar({ talk, onNew, onSettings, onJoin }: { talk: Tal
             const name = convName(me, conv)
             const last = talk.messages[conv.id]?.at(-1)
             const active = conv.id === talk.activeId
-            const text = preview(last?.content, last?.senderId === me.user.id)
+            const text = preview(last?.content && closedAsk(me, last.senderId, last.content), last?.senderId === me.user.id)
             const who = !last || last.system ? '' : last.senderId === me.user.id ? 'You: ' : conv.kind === 'group' ? `${userName(me, last.senderId)}: ` : ''
             const join = conv.call && !conv.call.peers.includes(me.user.id) ? conv.call : null
             const typers = talk.typers[conv.id] ?? []

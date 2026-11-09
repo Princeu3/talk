@@ -12,6 +12,7 @@ import path from 'node:path'
 import { setTimeout as pause } from 'node:timers/promises'
 import { io as connect, type Socket } from 'socket.io-client'
 import * as c from '../src/lib/crypto.ts'
+import { closedAsk } from '../src/lib/format.ts'
 import type { Agent, CallRing, Me, Message, MessageBody, ReactionBody, User } from '../shared/types.ts'
 
 const PORT = 7100 + Math.floor(Math.random() * 900) // skips fetch's bad ports 6000 to 6697
@@ -1471,6 +1472,9 @@ test('ask: the message carries its code for the web, and the closing edit drops 
   const a = await ask('Push the tag?')
   assert.equal(a.b.ask?.code, a.code)
   assert.ok(Math.abs(a.b.ask!.expires - (a.m.createdAt + 10 * 60_000)) < 5000, `expires ${a.b.ask?.expires}`)
+  // The web shows a removed helper's open ask as closed by finding this ask's status line.
+  const removed: Me = { user: { id: 'o', name: 'o', pubkey: '' }, users: [{ id: a.m.senderId, name: 'Deleted account', pubkey: '', owner: 'o', deleted: true }], conversations: [], blocked: [], vapidPublicKey: '' }
+  assert.deepEqual(closedAsk(removed, a.m.senderId, a.b).text!.split('\n').slice(0, 2), ['Push the tag?', 'Closed: helper removed'])
   const closed = fromAgent(() => true, 'edit')
   await send({ text: `yes ${a.code}` })
   result(await a.done, 0, 'yes')

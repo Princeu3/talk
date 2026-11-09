@@ -5,7 +5,7 @@ import {
 import type { Talk, Decrypted } from '../lib/useTalk.ts'
 import { AUTO_LOAD, unfurl } from '../lib/useTalk.ts'
 import type { CallKind, FileRef, LinkPreview, Voice } from '../../shared/types.ts'
-import { callNoun, callSummary, convName, dayLabel, fileSize, host, isHelper, preview, typingLabel, URL_RE, userName, who } from '../lib/format.ts'
+import { callNoun, callSummary, closedAsk, convName, dayLabel, fileSize, host, isHelper, preview, readOnlyNote, typingLabel, URL_RE, userName, who } from '../lib/format.ts'
 import { canRecord, clock, startRecording, type Recording } from '../lib/voice.ts'
 import { useSecondTick } from './Call.tsx'
 import { AiBadge, Avatar } from './Sidebar.tsx'
@@ -220,6 +220,7 @@ function Bubble({ m, mine, first, last, talk, onCall, onZoom, onJump }: {
   }
   const mediaOnly = !c.text && !c.reply && !c.forwarded && c.files?.every((f) => /^(image|video)\//.test(f.type))
   const me = talk.me!
+  const text = closedAsk(me, m.senderId, c).text
   return (
     <div className={`${shape} ${mediaOnly ? 'overflow-hidden' : `${tone} px-4 py-2.5`} flex flex-col gap-2 whitespace-pre-wrap break-words`}>
       {c.forwarded && (
@@ -238,7 +239,7 @@ function Bubble({ m, mine, first, last, talk, onCall, onZoom, onJump }: {
         </button>
       )}
       {c.files?.map((f) => <Attachment key={f.id} talk={talk} convId={m.convId} file={f} onZoom={onZoom} />)}
-      {c.text && <span><Linkified text={c.text} /></span>}
+      {text && <span><Linkified text={text} /></span>}
       {c.ask && /^[a-km-z]{5}$/.test(c.ask.code) && typeof c.ask.expires === 'number' && !mine && !m.forged && me.users.some((u) => u.id === m.senderId && !!u.owner && !u.deleted) && (
         <AskButtons talk={talk} convId={m.convId} code={c.ask.code} expires={c.ask.expires} />
       )}
@@ -468,6 +469,11 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
     recRef.current?.cancel()
     setRec(null)
   }, [])
+  // The recorder's controls and time limit go with the composer, so a chat that turns read-only stops the recording.
+  const readOnly = conv && readOnlyNote(me, conv)
+  useEffect(() => {
+    if (readOnly) cancelRec()
+  }, [readOnly, cancelRec])
 
   if (!conv) return null
   const name = convName(me, conv)
@@ -531,7 +537,8 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
     }
   }
 
-  const openMenu = (m: Decrypted, el: Element) => setMenu({ m, at: el.getBoundingClientRect() })
+  // In a read-only chat, a removed helper's call log has no actions left, so it opens no menu.
+  const openMenu = (m: Decrypted, el: Element) => actions(m).length > 0 && setMenu({ m, at: el.getBoundingClientRect() })
   // Right-click on desktop; long-press on touch (iOS fires no contextmenu, Android does: both open the same menu).
   const menuHandlers = (m: Decrypted) => ({
     onContextMenu: (e: MouseEvent<HTMLElement>) => {
@@ -567,13 +574,14 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
       f()
     }
     return [
-      c && { label: 'Reply', Icon: Reply, run: go(() => startReply(m)) },
+      // A read-only chat has no composer for Reply and Edit, and the server takes no report of a deleted account.
+      !readOnly && c && { label: 'Reply', Icon: Reply, run: go(() => startReply(m)) },
       c?.text && { label: 'Copy', Icon: Copy, run: go(() => void navigator.clipboard.writeText(c.text!)) },
       (c?.text || c?.files) && { label: 'Forward', Icon: Forward, run: go(() => setAct({ kind: 'forward', m })) },
-      mine && c?.text && Date.now() - m.createdAt < EDIT_MS && { label: 'Edit', Icon: Pencil, run: go(() => startEdit(m)) },
+      !readOnly && mine && c?.text && Date.now() - m.createdAt < EDIT_MS && { label: 'Edit', Icon: Pencil, run: go(() => startEdit(m)) },
       mine
         ? { label: 'Delete', Icon: Trash, run: go(() => setAct({ kind: 'delete', m })), red: true }
-        : { label: 'Report', Icon: Flag, run: go(() => setAct({ kind: 'report', m })), red: true },
+        : !readOnly && { label: 'Report', Icon: Flag, run: go(() => setAct({ kind: 'report', m })), red: true },
     ].filter((x) => !!x)
   }
 
@@ -643,8 +651,8 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
             </p>
           </div>
         </button>
-        {/* a helper takes no calls */}
-        {!helper && (
+        {/* a helper or a deleted account takes no calls */}
+        {!helper && !readOnly && (
           <>
             <button onClick={() => onCall?.('audio')} disabled={!onCall} aria-label="Voice call" className={iconButton}>
               <Phone size={22} />
@@ -721,14 +729,16 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
                     {m.reacts && Object.keys(m.reacts).length > 0 && (
                       <ReactionPill reacts={m.reacts} myId={me.user.id} onClick={() => setAct({ kind: 'reactions', m })} />
                     )}
-                    <button
-                      type="button"
-                      onClick={(e) => openMenu(m, e.currentTarget.parentElement!)}
-                      aria-label="Message actions"
-                      className={`absolute top-1/2 ${mine ? 'right-full mr-1' : 'left-full ml-1'} flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-full text-mut opacity-0 hover:bg-raised focus-visible:opacity-100 group-hover:opacity-100 pointer-coarse:hidden`}
-                    >
-                      <More size={18} />
-                    </button>
+                    {actions(m).length > 0 && (
+                      <button
+                        type="button"
+                        onClick={(e) => openMenu(m, e.currentTarget.parentElement!)}
+                        aria-label="Message actions"
+                        className={`absolute top-1/2 ${mine ? 'right-full mr-1' : 'left-full ml-1'} flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-full text-mut opacity-0 hover:bg-raised focus-visible:opacity-100 group-hover:opacity-100 pointer-coarse:hidden`}
+                      >
+                        <More size={18} />
+                      </button>
+                    )}
                   </div>
                   {(last || m.editedAt || m.id === newest?.id) && (
                     <div className={`mt-1 px-2 text-xs text-mut ${mine ? 'self-end' : 'self-start'}`}>
@@ -777,106 +787,112 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
         ))}
       </div>
 
-      <form onSubmit={submit} className="pb-safe bg-surface px-2 pt-2">
-        {error && (
-          <div className="flex items-center gap-1 pb-2 pl-3">
-            <p className="flex-1 text-sm text-danger" role="alert">
-              {error}
-            </p>
-            {unsent && (
-              <>
-                <button type="button" onClick={() => sendVoice(unsent.file, unsent.voice)} className="min-h-11 rounded-full px-3 text-sm font-semibold text-accent hover:bg-raised">
-                  Retry
-                </button>
-                <button type="button" onClick={() => { setUnsent(null); setError('') }} className="min-h-11 rounded-full px-3 text-sm text-mut hover:bg-raised">
-                  Discard
-                </button>
-              </>
-            )}
-          </div>
-        )}
-        {(reply || editing) && (
-          <div className="flex items-center gap-2 pb-2 pl-3">
-            <div className="min-w-0 flex-1 border-l-[3px] border-accent pl-3">
-              <p className="text-sm font-semibold">
-                {editing ? 'Editing' : who(me, reply!.senderId)}
+      {readOnly ? (
+        <div className="pb-safe bg-surface px-2 pt-2">
+          <p className="flex min-h-11 items-center justify-center rounded-[22px] bg-bg px-4 text-center text-sm text-mut">{readOnly}</p>
+        </div>
+      ) : (
+        <form onSubmit={submit} className="pb-safe bg-surface px-2 pt-2">
+          {error && (
+            <div className="flex items-center gap-1 pb-2 pl-3">
+              <p className="flex-1 text-sm text-danger" role="alert">
+                {error}
               </p>
-              <p className="truncate text-sm text-mut">{preview((editing ?? reply)!.content, (editing ?? reply)!.senderId === me.user.id)}</p>
+              {unsent && (
+                <>
+                  <button type="button" onClick={() => sendVoice(unsent.file, unsent.voice)} className="min-h-11 rounded-full px-3 text-sm font-semibold text-accent hover:bg-raised">
+                    Retry
+                  </button>
+                  <button type="button" onClick={() => { setUnsent(null); setError('') }} className="min-h-11 rounded-full px-3 text-sm text-mut hover:bg-raised">
+                    Discard
+                  </button>
+                </>
+              )}
             </div>
-            <button type="button" onClick={cancelCompose} aria-label={editing ? 'Cancel editing' : 'Cancel reply'} className={`${iconButton} text-mut`}>
-              <Close size={18} />
-            </button>
-          </div>
-        )}
-        {shown && (
-          <div className="flex items-center gap-3 pb-2 pl-3">
-            {shown.image ? (
-              <img src={`data:image/jpeg;base64,${shown.image}`} alt="" className="h-11 w-11 shrink-0 rounded-lg object-cover" />
-            ) : (
-              <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-raised text-mut"><LinkIcon size={18} /></span>
-            )}
-            <div className="min-w-0 flex-1">
-              <p className="truncate text-sm font-semibold">{shown.title || shown.description}</p>
-              <p className="truncate text-sm text-mut">{shown.site || host(shown.url)}</p>
+          )}
+          {(reply || editing) && (
+            <div className="flex items-center gap-2 pb-2 pl-3">
+              <div className="min-w-0 flex-1 border-l-[3px] border-accent pl-3">
+                <p className="text-sm font-semibold">
+                  {editing ? 'Editing' : who(me, reply!.senderId)}
+                </p>
+                <p className="truncate text-sm text-mut">{preview((editing ?? reply)!.content, (editing ?? reply)!.senderId === me.user.id)}</p>
+              </div>
+              <button type="button" onClick={cancelCompose} aria-label={editing ? 'Cancel editing' : 'Cancel reply'} className={`${iconButton} text-mut`}>
+                <Close size={18} />
+              </button>
             </div>
-            <button type="button" onClick={() => setDropped(shown.url)} aria-label="Remove link preview" className={`${iconButton} text-mut`}>
-              <Close size={18} />
-            </button>
-          </div>
-        )}
-        {files.length > 0 && !editing && (
-          <ul className="flex gap-2 overflow-x-auto px-1 pb-2" aria-label="Files to send">
-            {files.map((f, i) => (
-              <FileChip key={i} file={f} onRemove={() => setFiles(files.filter((_, j) => j !== i))} />
-            ))}
-          </ul>
-        )}
-        {rec ? (
-          <VoiceRecorder rec={rec} onCancel={cancelRec} onSend={stopAndSend} />
-        ) : (
-          <div className="flex items-end gap-1">
-            {!editing && (
-              <button type="button" onClick={() => fileInput.current?.click()} aria-label="Attach photos or files" className={`${iconButton} text-mut`}>
-                <Clip size={22} />
+          )}
+          {shown && (
+            <div className="flex items-center gap-3 pb-2 pl-3">
+              {shown.image ? (
+                <img src={`data:image/jpeg;base64,${shown.image}`} alt="" className="h-11 w-11 shrink-0 rounded-lg object-cover" />
+              ) : (
+                <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-raised text-mut"><LinkIcon size={18} /></span>
+              )}
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-sm font-semibold">{shown.title || shown.description}</p>
+                <p className="truncate text-sm text-mut">{shown.site || host(shown.url)}</p>
+              </div>
+              <button type="button" onClick={() => setDropped(shown.url)} aria-label="Remove link preview" className={`${iconButton} text-mut`}>
+                <Close size={18} />
               </button>
-            )}
-            <input ref={fileInput} type="file" multiple hidden onChange={(e) => { setFiles((f) => [...f, ...(e.target.files ?? [])]); e.target.value = '' }} />
-            <textarea
-              ref={input}
-              value={text}
-              onChange={(e) => {
-                setText(e.target.value)
-                if (!editing && e.target.value.trim()) talk.typing(convId)
-              }}
-              onKeyDown={onKey}
-              onPaste={onPaste}
-              rows={1}
-              placeholder="Message"
-              aria-label="Message"
-              className="max-h-40 min-h-11 flex-1 resize-none rounded-[22px] bg-bg px-4 py-2.5 [field-sizing:content] focus-visible:outline-offset-0"
-            />
-            {/* Empty composer: the send spot becomes the mic, as in iMessage and WhatsApp. */}
-            {editing ? (
-              <button disabled={busy || !text.trim()} aria-label="Save edit" className="pressable ml-1 flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-fill text-on-fill transition-opacity disabled:opacity-35">
-                <Check size={20} />
-              </button>
-            ) : empty && canRecord() ? (
-              <button type="button" onClick={record} disabled={busy} aria-label="Record voice message" className="pressable ml-1 flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-fill text-on-fill transition-opacity disabled:opacity-35">
-                <Mic size={20} />
-              </button>
-            ) : (
-              <button disabled={busy || empty} aria-label="Send" className="pressable ml-1 flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-fill text-on-fill transition-opacity disabled:opacity-35">
-                <Send size={18} />
-              </button>
-            )}
-          </div>
-        )}
-        {busy && (
-          <p className="flex items-center gap-1.5 px-3 pt-1.5 text-xs text-mut" aria-live="polite">
-            <Lock size={12} /> Encrypting and sending…
-          </p>
-        )}
-      </form>
+            </div>
+          )}
+          {files.length > 0 && !editing && (
+            <ul className="flex gap-2 overflow-x-auto px-1 pb-2" aria-label="Files to send">
+              {files.map((f, i) => (
+                <FileChip key={i} file={f} onRemove={() => setFiles(files.filter((_, j) => j !== i))} />
+              ))}
+            </ul>
+          )}
+          {rec ? (
+            <VoiceRecorder rec={rec} onCancel={cancelRec} onSend={stopAndSend} />
+          ) : (
+            <div className="flex items-end gap-1">
+              {!editing && (
+                <button type="button" onClick={() => fileInput.current?.click()} aria-label="Attach photos or files" className={`${iconButton} text-mut`}>
+                  <Clip size={22} />
+                </button>
+              )}
+              <input ref={fileInput} type="file" multiple hidden onChange={(e) => { setFiles((f) => [...f, ...(e.target.files ?? [])]); e.target.value = '' }} />
+              <textarea
+                ref={input}
+                value={text}
+                onChange={(e) => {
+                  setText(e.target.value)
+                  if (!editing && e.target.value.trim()) talk.typing(convId)
+                }}
+                onKeyDown={onKey}
+                onPaste={onPaste}
+                rows={1}
+                placeholder="Message"
+                aria-label="Message"
+                className="max-h-40 min-h-11 flex-1 resize-none rounded-[22px] bg-bg px-4 py-2.5 [field-sizing:content] focus-visible:outline-offset-0"
+              />
+              {/* Empty composer: the send spot becomes the mic, as in iMessage and WhatsApp. */}
+              {editing ? (
+                <button disabled={busy || !text.trim()} aria-label="Save edit" className="pressable ml-1 flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-fill text-on-fill transition-opacity disabled:opacity-35">
+                  <Check size={20} />
+                </button>
+              ) : empty && canRecord() ? (
+                <button type="button" onClick={record} disabled={busy} aria-label="Record voice message" className="pressable ml-1 flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-fill text-on-fill transition-opacity disabled:opacity-35">
+                  <Mic size={20} />
+                </button>
+              ) : (
+                <button disabled={busy || empty} aria-label="Send" className="pressable ml-1 flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-fill text-on-fill transition-opacity disabled:opacity-35">
+                  <Send size={18} />
+                </button>
+              )}
+            </div>
+          )}
+          {busy && (
+            <p className="flex items-center gap-1.5 px-3 pt-1.5 text-xs text-mut" aria-live="polite">
+              <Lock size={12} /> Encrypting and sending…
+            </p>
+          )}
+        </form>
+      )}
 
       {zoom && (
         <div role="dialog" aria-label={zoom.video ? 'Video' : 'Photo'} onClick={() => setZoom(undefined)} className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 p-4">
@@ -893,7 +909,7 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
 
       {menu && (
         <MessageMenu at={menu.at} mine={menu.m.senderId === me.user.id} onClose={() => setMenu(null)}>
-          {menu.m.content && (
+          {menu.m.content && !readOnly && (
             <div className="flex rounded-full bg-surface p-1 shadow-lg ring-1 ring-line">
               {EMOJI.map((e, i) => {
                 const picked = menu.m.reacts?.[me.user.id] === e

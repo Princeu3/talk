@@ -6,8 +6,29 @@ export const who = (me: Me, id: string) => (id === me.user.id ? 'You' : userName
 export const isHelper = (me: Me, conv: Conversation) =>
   conv.kind === 'dm' && !!me.users.find((u) => u.id === conv.members.find((m) => m !== me.user.id))?.owner
 
-export const convName = (me: Me, conv: Conversation) =>
-  conv.title ?? userName(me, conv.members.find((m) => m !== me.user.id) ?? me.user.id)
+// A DM keeps only you as a member once the other account deletes itself.
+export const convName = (me: Me, conv: Conversation) => {
+  const other = conv.members.find((m) => m !== me.user.id)
+  return conv.title ?? (other ? userName(me, other) : 'Deleted account')
+}
+
+// What a chat nobody can answer shows in place of the composer. A removed helper stays a member of
+// its DM, marked deleted; a deleted account leaves the DM with you alone.
+export function readOnlyNote(me: Me, conv: Conversation) {
+  if (conv.kind !== 'dm') return
+  const other = conv.members.find((m) => m !== me.user.id)
+  const user = me.users.find((u) => u.id === other)
+  if (!other || user?.deleted) return user?.owner ? 'This helper was removed' : 'This account was deleted'
+}
+
+// A removed helper never sends its closing edit, so an ask it left open shows as closed.
+export function closedAsk(me: Me, senderId: string, body: MessageBody): MessageBody {
+  const sender = me.users.find((u) => u.id === senderId)
+  // The body is another account's JSON, so check the fields this reads before building a string from them.
+  if (!sender?.owner || !sender.deleted || typeof body.ask?.code !== 'string' || typeof body.text !== 'string') return body
+  const open = `Reply yes ${body.ask.code} or no ${body.ask.code} by `
+  return { ...body, text: body.text.split('\n').map((l) => (l.startsWith(open) ? 'Closed: helper removed' : l)).join('\n') }
+}
 
 const and = new Intl.ListFormat('en', { type: 'conjunction' })
 export const names = (list: string[]) => and.format(list)
