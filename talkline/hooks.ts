@@ -58,6 +58,10 @@ export async function stays(t0: number) {
     idle = idleSeconds()
   }
 }
+// A permission ask, the hook's or the relay's (4.6): the same form both ways.
+export const PERMISSION = { risk: 'high', urgent: true, ringAfter: 180, source: 'permission', atMac: touchedSince } as const
+// These need the terminal: an allow from Talk would skip the question or approve the plan unseen (4.7).
+export const AT_MAC = ['AskUserQuestion', 'ExitPlanMode']
 
 // --- settings.json ---
 
@@ -188,8 +192,8 @@ function prompted(label: string, { tool, ti }: { tool: string; ti: { plan?: stri
   return `${label} has ${qs.length > 1 ? 'questions' : 'a question'} for you. Answer at the Mac:\n${qs.join('\n\n')}`
 }
 
-// Returns what to print on stdout: nothing, or the decision JSON. Stop prints its own, through `print`.
-export async function hook(event: string, input: Input, print: (out: string) => Promise<void>, expires?: number): Promise<string | void> {
+// Prints through `print` what Claude Code reads on stdout: Stop's context or the permission decision, or nothing.
+export async function hook(event: string, input: Input, print: (out: string) => Promise<void>, expires?: number): Promise<void> {
   const profile = readProfile()
   if (!profile?.owner || !profile.dm) return
   const p = profile as Paired
@@ -208,13 +212,13 @@ export async function hook(event: string, input: Input, print: (out: string) => 
     if (!KINDS.includes(kind)) return
     // A permission ask already waits on Talk: the hook's, under this run's session id, or the relay's, under the key.
     if (kind === 'permission_prompt' && [session('pending'), keyed('pending')].some((f) => live(f, TEN_MINUTES))) return log('notification', { kind, sent: false, why: 'pending' })
-    // Claude Code sends idle_prompt after 60 s without typing, so 60 s idle means the owner left before Claude finished. Unknown counts as away.
-    const idle = idleSeconds()
-    if (idle !== null && idle < (kind === 'idle_prompt' ? 60 : 120)) return log('notification', { kind, sent: false, why: 'keyboard' })
     // A channel session takes a Talk reply, so its text doesn't send the owner to the Mac; and one that wrote to him
     // in the last 3 minutes has said enough. Elsewhere a Talk reply can't reach a session waiting at the Mac.
     const chat = m?.channel && kind !== 'permission_prompt'
     if (chat && fresh(keyed('sent'), 180_000)) return log('notification', { kind, sent: false, why: 'answered' })
+    // Claude Code sends idle_prompt after 60 s without typing, so 60 s idle means the owner left before Claude finished. Unknown counts as away.
+    const idle = idleSeconds()
+    if (idle !== null && idle < (kind === 'idle_prompt' ? 60 : 120)) return log('notification', { kind, sent: false, why: 'keyboard' })
     let text = `${label}${kind === 'agent_completed' || chat ? ':' : ' needs you at the Mac:'} ${input.message ?? ''}`
     if (kind === 'permission_prompt' && /AskUserQuestion|ExitPlanMode/.test(String(input.message)) && fresh(session('prompt'), TEN_MINUTES))
       try {
@@ -235,7 +239,8 @@ export async function hook(event: string, input: Input, print: (out: string) => 
     const end = Date.now() + 2000
     // A channel hands its session the messages, but for what it delivered that no transcript shows (plan B). The
     // check goes on after .nochannel turns the process plain: lines under 10 s old then wait for a later Stop.
-    const unseen = !!input.transcript_path && existsSync(keyed('delivered')) && (await lost(self, input.transcript_path, 2000))
+    // An empty .delivered, as each check leaves it, skips the lock.
+    const unseen = !!input.transcript_path && !!statSync(keyed('delivered'), { throwIfNoEntry: false })?.size && (await lost(self, input.transcript_path, 2000))
     if (m?.channel && !unseen) return
     const key = await dmKey(p)
     await route(p, key, self, { wait: end - Date.now() })
@@ -244,16 +249,14 @@ export async function hook(event: string, input: Input, print: (out: string) => 
     const got = await take(p, key, self, { cap: CAP - head.length, wait: end - Date.now() })
     if (!got) return
     log('inbox', { count: got.lines.length })
-    const [first, ...rest] = got.lines.map((l) => l.line)
-    const context = [head, clip(first, CAP - head.length - 1), ...rest].join('\n')
-    await print(JSON.stringify({ hookSpecificOutput: { hookEventName: 'Stop', additionalContext: context } }))
+    await print(JSON.stringify({ hookSpecificOutput: { hookEventName: 'Stop', additionalContext: block(head, got.lines.map((l) => l.line)) } }))
     return got.done() // after the print: a Stop stopped before it leaves the lines for the next take
   }
 
   // permission
   const tool = String(input.tool_name)
-  // These need the terminal. Keep the input, so the permission_prompt text can show the question.
-  if (tool === 'AskUserQuestion' || tool === 'ExitPlanMode') return writeFileSync(session('prompt'), JSON.stringify({ tool, ti: input.tool_input ?? {} }), { mode: 0o600 })
+  // Keep the input, so the permission_prompt text can show the question.
+  if (AT_MAC.includes(tool)) return writeFileSync(session('prompt'), JSON.stringify({ tool, ti: input.tool_input ?? {} }), { mode: 0o600 })
   const skip = (why: string) => log('notification', { kind: 'permission', sent: false, why })
   // A channel session's talkline mcp relays this same prompt (4.6): one question, not two.
   if (m?.channel && RELAY) return skip('relay')
@@ -267,13 +270,9 @@ export async function hook(event: string, input: Input, print: (out: string) => 
     if (stay) return skip(stay)
     const { verdict, note } = await ask(p, {
       ...describe(label, tool, input.tool_input ?? {}, String(input.cwd ?? ''), String(input.scratchpad_dir ?? '')),
-      risk: 'high',
-      urgent: true,
-      ringAfter: 180,
+      ...PERMISSION,
       expires: (expires ?? 8) - (Date.now() - t0) / 60_000, // settles, close-out included, before Claude Code's 600 s hook timeout
-      source: 'permission',
       waits,
-      atMac: touchedSince,
       posted: sent,
     })
     if (verdict === 'keyboard' || verdict === 'cancelled' || (verdict === 'expired' && waits)) return // the terminal dialog takes it
@@ -282,7 +281,7 @@ export async function hook(event: string, input: Input, print: (out: string) => 
       : verdict === 'no' ? { behavior: 'deny', message: note ? `Denied on Talk: ${note}` : 'Denied on Talk' }
       : m?.channel ? { behavior: 'deny', message: 'No answer on Talk' }
       : { behavior: 'deny', message: 'No answer on Talk', interrupt: true } // stops Claude: each new try would ask and ring again
-    return JSON.stringify({ hookSpecificOutput: { hookEventName: 'PermissionRequest', decision } })
+    return await print(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PermissionRequest', decision } }))
   } finally {
     rmSync(session('pending'), { force: true }) // a signal's process.exit skips this; then the dead pid frees it
   }
@@ -294,6 +293,16 @@ export const cut = (t: string) =>
   t.length <= 6000 ? t : `${t.slice(0, 3000)}\n… ${t.length - 6000} more characters not shown. If unsure, reply no and check at the Mac …\n${t.slice(-3000)}`
 // Text-direction controls show as escapes, so a command can't read one way on Talk and run another.
 export const bare = (t: string) => t.replace(/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, esc)
+
+// The file send_file sends, by the rules its permission ask names it with. Absolute only: the permission hook's
+// folder follows Claude's cd, so a relative path could name another file there.
+export function sendable(f: string) {
+  if (!path.isAbsolute(f)) throw new Error('Give an absolute path.')
+  const st = statSync(f, { throwIfNoEntry: false }) // follows links
+  if (!st) throw new Error(`No file at ${f}`)
+  if (!st.isFile()) throw new Error(`${f} is not a plain file`)
+  return { name: path.basename(realpathSync(f)), size: st.size } // a link sends under its target's name
+}
 
 // What a permission ask shows for a tool call, from the PermissionRequest hook's input or the relay's preview.
 // Display only: a yes approves the raw input, cut as before at 6,000 characters. /tmp/…/scratchpad is this
@@ -312,8 +321,8 @@ export function describe(label: string, tool: string, ti: Record<string, unknown
   const sending = () => {
     const f = String(ti.path ?? '')
     try {
-      const st = path.isAbsolute(f) && statSync(f)
-      if (st && st.isFile()) return `${one(path.basename(realpathSync(f)))} (${fileSize(st.size)})`
+      const { name, size } = sendable(f)
+      return `${one(name)} (${fileSize(size)})`
     } catch {} // relative, missing, or a path it can't read: the tool refuses those too
     return `${one(path.basename(f))} (not a file)`
   }
@@ -335,6 +344,8 @@ export function describe(label: string, tool: string, ti: Record<string, unknown
 export const CAP = 9000 // Claude Code moves additionalContext over 10,000 chars to a file it doesn't ask Claude to read
 // The first line always goes, cut to `room` if it must be.
 export const clip = (line: string, room: number) => (line.length <= room ? line : `${line.slice(0, room - 40)} [${line.length - room + 40} more characters not shown]`)
+// A header, then the lines, the first cut to fit under CAP: what a Stop or a read hands Claude.
+export const block = (head: string, [first, ...rest]: string[]) => [head, clip(first, CAP - head.length - 1), ...rest].join('\n')
 
 // One message for a session, a JSON line in sessions/<key>.held. Phase 1 wrote and reads only `id` and `line`.
 export interface Held {
@@ -357,6 +368,10 @@ const jsonLines = <T>(at: string) =>
       return []
     }
   })
+// Records as JSON lines, as jsonLines() reads them.
+const jsonl = (xs: object[]) => xs.map((x) => JSON.stringify(x) + '\n').join('')
+// Appends lines to session `key`'s .held.
+const hold = (key: string, hs: Held[]) => appendFileSync(file(`sessions/${key}.held`), jsonl(hs), { mode: 0o600 })
 
 const FORWARDED = '(forwarded; written by someone else) '
 function held(m: Message, b: MessageBody): Held {
@@ -438,13 +453,15 @@ export async function route(p: Paired, key: CryptoKey, self: string, o: { sock?:
     const news = await history(p, cursor)
     const bodies = await Promise.all(news.map((m) => gate(p, key, m)))
     // No await from here to the cursor: a Stop's watchdog can't land between the .held lines and the move.
+    // Only the owner's messages route: with none, the asks file and the markers stay unread.
+    if (!bodies.some(Boolean)) return void (news.length && patchProfile({ cursor: news.at(-1)!.id }))
     const asks = asked()
     // shortcut: a reply or a known code means reading every session's .sent file; prune old sessions if that ever shows.
     const sender = new Map<number, string>()
     if (bodies.some((b) => b?.reply || asks.codes.has(typed(String(b?.text ?? ''))?.code ?? '')))
       for (const f of readdirSync(file('sessions')))
         if (f.endsWith('.sent')) for (const id of readFileSync(file(`sessions/${f}`), 'utf8').split('\n')) if (id) sender.set(Number(id), f.slice(0, -5))
-    const live = bodies.some(Boolean) ? markers() : []
+    const live = markers()
     const receivers = ranked(live.filter((r) => r.channel || r.waiting), self)
 
     // The key this message goes to, or undefined for none. The first rule that matches wins.
@@ -452,34 +469,31 @@ export async function route(p: Paired, key: CryptoKey, self: string, o: { sock?:
       const text = String(b.text ?? '')
       if (b.system || (!text && !b.files?.length)) return // group events and call logs
       // 1. Answers never route. A forwarded body is never an answer: it routes as a message.
-      if (!b.forwarded) {
-        const t = typed(text)
-        const ids = t && asks.codes.get(t.code)
-        if (t && ids) {
-          if (asks.ids.has(m.id)) return // the answer its ask took
-          if (!t.note || asks.relay.has(t.code)) {
-            if (ids.includes(-1)) {
-              // Its ask had closed, so this did nothing: ⏳, and once per code, a reply that says so.
-              marks.push([m.id, '⏳'])
-              if (o.sock && !ids.includes(-2)) {
-                ids.push(-2)
-                record(-2, t.code)
-                tell(m, b, `Too late: ${t.code} already closed, so this did nothing. The question shows what happened.`)
-              }
-            }
-            return
-          }
-          // 2. A note on a known code goes to the session that asked, whatever it replies to.
-          // shortcut: a route that reads a note the moment before its open ask takes it holds it too: Claude gets it twice, and 👀 replaces the ❌.
+      const t = b.forwarded ? undefined : typed(text)
+      const ids = t && asks.codes.get(t.code)
+      if (t && ids) {
+        if (asks.ids.has(m.id)) return // the answer its ask took
+        // 2. A note on a known code goes to the session that asked, whatever it replies to.
+        // shortcut: a route that reads a note the moment before its open ask takes it holds it too: Claude gets it twice, and 👀 replaces the ❌.
+        if (t.note && !asks.relay.has(t.code)) {
           const asker = ids.map((id) => sender.get(id)).find(Boolean)
           if (!asker) marks.push([m.id, '❓']) // no session asked it: a CLI ask run outside Claude Code
           return asker
         }
-        // A plain yes or no swiped at an ask or its reminder is its answer. Unswiped it answers nothing (❓), unless it's chat here.
-        if (PLAIN.test(text) && (b.reply ? asks.ids.has(Number(b.reply.id)) : !CHAT)) {
-          if (!b.reply) marks.push([m.id, '❓'])
-          return
+        if (!ids.includes(-1)) return
+        // Its ask had closed, so this did nothing: ⏳, and once per code, a reply that says so.
+        marks.push([m.id, '⏳'])
+        if (o.sock && !ids.includes(-2)) {
+          ids.push(-2)
+          record(-2, t.code)
+          tell(m, b, `Too late: ${t.code} already closed, so this did nothing. The question shows what happened.`)
         }
+        return
+      }
+      // A plain yes or no swiped at an ask or its reminder is its answer. Unswiped it answers nothing (❓), unless it's chat here.
+      if (!b.forwarded && PLAIN.test(text) && (b.reply ? asks.ids.has(Number(b.reply.id)) : !CHAT)) {
+        if (!b.reply) marks.push([m.id, '❓'])
+        return
       }
       // 3. A swipe-reply goes to the session that sent the quoted message. An mcp- key never comes back once its process ends.
       // shortcut: a hook-only session that quit keeps its .held lines; check its CLAUDE_PID if Prince misses replies.
@@ -513,7 +527,7 @@ export async function route(p: Paired, key: CryptoKey, self: string, o: { sock?:
     for (const [i, m] of news.entries()) {
       const b = bodies[i]
       const k = b && to(m, b)
-      if (k) appendFileSync(file(`sessions/${k}.held`), JSON.stringify(held(m, b)) + '\n', { mode: 0o600 })
+      if (k) hold(k, [held(m, b)])
     }
     // Past the agent's own messages too: the DM has two members, and ids only grow.
     if (news.length) patchProfile({ cursor: news.at(-1)!.id })
@@ -526,7 +540,7 @@ export async function route(p: Paired, key: CryptoKey, self: string, o: { sock?:
 
 // Hands session `self` its held lines, oldest first: under inbox.lock they move to .taking.<pid>, as many as fit
 // in `cap` characters (the first always goes) and `limit` lines; then 👀 goes on the first. The caller delivers
-// them, then calls done(). A process that dies before done() leaves them for the next take with that key.
+// them, then calls done(), or back() if it can't. A process that dies before either leaves them for the next take with that key.
 // shortcut: a .taking file is adopted once its pid is dead, so a reused pid holds it until that process exits; add the lstart to the name if lines ever stall.
 export async function take(p: Paired, key: CryptoKey, self: string, o: { cap?: number; limit?: number; wait?: number } = {}) {
   const at = (f: string) => file(`sessions/${f}`)
@@ -534,7 +548,7 @@ export async function take(p: Paired, key: CryptoKey, self: string, o: { cap?: n
   // Whole files: a tmp file, then rename. A key never starts with a dot.
   const put = (to: string, hs: Held[]) => {
     if (!hs.length) return rmSync(to, { force: true })
-    writeFileSync(at(`.${process.pid}.tmp`), hs.map((h) => JSON.stringify(h) + '\n').join(''), { mode: 0o600 })
+    writeFileSync(at(`.${process.pid}.tmp`), jsonl(hs), { mode: 0o600 })
     renameSync(at(`.${process.pid}.tmp`), to)
   }
   const got = await locked(o.wait ?? 10_000, async () => {
@@ -563,15 +577,14 @@ export async function take(p: Paired, key: CryptoKey, self: string, o: { cap?: n
     if (!got.lines.length) return
   }
   if (status === 403) return void (rmSync(mine, { force: true }), log('inbox', { count: 0, why: 'blocked' }))
-  // Talk out of reach: the lines go back to .held for any later take, a Stop's too, since no other process adopts
-  // a live one's .taking. Without the lock in time they stay in .taking, for this process's next take.
-  if (status < 200 || status >= 300)
-    return void (await locked(o.wait ?? 10_000, async () => {
-      appendFileSync(at(`${self}.held`), got.lines.map((h) => JSON.stringify(h) + '\n').join(''), { mode: 0o600 })
-      rmSync(mine, { force: true })
-    }))
+  // Talk out of reach, or a caller that couldn't deliver them: the lines go back to .held for any later take, a
+  // Stop's too, since no other process adopts a live one's .taking. Without the lock in time they stay in .taking,
+  // for this process's next take.
+  const back = () => locked(o.wait ?? 10_000, async () => (hold(self, got.lines), rmSync(mine, { force: true })))
+  if (status < 200 || status >= 300) return void (await back())
   return {
     lines: got.lines,
+    back,
     // Delete first: a kill after delivery and before this delivers them twice, the only duplicate. Then the rest's 👀, and read.
     async done() {
       rmSync(mine, { force: true })
@@ -587,7 +600,7 @@ export async function take(p: Paired, key: CryptoKey, self: string, o: { cap?: n
 // shortcut: Stop checks delivery by searching the transcript for message_id; drop this if Claude Code ever confirms registration.
 type Delivered = Held & { t: number } // t: when it went out
 export const delivered = (key: string, hs: Held[]) =>
-  locked(10_000, async () => appendFileSync(file(`sessions/${key}.delivered`), hs.map((h) => JSON.stringify({ ...h, t: Date.now() }) + '\n').join(''), { mode: 0o600 }))
+  locked(10_000, async () => appendFileSync(file(`sessions/${key}.delivered`), jsonl(hs.map((h) => ({ ...h, t: Date.now() }))), { mode: 0o600 }))
 
 // True when some line never reached the transcript. /clear starts a new transcript file in the same folder, so the
 // files there written since the oldest line count too. Checked lines leave .delivered.
@@ -600,14 +613,17 @@ const lost = async (key: string, transcript: string, wait: number) =>
     if (!old.length) return false
     const dir = path.dirname(transcript)
     const since = Math.min(...old.map((d) => d.t))
-    const shown = readdirSync(dir)
-      .filter((f) => f.endsWith('.jsonl') && statSync(path.join(dir, f)).mtimeMs >= since)
-      .map((f) => readFileSync(path.join(dir, f), 'utf8'))
-      .join('\n')
-    const gone = old.filter((d) => !shown.includes(`message_id=\\"${d.id}\\"`))
-    writeFileSync(at('delivered'), all.filter((d) => now - d.t <= 10_000).map((d) => JSON.stringify(d) + '\n').join(''), { mode: 0o600 })
+    const files = readdirSync(dir).map((f) => path.join(dir, f)).filter((f) => f.endsWith('.jsonl') && statSync(f).mtimeMs >= since)
+    // Its own transcript first, read as bytes: it usually shows every line, and then no other file is read.
+    let gone = old
+    for (const f of files.sort((a, b) => Number(b === transcript) - Number(a === transcript))) {
+      if (!gone.length) break
+      const bytes = readFileSync(f)
+      gone = gone.filter((d) => !bytes.includes(`message_id=\\"${d.id}\\"`))
+    }
+    writeFileSync(at('delivered'), jsonl(all.filter((d) => now - d.t <= 10_000)), { mode: 0o600 })
     if (!gone.length) return false
-    appendFileSync(at('held'), gone.map(({ t, ...h }) => JSON.stringify(h) + '\n').join(''), { mode: 0o600 })
+    hold(key, gone.map(({ t, ...h }) => h))
     writeFileSync(at('nochannel'), '', { mode: 0o600 })
     log('inbox', { count: gone.length, why: 'unseen' })
     return true

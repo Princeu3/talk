@@ -260,9 +260,7 @@ async function asking(args: string[], first: string, opts?: Opts) {
   const asked = fromAgent((b) => !!b.text?.startsWith(first))
   const run = start(args, opts)
   const { m, b } = await during(run, asked)
-  const code = b.text!.match(/^Reply yes ([a-km-z]{5}) or no \1 by /m)?.[1]
-  assert.ok(code, `no code in ${JSON.stringify(b.text)}`)
-  return { ...run, m, b, text: b.text!, code }
+  return { ...run, m, b, text: b.text!, code: codeIn(b.text) }
 }
 const ask = (question: string, ...flags: string[]) => asking(['ask', question, ...flags], `${question}\n`)
 
@@ -285,9 +283,9 @@ async function decided(run: Promise<Done>, d: object) {
   assert.deepEqual(JSON.parse(r.stdout), { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: d } })
 }
 
-// The Stop hook for session `sid`: what it hands Claude, or '' when it prints nothing.
-async function stop(sid: string, env?: Record<string, string>) {
-  const r = await cli(['hook', 'stop'], { input: JSON.stringify({ session_id: sid, cwd: '/x/demo' }), env })
+// The Stop hook for session `sid`: what it hands Claude, or '' when it prints nothing. `more` adds to its input.
+async function stop(sid: string, env?: Record<string, string>, more: object = {}) {
+  const r = await cli(['hook', 'stop'], { input: JSON.stringify({ session_id: sid, cwd: '/x/demo', ...more }), env })
   assert.equal(r.code, 0, r.stderr)
   return r.stdout && (JSON.parse(r.stdout).hookSpecificOutput.additionalContext as string)
 }
@@ -378,7 +376,14 @@ function mcp(o: { sid?: string; claudePid?: number; label?: string; args?: strin
   return {
     child, done, cwd, claudePid, request, tool, marker, init, events, notes,
     notify: (method: string, params: object) => write({ method, params }),
-    close: () => child.stdin.end(),
+    // Esc at the Mac: Claude Code cancels `call` once it waits. It stops waiting and sends no response.
+    cancel: async (call: { id: number }) => {
+      await until(() => marker().waiting)
+      write({ method: 'notifications/cancelled', params: { requestId: call.id, reason: 'interrupted' } })
+      await until(() => !marker().waiting)
+    },
+    // Ends stdin, as Claude Code does on quitting; resolves with the exit code.
+    close: () => (child.stdin.end(), done),
     kill: (signal: NodeJS.Signals) => child.kill(signal),
   }
 }
@@ -390,10 +395,7 @@ async function channels(n: number, sid: string, env?: Record<string, string>) {
   await Promise.all(all.map((s) => s.init()))
   return all
 }
-async function closeAll(...all: Mcp[]) {
-  for (const s of all) s.close()
-  await Promise.all(all.map((s) => s.done))
-}
+const closeAll = (...all: Mcp[]) => Promise.all(all.map((s) => s.close()))
 // The channel event that carries message `id`, once it comes.
 const eventFor = (s: Mcp, id: number) => until(() => s.events().find((e) => e.meta.message_id === String(id)))
 // What `s` sends Prince with send_message, as he gets it.
@@ -410,6 +412,12 @@ function reactions() {
 }
 // The code in a question's text, or in a pending result.
 const codeIn = (text = '') => text.match(/^Reply yes ([a-km-z]{5}) or no \1 by /m)?.[1] ?? text.match(/^pending ([a-km-z]{5}):/)?.[1] ?? assert.fail(`no code in ${text}`)
+// 'no response' when call `r` got none within 100 ms, as a cancelled one gets none.
+const responded = (r: Promise<unknown>) => Promise.race([r.then(() => 'answered'), pause(100).then(() => 'no response')])
+// Lines wait for session `k`: in its .held, or in a .taking file.
+const held = (k: string) => readdirSync(path.join(TL, 'sessions')).some((f) => f === `${k}.held` || f.startsWith(`${k}.taking.`))
+// Message `id` is filed under some session.
+const filed = (id: number) => readdirSync(path.join(TL, 'sessions')).some((f) => readFileSync(path.join(TL, 'sessions', f), 'utf8').includes(`"id":${id},`))
 
 test('pair: a helper link, the code to check, a resumed wait, Allow, and the hello', { timeout: 30_000 }, async () => {
   for (const owner of [[], ['--owner', 'prince']]) {
@@ -874,9 +882,7 @@ test('hook notification: texts the owner only when away, and only for the kinds 
 })
 
 test("hook stop: hands the owner's new messages to Claude once, each with 👀", { timeout: 30_000 }, async () => {
-  // Start after the newest message, so what earlier tests sent doesn't count.
-  const [newest] = (await (await api(prince, 'GET', `/api/conversations/${dm}/messages?limit=1`)).r.json()) as Message[]
-  writeFileSync(PROFILE, JSON.stringify({ ...profile(), cursor: newest.id }))
+  await caughtUp()
   // Not for Claude: an answer the ask took, and a late swipe at the ask, closed by then.
   const a = await ask('Run the migration?')
   const closed = fromAgent(() => true, 'edit')
@@ -944,8 +950,7 @@ test("hook stop: hands the owner's new messages to Claude once, each with 👀",
 })
 
 test("hook stop: a note on a closed question's code goes to the session that asked", { timeout: 30_000 }, async () => {
-  const [newest] = (await (await api(prince, 'GET', `/api/conversations/${dm}/messages?limit=1`)).r.json()) as Message[]
-  writeFileSync(PROFILE, JSON.stringify({ ...profile(), cursor: newest.id }))
+  await caughtUp()
   // Asked from session c2, so its text starts with the session's name.
   const a = await asking(['ask', 'Ship the beta?'], `${path.basename(process.cwd())}: Ship the beta?\n`, { env: { CLAUDE_CODE_SESSION_ID: 'c2' } })
   await send({ text: `yes ${a.code}` })
@@ -990,8 +995,7 @@ test('hook stop: reads every message since the last Stop, page by page, and move
   assert.equal((await notify.done).code, 0)
   const { m } = await own
   writeFileSync(path.join(TL, 'inbox.lock'), String(notify.child.pid)) // a lock its holder died with holds nothing up
-  const lines = (await stop('s3')).split('\n').slice(1)
-  assert.deepEqual(lines.map((l) => l.replace(/^\[[^\]\n]+\] /, '')), Array.from({ length: 55 }, (_, i) => `m${i + 1}`))
+  assert.deepEqual(lines(await stop('s3')), Array.from({ length: 55 }, (_, i) => `m${i + 1}`))
   assert.equal(profile().cursor, m.id)
   assert.equal(await stop('s3'), '')
 })
@@ -1016,7 +1020,7 @@ test('hook stop: a held message he unsent is dropped, and the session still gets
   // With no receiver, his next message goes to the next session to stop: un2, whose 👀 on the unsent line gets 404.
   await send({ text: 'after the unsend' })
   assert.deepEqual(lines(await stop('un2')), ['after the unsend'])
-  assert.ok(!readdirSync(path.join(TL, 'sessions')).some((f) => f === 'un2.held' || f.startsWith('un2.taking.')), 'nothing left for un2')
+  assert.ok(!held('un2'), 'nothing left for un2')
   assert.match(readFileSync(path.join(TL, 'events.jsonl'), 'utf8'), new RegExp(`"why":"unsent","id":${gone.id}\\}`))
 })
 
@@ -1091,7 +1095,6 @@ test('route: messages spread over sessions reach exactly one, once, and answers 
   await Promise.all([(async () => { for (const [b] of plan) await send(b) })(), stops(), pause(400).then(stops), pause(800).then(stops)])
   burst = false
   await waiter
-  const held = (k: string) => readdirSync(path.join(TL, 'sessions')).some((f) => f === `${k}.held` || f.startsWith(`${k}.taking.`))
   for (let i = 0; held('s1') && i < 10; i++) await stops()
   const want = plan.flatMap(([, l]) => l ?? []).sort()
   await until(() => c1.events().length + c2.events().length + got.s1.length + got.w17.length >= want.length)
@@ -1109,8 +1112,7 @@ test('route: messages spread over sessions reach exactly one, once, and answers 
   const left = await send({ text: 'left behind' })
   await caughtUp()
   writeFileSync(path.join(TL, 'sessions', `c171.taking.${await deadPid()}`), JSON.stringify({ id: left.id, line: '[09:00] left behind', text: 'left behind' }) + '\n')
-  const back = mcp({ sid: 'c171', claudePid: 9001, label: 'c1', channel: true })
-  await back.init()
+  const [back] = await channels(1, 'c17')
   await eventFor(back, left.id)
   await pause(500)
   assert.deepEqual(back.events().map((e) => e.content), ['left behind'])
@@ -1412,8 +1414,7 @@ describe('a Phase 0 profile', () => {
     assert.deepEqual((await s.init()).capabilities, { tools: {} })
     for (const name of ['send_message', 'react', 'ask', 'wait_for_reply', 'read_messages', 'set_status', 'send_file'])
       assert.equal(await s.tool(name), 'ERROR: This pairing is from Phase 0. Pair again with a helper link (Settings > Agents) to use these tools.')
-    s.close()
-    assert.equal(await s.done, 0)
+    assert.equal(await s.close(), 0)
   })
 })
 
@@ -1465,15 +1466,14 @@ test('mcp: the handshake, plain until the channel gate opens', { timeout: 30_000
   for (const args of [[], ['--channel']]) {
     const s = mcp({ args })
     assert.equal((await s.request('server/discover', {})).error?.code, -32601) // answering it would negotiate a newer protocol
-    const { result } = await s.request('initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'claude-code', version: '2.1.312' } })
+    const result = await s.init()
     assert.equal(result.protocolVersion, '2025-06-18')
     assert.deepEqual(result.capabilities, { tools: {} })
     assert.deepEqual(result.serverInfo, { name: 'talkline', version: '2' })
     assert.match(result.instructions, /^Tools to reach Prince on Talk/)
     assert.deepEqual((await s.request('ping')).result, {})
     assert.equal((await s.request('resources/list')).error?.code, -32601)
-    s.close()
-    assert.equal(await s.done, 0)
+    assert.equal(await s.close(), 0)
   }
   // TALKLINE_CHANNEL=1 stands in for the flag: a channel, with its own instructions, and the permission relay.
   const s = mcp({ channel: true })
@@ -1483,8 +1483,7 @@ test('mcp: the handshake, plain until the channel gate opens', { timeout: 30_000
   // TALKLINE_RELAY=0 leaves the relay out: the key is absent, not false.
   const off = mcp({ channel: true, env: { TALKLINE_RELAY: '0' } })
   assert.deepEqual((await off.init()).capabilities, { tools: {}, experimental: { 'claude/channel': {} } })
-  await closeAll(s, off)
-  assert.deepEqual([await s.done, await off.done], [0, 0])
+  assert.deepEqual(await closeAll(s, off), [0, 0])
 })
 
 test('mcp: seven tools, with the keys each needs and the buzz rules', { timeout: 30_000 }, async () => {
@@ -1503,8 +1502,7 @@ test('mcp: seven tools, with the keys each needs and the buzz rules', { timeout:
   const said = (name: string) => JSON.stringify(tools.find((t) => t.name === name))
   assert.match(said('send_message'), /buzzes Prince's phone unless quiet/)
   assert.match(said('ask'), /rings Prince's phone once if unread after 3 minutes/)
-  s.close()
-  await s.done
+  await s.close()
 })
 
 test('mcp send_message: labeled, noted for swipe-replies, quoting what this session saw', { timeout: 30_000 }, async () => {
@@ -1530,9 +1528,7 @@ test('mcp send_message: labeled, noted for swipe-replies, quoting what this sess
   got = fromAgent()
   await unlabeled.tool('send_message', { text: 'no label' })
   assert.equal((await got).b.text, 'no label')
-  s.close()
-  unlabeled.close()
-  await Promise.all([s.done, unlabeled.done])
+  await closeAll(s, unlabeled)
 })
 
 test('mcp react: on his message; not on a question, an unknown id, or with words', { timeout: 30_000 }, async () => {
@@ -1549,8 +1545,7 @@ test('mcp react: on his message; not on a question, an unknown id, or with words
   assert.equal(await s.tool('react', { message_id: q.m.id, emoji: '👍' }), `ERROR: ${q.m.id} is a talkline question: answer in words with send_message`)
   await send({ text: `no ${q.code}` })
   await q.done
-  s.close()
-  await s.done
+  await s.close()
 })
 
 test('mcp ask: waits for the answer, or says pending; his words come back at once', { timeout: 30_000 }, async () => {
@@ -1584,8 +1579,7 @@ test('mcp ask: waits for the answer, or says pending; his words come back at onc
   assert.match(await s.tool('wait_for_reply', { code: one, seconds: 30 }), new RegExp(`^pending ${one}: [^]*\\] \\(forwarded; written by someone else\\) yes ${one}$`))
   for (const c of [ship, one, two]) await send({ text: `no ${c}` })
   for (const c of [ship, one, two]) assert.equal(await s.tool('wait_for_reply', { code: c, seconds: 30 }), 'no')
-  s.close()
-  await s.done
+  await s.close()
 })
 
 test('mcp ask: a question Talk refuses leaves no socket open and nothing to cancel', { timeout: 30_000 }, async () => {
@@ -1615,8 +1609,7 @@ test('mcp ask: a question Talk refuses leaves no socket open and nothing to canc
     proxy.close()
     assert.equal((await api(prince, 'DELETE', `/api/blocks/${agent.id}`)).status, 200)
   }
-  s.close()
-  await s.done
+  await s.close()
   // Shutdown runs every cancel left in the process, and a cancel closes its code: a "-1 <code>" line after the "0 <code>".
   assert.deepEqual(readFileSync(asks, 'utf8').slice(before).split('\n').filter(Boolean).map((l) => l.split(' ')[0]), ['0', '0'])
 })
@@ -1642,8 +1635,7 @@ test('mcp read_messages: the read block, marked, with 👀 on each, once', { tim
   const eyes = await Promise.all(marks.seen.map((x) => c.openMessage<ReactionBody>(dmKey, dm, x.body!)))
   assert.deepEqual(eyes.map((e) => [e.to, e.emoji]).sort(), [one, two, fwd].map((m) => [m.id, '👀']).sort())
   assert.equal(await s.tool('read_messages'), 'No new messages.')
-  s.close()
-  await s.done
+  await s.close()
 })
 
 test("mcp read_messages: with Talk out of reach, the lines go back to .held, so the session's Stop gets them", { timeout: 30_000 }, async () => {
@@ -1665,8 +1657,7 @@ test("mcp read_messages: with Talk out of reach, the lines go back to .held, so 
   await reconnected()
   // A Stop never takes a .taking file of a process still running, such as this one's.
   assert.deepEqual(lines(await stop('h8', { CLAUDE_PID: String(s.claudePid) })), [`(reply to message ${said.id}, quoted: "proj: ping") still there?`])
-  s.close()
-  await s.done
+  await s.close()
 })
 
 test("mcp: an idle plain process routes nothing as it connects or reconnects, so the working session's Stop gets his message", { timeout: 30_000 }, async () => {
@@ -1680,8 +1671,7 @@ test("mcp: an idle plain process routes nothing as it connects or reconnects, so
   await reconnected()
   await idle.tool('send_message', { text: 'back', quiet: true }) // its socket is back
   assert.deepEqual(lines(await stop('h9')), ['sent before Talk restarts'])
-  idle.close()
-  await idle.done
+  await idle.close()
 })
 
 test('mcp wait_for_reply: returns when he writes, times out, and a cancelled wait takes nothing', { timeout: 30_000 }, async () => {
@@ -1695,33 +1685,24 @@ test('mcp wait_for_reply: returns when he writes, times out, and a cancelled wai
   assert.equal(await s.tool('wait_for_reply', { seconds: 1 }), 'No reply in 1 s.')
 
   const cancelled = s.request('tools/call', { name: 'wait_for_reply', arguments: { seconds: 30 } })
-  await until(() => s.marker().waiting)
-  s.notify('notifications/cancelled', { requestId: cancelled.id, reason: 'interrupted' })
-  await until(() => !s.marker().waiting)
+  await s.cancel(cancelled)
   // A swipe-reply to this session, routed by another session's Stop, waits in its .held past the 2 s look.
   const back = await send({ text: 'ok then', reply: { id: said, from: agent.id, preview: 'proj: ping' } })
   assert.equal(await stop('x7'), '')
   await pause(2500)
   assert.match(readFileSync(path.join(TL, 'sessions', 'm7.held'), 'utf8'), new RegExp(`"id":${back.id}`))
-  assert.equal(await Promise.race([cancelled.then(() => 'answered'), pause(100).then(() => 'no response')]), 'no response')
+  assert.equal(await responded(cancelled), 'no response')
   assert.match(await s.tool('read_messages'), /\] \(reply to message \d+, quoted: "proj: ping"\) ok then$/)
-  s.close()
-  await s.done
+  await s.close()
 })
 
 test('mcp ask: a cancelled ask, or wait for its answer, stops waiting, and the answer and his next message still reach Claude', { timeout: 30_000 }, async () => {
   await caughtUp()
   const s = mcp({ sid: 'm11' })
-  // Esc at the Mac: Claude Code cancels the call. It stops waiting and sends no response.
-  const cancel = async (call: { id: number }) => {
-    await until(() => s.marker().waiting)
-    s.notify('notifications/cancelled', { requestId: call.id, reason: 'interrupted' })
-    await until(() => !s.marker().waiting)
-  }
   const asked = fromAgent((b) => !!b.text?.startsWith('proj: Deploy?\n'))
   const deploy = s.request('tools/call', { name: 'ask', arguments: { question: 'Deploy?', wait: 30 } })
   const code = codeIn((await asked).b.text)
-  await cancel(deploy)
+  await s.cancel(deploy)
   const approved = fromAgent((b) => !!b.text?.includes('\nApproved '), 'edit')
   await send({ text: `yes ${code}` })
   await approved
@@ -1730,13 +1711,11 @@ test('mcp ask: a cancelled ask, or wait for its answer, stops waiting, and the a
   // The same for wait_for_reply with the code: a later one collects the answer.
   const merge = codeIn(await s.tool('ask', { question: 'Merge?', wait: 0 }))
   const waited = s.request('tools/call', { name: 'wait_for_reply', arguments: { code: merge, seconds: 30 } })
-  await cancel(waited)
+  await s.cancel(waited)
   await send({ text: `no ${merge}` })
   assert.equal(await s.tool('wait_for_reply', { code: merge, seconds: 30 }), 'no')
-  const answered = (r: Promise<unknown>) => Promise.race([r.then(() => 'answered'), pause(100).then(() => 'no response')])
-  assert.deepEqual(await Promise.all([deploy, waited].map(answered)), ['no response', 'no response'])
-  s.close()
-  await s.done
+  assert.deepEqual(await Promise.all([deploy, waited].map(responded)), ['no response', 'no response'])
+  await s.close()
 })
 
 test('mcp set_status: posts once, then edits that message', { timeout: 30_000 }, async () => {
@@ -1751,8 +1730,7 @@ test('mcp set_status: posts once, then edits that message', { timeout: 30_000 },
   const e = await edited
   assert.equal(e.m.id, first.m.id)
   assert.equal(e.b.text, 'proj status: tests pass')
-  s.close()
-  await s.done
+  await s.close()
 })
 
 test('mcp send_file: sealed bytes he can open, named after the real file; by absolute path, nothing but plain files up to 50 MB', { timeout: 30_000 }, async () => {
@@ -1784,8 +1762,7 @@ test('mcp send_file: sealed bytes he can open, named after the real file; by abs
   writeFileSync(at('big.bin'), '')
   truncateSync(at('big.bin'), 51 * 1024 * 1024) // sparse
   assert.equal(await s.tool('send_file', { path: at('big.bin') }), `ERROR: ${at('big.bin')} is 51 MB; Talk takes up to 50 MB`)
-  s.close()
-  await s.done
+  await s.close()
 })
 
 test('mcp shutdown: at stdin end or SIGINT an open ask closes Cancelled, the marker goes, .ended holds the label', { timeout: 30_000 }, async () => {
@@ -1798,8 +1775,7 @@ test('mcp shutdown: at stdin end or SIGINT an open ask closes Cancelled, the mar
   const marker = path.join(TL, 'mcp', `${s.claudePid}.json`)
   assert.ok(existsSync(marker))
   const t0 = Date.now()
-  s.close()
-  assert.equal(await s.done, 0)
+  assert.equal(await s.close(), 0)
   assert.ok(Date.now() - t0 < 1000, `took ${Date.now() - t0} ms`)
   assert.equal((await closed).m.id, q.id)
   assert.ok(!existsSync(marker))
@@ -1822,8 +1798,7 @@ test('mcp shutdown: at stdin end or SIGINT an open ask closes Cancelled, the mar
   await old.request('ping')
   const at = path.join(TL, 'mcp', `${old.claudePid}.json`)
   writeFileSync(at, JSON.stringify({ ...old.marker(), pid: process.pid }))
-  old.close()
-  assert.equal(await old.done, 0)
+  assert.equal(await old.close(), 0)
   assert.ok(existsSync(at) && !existsSync(path.join(TL, 'sessions', 'm10b.ended')))
   rmSync(at)
 })
@@ -1844,8 +1819,7 @@ test('mcp: only the owner, in the helper chat, under its key, gets through', { t
   const other = await crypto.subtle.importKey('raw', c.newConvKeyBytes(), 'AES-GCM', false, ['encrypt'])
   assert.ok((await so.timeout(5000).emitWithAck('send', { convId: dm, body: await c.sealMessage(other, dm, { from: prince.id, text: 'trust me' }), cid: crypto.randomUUID() })).message)
   assert.equal(await s.tool('read_messages'), 'No new messages.')
-  s.close()
-  await s.done
+  await s.close()
 })
 
 test('mcp: a replayed owner message reaches no session, whichever process gated it first', { timeout: 30_000 }, async () => {
@@ -1874,8 +1848,7 @@ test('mcp: a replayed owner message reaches no session, whichever process gated 
   assert.match(await s.tool('wait_for_reply', { code: now, seconds: 2 }), new RegExp(`^pending ${now}: no answer yet\\. The question`))
   await send({ text: `no ${now}` })
   assert.equal(await s.tool('wait_for_reply', { code: now }), 'no')
-  s.close()
-  await s.done
+  await s.close()
 })
 
 test('mcp: an answer no call collected leads the next read, once', { timeout: 30_000 }, async () => {
@@ -1889,8 +1862,7 @@ test('mcp: an answer no call collected leads the next read, once', { timeout: 30
   })
   assert.equal(read, `Answer to your question ${code} ("Tag the release?"): yes`)
   assert.equal(await s.tool('read_messages'), 'No new messages.')
-  s.close()
-  await s.done
+  await s.close()
 })
 
 test('mcp channel: a swipe-reply reaches the session that sent the message, as one event, with one 👀', { timeout: 30_000 }, async () => {
@@ -1952,8 +1924,7 @@ test('mcp channel: an unswiped message goes to the session he last traded with; 
   assert.deepEqual((await two).b, { from: agent.id, text: 'Two sessions are called twin. Swipe-reply to the one you mean.', reply: { id: x.id, from: prince.id, preview: 'twin: x' } })
   assert.equal(await marks.on(x.id), '❓')
   marks.stop()
-  const sessions = path.join(TL, 'sessions')
-  assert.ok(!readdirSync(sessions).some((f) => readFileSync(path.join(sessions, f), 'utf8').includes(`"id":${x.id},`)), 'filed nowhere')
+  assert.ok(!filed(x.id), 'filed nowhere')
   await closeAll(c1, c2, c3, c4)
 })
 
@@ -1964,7 +1935,7 @@ test('mcp channel: the hooks of a channel session leave the messages to it and b
   const key = (ext: string) => path.join(TL, 'sessions', `c181.${ext}`)
   // Stop keeps .last under the channel's key and prints nothing: the channel hands Claude the messages.
   const forC1 = await send({ text: 'for c1' })
-  result(await cli(['hook', 'stop'], { input: JSON.stringify({ session_id: 'h18', cwd: '/x/demo', last_assistant_message: 'All done.' }), env }), 0, '')
+  assert.equal(await stop('h18', env, { last_assistant_message: 'All done.' }), '')
   await eventFor(c1, forC1.id)
   assert.equal(readFileSync(key('last'), 'utf8'), 'All done.')
 
@@ -2033,9 +2004,7 @@ test('mcp channel: lines go to a waiting call, not to events, and to events agai
   const hey = await send({ text: 'for the wait' })
   assert.match(await waited, new RegExp(`\\n#${hey.id} \\[[^\\]\\n]+\\] for the wait$`))
   const cancelled = c1.request('tools/call', { name: 'wait_for_reply', arguments: { seconds: 30 } })
-  await until(() => c1.marker().waiting)
-  c1.notify('notifications/cancelled', { requestId: cancelled.id, reason: 'interrupted' })
-  await until(() => !c1.marker().waiting)
+  await c1.cancel(cancelled)
   const next = await send({ text: 'after the cancel' })
   await eventFor(c1, next.id)
   assert.deepEqual(c1.events().map((e) => e.content), ['after the cancel'])
@@ -2123,12 +2092,8 @@ test('mcp channel: what no transcript shows goes back to the Stop hook, and the 
   const transcript = path.join(tmp, 'transcripts', 'cpb.jsonl')
   // A transcript line for Claude Code's event of message `id`.
   const shows = (id: number) => JSON.stringify({ type: 'user', message: { content: `<channel source="talkline" message_id="${id}" at="9:00">…</channel>` } }) + '\n'
-  const stopRun = () => cli(['hook', 'stop'], { input: JSON.stringify({ session_id: 'hpb', cwd: '/x/demo', transcript_path: transcript }), env: { CLAUDE_PID: '9001' } })
-  const stopped = async () => {
-    const r = await stopRun()
-    assert.equal(r.code, 0, r.stderr)
-    return lines(JSON.parse(r.stdout).hookSpecificOutput.additionalContext)
-  }
+  const stopPb = () => stop('hpb', { CLAUDE_PID: '9001' }, { transcript_path: transcript })
+  const stopped = async () => lines(await stopPb())
   // After /clear Claude Code writes a new transcript file in the same folder. What an older one shows counts: Stop
   // hands Claude nothing, and the channel stays on.
   const cleared = await send({ text: 'before /clear' })
@@ -2137,7 +2102,7 @@ test('mcp channel: what no transcript shows goes back to the Stop hook, and the 
   mkdirSync(path.dirname(transcript), { recursive: true })
   writeFileSync(path.join(path.dirname(transcript), 'old.jsonl'), shows(cleared.id))
   writeFileSync(transcript, JSON.stringify({ type: 'user', message: { content: 'after /clear' } }) + '\n')
-  result(await stopRun(), 0, '')
+  assert.equal(await stopPb(), '')
   assert.ok(!existsSync(path.join(TL, 'sessions', 'cpb1.nochannel')))
   const seen = await send({ text: 'seen' })
   const lost = await send({ text: 'lost' })
@@ -2224,7 +2189,7 @@ test('mcp relay: his yes allows and his no denies, under the request id; a note 
   await flush()
   await pause(300)
   assert.deepEqual(c1.events().map((x) => x.meta.message_id), [String(no.id)], 'one event')
-  assert.ok(!readdirSync(path.join(TL, 'sessions')).some((f) => f.endsWith('.held') && readFileSync(path.join(TL, 'sessions', f), 'utf8').includes(`"id":${no.id},`)), 'filed nowhere')
+  assert.ok(!filed(no.id), 'filed nowhere')
 
   // AskUserQuestion and ExitPlanMode stay at the Mac: no question, no verdict.
   const quiet = ignoring()

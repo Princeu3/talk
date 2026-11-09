@@ -2,16 +2,15 @@
 // by hand, no SDK: an SDK that answers server/discover negotiates a protocol Claude Code won't take as a channel.
 // Plain mode: the tools only. Channel mode (--channel, where 4.1's gate lets it) also hands the owner's messages
 // to Claude as channel events. Each process files its session's messages under one key (see route() in hooks.ts).
-import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { setTimeout as pause } from 'node:timers/promises'
 import type { Socket } from 'socket.io-client'
 import { sealFile } from '../src/lib/crypto.ts'
 import type { Message, MessageBody, Reply } from '../shared/types.ts'
 import { ask, asked, cancels, claim } from './ask.ts'
-import { bare, CAP, clip, cut, delivered, describe, json, route, stays, take, touchedSince, type Held } from './hooks.ts'
-import { connect, dmKey, edit, file, hhmm, home, log, lstart, noteSent, react, readProfile, RELAY, REMOVED, send, sessionId, upload, type Paired } from './talk.ts'
+import { AT_MAC, bare, block, CAP, clip, cut, delivered, describe, json, PERMISSION, route, sendable, stays, take, type Held } from './hooks.ts'
+import { connect, dmKey, edit, file, hhmm, home, log, lstart, noteSent, ps, react, readProfile, RELAY, REMOVED, send, sessionId, upload, type Paired } from './talk.ts'
 
 const VERSION = '2' // raise it when a tool's contract changes
 const MAX_FILE = 50 * 1024 * 1024 // Talk's limit (server/index.ts)
@@ -24,9 +23,10 @@ const TYPES: Record<string, string> = {
 const started = Date.now()
 // The session's key: Claude Code's session id, which outlives /clear here, or one only this process has.
 const self = sessionId(process.env.TALKLINE_SESSION ?? process.env.CLAUDE_CODE_SESSION_ID) || `mcp-${process.pid}-${started.toString(36)}`
+const DIR = process.env.CLAUDE_PROJECT_DIR || process.cwd() // the session's project folder
 // ?? keeps an empty TALKLINE_LABEL: no prefix.
 // shortcut: two sessions in one folder share a label, so naming one asks which (swipe-replies still route right); add a number if Prince mixes them up.
-const label = process.env.TALKLINE_LABEL ?? path.basename(process.env.CLAUDE_PROJECT_DIR || process.cwd())
+const label = process.env.TALKLINE_LABEL ?? path.basename(DIR)
 const prefix = (t: string) => (label ? `${label}: ${t}` : t)
 const MARKER = file(`mcp/${Number(process.env.CLAUDE_PID) || process.ppid}.json`)
 
@@ -51,10 +51,7 @@ const version = (v: unknown) => String(v).split('.').reduce((t, x) => t * 1e6 + 
 function whyPlain(client?: { name?: string; version?: string }) {
   if (refusal) return profile?.cookie ? 'phase0' : 'unpaired'
   if (process.env.TALKLINE_CHANNEL === '1') return
-  let args = ''
-  try {
-    args = execFileSync('ps', ['-o', 'args=', '-p', String(process.ppid)], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
-  } catch {}
+  const args = ps(process.ppid, 'args')
   if (!/\s--dangerously-load-development-channels(\s+[^-\s]\S*)*?\s+server:talkline(\s|$)/.test(args) || /\s(-p|--print)(\s|$)/.test(args)) return 'flag'
   if (client?.name === 'claude-code' && version(client.version) < version('2.1.234')) return 'version'
 }
@@ -99,10 +96,9 @@ function up() {
   }).then((s) => {
     backoff = 5000
     sock = s
-    // Plain mode routes his messages only while a call waits: otherwise the next Stop or read routes them, as in Phase 1.
-    s.on('connect', () => void ((channel || waits) && deliver()))
-    s.on('message', (m: Message) => void ((channel || waits) && m.senderId === p.owner.id && m.convId === p.dm.id && deliver(m.id)))
-    if (channel || waits) deliver()
+    s.on('connect', () => deliver())
+    s.on('message', (m: Message) => void (m.senderId === p.owner.id && m.convId === p.dm.id && deliver(m.id)))
+    deliver()
   }, () => {}) // the callback above retries
 }
 // A send waits up to 10 s for the socket.
@@ -153,24 +149,28 @@ interface Taken {
   hs: Held[]
   text: string // the read block
   done: () => Promise<void> // after the tool result is out: 👀 on the rest, read, and the .taking file goes
-  drop: () => void // not delivered: the lines stay in .taking for this process's next take
+  drop: () => void // not delivered: the lines go back to .held
 }
 // take() names its file by pid, so one take at a time here, from the take until done() or drop(). `ok` says,
 // once it is this one's turn, whether to take at all.
 let free: Promise<void> = Promise.resolve()
-async function lines(limit = 20, cap = CAP - HEAD.length - 12 * limit, ok = () => true): Promise<Taken | undefined> {
+async function lines(limit = 20, cap = CAP - HEAD.length - 12 * limit, ok = () => true): Promise<Taken | undefined> { // 12: room for each "#<id> "
   const prev = free
   let release!: () => void
   free = new Promise((r) => (release = r))
   await prev
   try {
-    const t = ok() ? await take(p, dk, self, { cap, limit }) : undefined // 12: room for each "#<id> "
+    const t = ok() ? await take(p, dk, self, { cap, limit }) : undefined
     if (!t) return void release()
     got = Date.now()
     mark()
     for (const h of t.lines) keep(h.id, p.owner.id, h.text ?? h.line)
-    const [first, ...rest] = t.lines.map((h) => `#${h.id} ${h.line}`)
-    return { hs: t.lines, text: [HEAD, clip(first, CAP - HEAD.length - 1), ...rest].join('\n'), done: () => t.done().finally(release), drop: release }
+    return {
+      hs: t.lines,
+      text: block(HEAD, t.lines.map((h) => `#${h.id} ${h.line}`)),
+      done: () => t.done().finally(release),
+      drop: () => void t.back().catch(oops).finally(release),
+    }
   } catch (e) {
     release()
     throw e
@@ -185,10 +185,23 @@ const oops = (e: Error) => log('error', { where: 'mcp', message: e.message })
 // His text can't close the <channel> tag or open one of its own. Claude Code escapes meta values itself (S6b).
 const event = (content: string, meta: Record<string, string>) =>
   out({ method: 'notifications/claude/channel', params: { content: content.replace(/<(?=\/?channel\b)/gi, '&lt;'), meta } })
+// The Stop hook's word that Claude Code shows none of what this channel delivered (plan B, hooks.ts). Read wherever
+// the channel flag counts: from then on the process runs plain, and Stop delivers.
+const NOCHANNEL = file(`sessions/${self}.nochannel`)
+function channelNow() {
+  if (channel && existsSync(NOCHANNEL)) {
+    rmSync(NOCHANNEL, { force: true })
+    channel = false
+    mark()
+    log('mcp', { channel: false, why: 'unseen' })
+  }
+  return channel
+}
 // Channel mode: this key's lines go to Claude as events, oldest first, once Claude Code can take them, and never
-// while a call waits here (that call takes them) or once Stop wrote .nochannel (Stop takes them).
+// while a call waits here (that call takes them) or once Stop wrote .nochannel (Stop takes them). It takes the lock
+// only when something is filed here.
 async function push() {
-  const t = channel && ready && !waits ? await lines(Infinity, Infinity, () => channel && !waits && !existsSync(file(`sessions/${self}.nochannel`))) : undefined
+  const t = channelNow() && ready && !waits ? await lines(Infinity, Infinity, () => channelNow() && !waits && here()) : undefined
   if (!t) return
   for (const h of t.hs)
     await event(clip(h.text ?? h.line, CAP), {
@@ -202,8 +215,9 @@ async function push() {
   typing()
   await t.done()
 }
-// A route, then in channel mode the events. `after`: the message that triggered it (see route()).
-const deliver = (after?: number) => void routed(after).then(push).catch(oops)
+// A route, then in channel mode the events. `after`: the message that triggered it (see route()). Plain mode routes
+// his messages only while a call waits: otherwise the next Stop or read routes them, as in Phase 1.
+const deliver = (after?: number) => void ((channel || waits) && routed(after).then(push).catch(oops))
 
 // Dots while the agent works on what it got (TALKLINE_TYPING=1, OpenClaw's): at delivery and every 5 s, until
 // this process sends something or 60 s pass. Claude Code's sessions go without: a channel can't tell when a turn ends.
@@ -220,15 +234,20 @@ function typing() {
 
 // Waits up to `ms` for lines routed here, until `stop()`: looks on each beat and every 2 s. While it waits, the
 // marker says so, so a message with no swipe can come here, and this process routes each of his messages.
-async function watch(ms: number, stop: () => boolean) {
+// Cancelled, call `rid` gets null, and lines it took go back.
+async function watch(ms: number, stop: () => boolean, rid: unknown) {
+  let cancelled = false
+  cancellers.set(rid, () => ((cancelled = true), beat()))
   waiting(1)
   try {
     await routed()
-    for (const end = Date.now() + ms; !stop(); await Promise.race([pulse, pause(Math.max(0, Math.min(2000, end - Date.now())))])) {
+    for (const end = Date.now() + ms; !cancelled && !stop(); await Promise.race([pulse, pause(Math.max(0, Math.min(2000, end - Date.now())))])) {
       const t = here() ? await lines() : undefined
-      if (t || Date.now() >= end) return t
+      if (t || Date.now() >= end) return cancelled ? (t?.drop(), null) : t
     }
+    return cancelled ? null : undefined
   } finally {
+    cancellers.delete(rid)
     waiting(-1)
   }
 }
@@ -255,7 +274,7 @@ const answeredAt = ({ id, at }: Awaited<ReturnType<typeof ask>>) => ({ ...(id &&
 // as an event.
 const strand = (code: string, a: Mine) =>
   setTimeout(() => {
-    if (!channel || !ready || a.held || mine.get(code) !== a) return
+    if (!channelNow() || !ready || a.held || mine.get(code) !== a) return
     mine.delete(code)
     void event(`${owner} answered your question ${answered(code, a)}`, answeredAt(a.r!))
   }, 5000)
@@ -269,19 +288,16 @@ interface Out {
 // Cancelled, call `rid` stops and answers nothing: an answer strands for the next read, wait or event.
 // shortcut: a cancel that comes while ask still posts its question is missed, and that call waits on; note early cancels if Esc there ever shows.
 async function waitAsk(code: string, a: Mine, s: number, rid: unknown): Promise<Out | undefined> {
-  let cancelled = false
-  cancellers.set(rid, () => ((cancelled = true), beat()))
   a.held++
   try {
-    const t = s && !a.r && !a.e ? await watch(s * 1000, () => cancelled || !!(a.r || a.e)) : undefined
-    if (cancelled) return void t?.drop() // no response, as MCP asks
+    const t = s && !a.r && !a.e ? await watch(s * 1000, () => !!(a.r || a.e), rid) : undefined
+    if (t === null) return // cancelled: no response, as MCP asks
     if (t) return { text: `pending ${code}: no answer yet. ${owner} wrote while you waited:\n${t.text}`, after: t.done }
     if (a.e || a.r) mine.delete(code) // collected
     if (a.e) throw a.e
     if (a.r) return { text: verdict(a) }
     return { text: `pending ${code}: no answer yet. The question stays open until ${hhmm(a.until)}. Call wait_for_reply with code "${code}" to keep waiting.` }
   } finally {
-    cancellers.delete(rid)
     a.held--
     beat() // an answer this call didn't collect is stranded now: a wait without a code takes it
     if (a.r) strand(code, a)
@@ -305,8 +321,7 @@ const relays = new Set<Promise<void>>() // open ones, whose questions shutdown l
 async function relay(r: { request_id?: unknown; tool_name?: unknown; input_preview?: unknown }) {
   const tool = String(r.tool_name ?? '')
   const request_id = String(r.request_id ?? '')
-  // An allow from here would skip the question or approve the plan unseen: the hook leaves those at the Mac (4.7).
-  if (!channel || !RELAY || !request_id || tool === 'AskUserQuestion' || tool === 'ExitPlanMode') return
+  if (!channel || !RELAY || !request_id || AT_MAC.includes(tool)) return
   const pending = file(`sessions/${self}.pending`) // mutes the permission_prompt text while this asks
   writeFileSync(pending, String(process.pid), { mode: 0o600 })
   try {
@@ -319,13 +334,13 @@ async function relay(r: { request_id?: unknown; tool_name?: unknown; input_previ
     } catch {} // Claude Code cut it mid-field
     const whole = !!ti && typeof ti === 'object'
     const name = label || 'Claude Code'
-    const shown = whole ? describe(name, tool, ti as Args, process.env.CLAUDE_PROJECT_DIR || process.cwd(), '') : { question: bare(`${name}: use ${tool}?`), detail: cut(bare(preview)) }
+    const shown = whole ? describe(name, tool, ti as Args, DIR, '') : { question: bare(`${name}: use ${tool}?`), detail: cut(bare(preview)) }
     // Claude Code keeps 3,500 code points of each field, around a "⋯ N code points elided ⋯" marker. Matched
     // loosely: a false match only adds this line.
     const partial = (!whole || /code points? elided/.test(preview)) && 'Claude Code cut part of this request. If unsure, reply no and check at the Mac.'
     const a = await ask(p, {
-      question: shown.question, detail: [shown.detail, partial].filter(Boolean).join('\n\n'), risk: 'high', urgent: true, ringAfter: 180, expires: expiry,
-      source: 'permission', waits: false, atMac: touchedSince, posted: (id) => noteSent(self, id), code: claim(request_id, 'relay'),
+      question: shown.question, detail: [shown.detail, partial].filter(Boolean).join('\n\n'), ...PERMISSION, expires: expiry,
+      waits: false, posted: (id) => noteSent(self, id), code: claim(request_id, 'relay'),
     })
     if (a.verdict === 'keyboard' || a.verdict === 'cancelled') return // the dialog at the Mac takes it
     await out({ method: 'notifications/claude/channel/permission', params: { request_id, behavior: a.verdict === 'yes' ? 'allow' : 'deny' } })
@@ -463,16 +478,10 @@ const TOOLS: Record<string, Tool> = {
         if (!x) throw new Error(`No ask ${a.code} in this session. It may have closed with the session that asked it.`)
         return waitAsk(a.code, x, s, rid)
       }
-      let cancelled = false
-      cancellers.set(rid, () => ((cancelled = true), beat()))
-      try {
-        const t = await watch(s * 1000, () => cancelled || stranded().length > 0)
-        if (cancelled) return void t?.drop() // no response, as MCP asks
-        const text = reading(t)
-        return text ? { text, after: t?.done } : { text: `No reply in ${s} s.` }
-      } finally {
-        cancellers.delete(rid)
-      }
+      const t = await watch(s * 1000, () => stranded().length > 0, rid)
+      if (t === null) return // cancelled: no response, as MCP asks
+      const text = reading(t)
+      return text ? { text, after: t?.done } : { text: `No reply in ${s} s.` }
     },
   },
   read_messages: {
@@ -507,12 +516,8 @@ const TOOLS: Record<string, Tool> = {
     },
     async run(a) {
       // Absolute only: the permission hook's folder follows Claude's cd, so a relative path could name another file there.
-      if (!path.isAbsolute(a.path)) throw new Error('Give an absolute path.')
-      const st = statSync(a.path, { throwIfNoEntry: false }) // follows links
-      if (!st) throw new Error(`No file at ${a.path}`)
-      if (!st.isFile()) throw new Error(`${a.path} is not a plain file`)
-      if (st.size > MAX_FILE) throw new Error(`${a.path} is ${Math.round(st.size / 1024 / 1024)} MB; Talk takes up to 50 MB`)
-      const name = path.basename(realpathSync(a.path)) // a link sends under its target's name
+      const { name, size } = sendable(a.path)
+      if (size > MAX_FILE) throw new Error(`${a.path} is ${Math.round(size / 1024 / 1024)} MB; Talk takes up to 50 MB`)
       const bytes = new Uint8Array(readFileSync(a.path))
       const id = await upload(p, await sealFile(dk, p.dm.id, bytes))
       const type = TYPES[path.extname(name).toLowerCase()] ?? 'application/octet-stream'
@@ -545,16 +550,8 @@ async function handle({ id, method, params }: { id?: unknown; method?: string; p
         setTimeout(() => {
           ready = true
           deliver()
-          // Every 5 s: lines another router filed here, and the Stop hook's word that Claude Code shows none of
-          // what this channel delivered (plan B, hooks.ts): then it runs plain, and Stop delivers.
-          setInterval(() => {
-            if (!channel) return
-            if (!existsSync(file(`sessions/${self}.nochannel`))) return void (here() && push().catch(oops))
-            rmSync(file(`sessions/${self}.nochannel`), { force: true })
-            channel = false
-            mark()
-            log('mcp', { channel: false, why: 'unseen' })
-          }, 5000).unref()
+          // Every 5 s: lines another router filed here, and the Stop hook's .nochannel (channelNow).
+          setInterval(() => void push().catch(oops), 5000).unref()
         }, 3000)
       return
     case 'ping':
@@ -632,7 +629,7 @@ export async function mcp(flag: boolean, expires?: number) {
         log('mcp', { ignored: 'not JSON' })
         continue
       }
-      void handle(msg).catch((e: Error) => log('error', { where: 'mcp', message: e.message }))
+      void handle(msg).catch(oops)
     }
   })
   process.stdin.on('end', () => void shutdown())

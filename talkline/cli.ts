@@ -58,6 +58,7 @@ async function main(): Promise<number> {
     },
   })
   const settings = o.settings ?? SETTINGS
+  const minutes = o.expires === undefined ? undefined : Number(o.expires)
   switch (cmd) {
     case 'pair':
       return pair(args[0], o.name ?? 'Claude AI')
@@ -92,15 +93,14 @@ async function main(): Promise<number> {
       }
       try {
         const raw = await readAll(process.stdin) // decodes UTF-8 across chunk boundaries
-        const out = await hook(event, JSON.parse(raw.trim() || '{}'), print, o.expires === undefined ? undefined : Number(o.expires))
-        if (out) await print(out)
+        await hook(event, JSON.parse(raw.trim() || '{}'), print, minutes)
       } catch (e) {
         log('error', { where: `hook ${event}`, message: (e as Error).message })
       }
       return 0
     }
     case 'mcp':
-      return (await import('./mcp.ts')).mcp(!!o.channel, o.expires === undefined ? undefined : Number(o.expires))
+      return (await import('./mcp.ts')).mcp(!!o.channel, minutes)
     case 'doctor':
       return doctor(settings)
     case 'stats':

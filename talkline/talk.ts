@@ -68,14 +68,16 @@ export const sessionId = (v: unknown) => String(v ?? '').replace(/[^A-Za-z0-9_-]
 // What a session sent the owner, a message id a line, so the Stop inbox gives a swipe-reply to it back to that session.
 export const noteSent = (sid: string, id: number) => (home(), appendFileSync(file(`sessions/${sid}.sent`), `${id}\n`, { mode: 0o600 }))
 
-// When a process started, as ps prints it, or '' once it's gone. A reused pid has another start time.
-export function lstart(pid: number) {
+// One ps field of a process, or '' once it's gone.
+export function ps(pid: number, field: 'lstart' | 'args') {
   try {
-    return execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8', env: { PATH: process.env.PATH, LC_ALL: 'C' }, stdio: ['ignore', 'pipe', 'ignore'] }).trim()
+    return execFileSync('ps', ['-o', `${field}=`, '-p', String(pid)], { encoding: 'utf8', env: { PATH: process.env.PATH, LC_ALL: 'C' }, stdio: ['ignore', 'pipe', 'ignore'] }).trim()
   } catch {
     return ''
   }
 }
+// When a process started, as ps prints it. A reused pid has another start time.
+export const lstart = (pid: number) => ps(pid, 'lstart')
 
 // mcp/<claudePid>.json: a running `talkline mcp`. `key` names its session files, `got` is when it last took
 // a message from the owner, and `waiting` is true while an ask or wait_for_reply call waits.
@@ -93,7 +95,7 @@ export interface Marker {
 export function marker(name: string): Marker | undefined {
   try {
     const m: Marker = JSON.parse(readFileSync(file(`mcp/${name}`), 'utf8'))
-    return m.lstart && lstart(m.pid) === m.lstart ? m : undefined
+    return m.lstart && process.kill(m.pid, 0) && lstart(m.pid) === m.lstart ? m : undefined // a dead pid throws, before any ps
   } catch {}
 }
 export const markers = () => (existsSync(file('mcp')) ? readdirSync(file('mcp')) : []).filter((f) => f.endsWith('.json')).flatMap((f) => marker(f) ?? [])
@@ -117,12 +119,14 @@ export const authHeader = (p: Profile): Record<string, string> =>
 // A helper's token is never refreshed: 401 means its owner removed it (or denied it).
 export const REMOVED = 'Removed in Talk. Run unpair --yes, then link a new helper.'
 
-export async function call(server: string, method: string, url: string, body?: unknown, headers: Record<string, string> = {}) {
+// JSON, or raw bytes as they are.
+export async function call(server: string, method: string, url: string, body?: unknown, headers: Record<string, string> = {}, ms = limits.ms) {
+  const raw = body instanceof Uint8Array
   const r = await fetch(server + url, {
     method,
-    headers: { 'content-type': 'application/json', ...headers },
-    body: body === undefined ? undefined : JSON.stringify(body),
-    signal: AbortSignal.timeout(limits.ms),
+    headers: { 'content-type': raw ? 'application/octet-stream' : 'application/json', ...headers },
+    body: body === undefined ? undefined : raw ? (body as Uint8Array<ArrayBuffer>) : JSON.stringify(body),
+    signal: AbortSignal.timeout(ms),
   }).catch(() => {
     throw new Error(`Could not reach ${server}.`)
   })
@@ -195,20 +199,12 @@ export async function send(s: Socket, p: Paired, key: CryptoKey, body: Omit<Mess
   throw new Error('Talk did not confirm the message.')
 }
 
-// Sealed bytes as an attachment, by POST: call() is JSON only. 120 s, for 50 MB on a slow link.
+// Sealed bytes as an attachment, by POST. 120 s, for 50 MB on a slow link.
 export async function upload(p: Paired, sealed: Uint8Array<ArrayBuffer>) {
-  const r = await fetch(`${p.server}/api/conversations/${p.dm.id}/attachments`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/octet-stream', ...authHeader(p) },
-    body: sealed,
-    signal: AbortSignal.timeout(120_000),
-  }).catch(() => {
-    throw new Error(`Could not reach ${p.server}.`)
-  })
-  const data = await r.json().catch(() => null)
+  const r = await call(p.server, 'POST', `/api/conversations/${p.dm.id}/attachments`, sealed, authHeader(p), 120_000)
   if (r.status === 401 && p.token) throw new Error(REMOVED)
-  if (r.status >= 300) throw new Error(`Talk refused the file: ${data?.error ?? r.status}`)
-  return data.id as string
+  if (r.status >= 300) throw new Error(`Talk refused the file: ${r.data?.error ?? r.status}`)
+  return r.data.id as string
 }
 
 // One text on a socket of its own: notify, the pair hello, the notification hook.

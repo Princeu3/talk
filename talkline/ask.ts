@@ -229,41 +229,43 @@ export async function ask(p: Paired, o: AskOptions): Promise<{ verdict: Verdict;
   s.on('call:accepted', (c: { id: string }) => queue(() => accepted(c.id)))
   s.on('call:end', (c: { id: string; reason: string }) => queue(() => ended(c.id, c.reason)))
 
-  // Talk refused the question: no answer can come, so the socket and the cancel go now.
-  const first = await asking().catch((e: Error) => {
-    cancels.delete(cancel)
-    s.close()
-    throw e
-  })
-  post(first.id)
-  log('ask', { risk: o.risk, urgent: o.urgent, source: o.source })
-  const timers = [setTimeout(() => settle('expired'), expiresAt - Date.now())]
-  if (o.urgent) timers.push(setTimeout(() => queue(ring), o.ringAfter * 1000))
-  if (o.atMac) timers.push(setInterval(() => o.atMac!(sentAt) && settle('keyboard'), 2000))
+  const timers: NodeJS.Timeout[] = []
+  try {
+    const first = await asking()
+    post(first.id)
+    log('ask', { risk: o.risk, urgent: o.urgent, source: o.source })
+    timers.push(setTimeout(() => settle('expired'), expiresAt - Date.now()))
+    if (o.urgent) timers.push(setTimeout(() => queue(ring), o.ringAfter * 1000))
+    if (o.atMac) timers.push(setInterval(() => o.atMac!(sentAt) && settle('keyboard'), 2000))
 
-  const { verdict, via, id, note, at } = await settled
-  cancels.delete(cancel) // a second signal exits at once
-  timers.forEach(clearTimeout) // clears the interval too
-  if (verdict !== 'cancelled') await work // a ring step can take 10 s; a signal leaves 1 s
-  if (call) {
-    s.emit('call:hangup', { id: call })
-    log('ring', { result: 'cancelled' })
-    await callLog(0)
+    const { verdict, via, id, note, at } = await settled
+    cancels.delete(cancel) // a second signal exits at once
+    timers.forEach(clearTimeout) // clears the interval too
+    if (verdict !== 'cancelled') await work // a ring step can take 10 s; a signal leaves 1 s
+    if (call) {
+      s.emit('call:hangup', { id: call })
+      log('ring', { result: 'cancelled' })
+      await callLog(0)
+    }
+    const status =
+      verdict === 'yes' ? `Approved ${hhmm(at)}`
+      : verdict === 'no' ? `Denied ${hhmm(at)}`
+      : verdict === 'keyboard' ? 'Back at the Mac: answer there'
+      : verdict === 'cancelled' ? 'Cancelled: no answer needed'
+      : o.waits ? `No answer by ${hhmm(expiresAt)}: it waits for you at the Mac`
+      : o.source === 'permission' ? 'Expired, denied'
+      : 'Expired'
+    await Promise.all([
+      edit(p, key, askIds.at(-1)!, closed(status)).catch(() => {}),
+      id && react(p, key, id, verdict === 'yes' ? '✅' : '❌').catch(() => {}),
+      id && read(p, id).catch(() => {}),
+    ])
+    log('answer', { verdict, via })
+    return { verdict, note, id, at }
+  } finally {
+    // Talk refused the question or the session (then no answer can come), or it settled: all of it goes.
+    cancels.delete(cancel)
+    timers.forEach(clearTimeout)
+    s.close()
   }
-  const status =
-    verdict === 'yes' ? `Approved ${hhmm(at)}`
-    : verdict === 'no' ? `Denied ${hhmm(at)}`
-    : verdict === 'keyboard' ? 'Back at the Mac: answer there'
-    : verdict === 'cancelled' ? 'Cancelled: no answer needed'
-    : o.waits ? `No answer by ${hhmm(expiresAt)}: it waits for you at the Mac`
-    : o.source === 'permission' ? 'Expired, denied'
-    : 'Expired'
-  await Promise.all([
-    edit(p, key, askIds.at(-1)!, closed(status)).catch(() => {}),
-    id && react(p, key, id, verdict === 'yes' ? '✅' : '❌').catch(() => {}),
-    id && read(p, id).catch(() => {}),
-  ])
-  log('answer', { verdict, via })
-  s.close()
-  return { verdict, note, id, at }
 }
