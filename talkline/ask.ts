@@ -39,24 +39,27 @@ export const typed = (text: string) => {
 }
 // A whole-message yes or no with no code. It answers only as a swipe-reply; otherwise it gets ❓ and a reminder.
 export const PLAIN = /^\s*(?:(y|yes|yep|yeah|yup|ok|okay|sure|approve|approved|👍[\u{1F3FB}-\u{1F3FF}]?)|n|no|nope|nah|deny|denied|👎[\u{1F3FB}-\u{1F3FF}]?)\u{FE0F}?[\s.!]*$/iu
+// TALKLINE_PLAIN=chat (the OpenClaw child): an unswiped plain word is chat, as on Telegram, not a stray answer.
+export const CHAT = process.env.TALKLINE_PLAIN === 'chat'
 
 // Set while an ask is open, for the signal handler in cli.ts: it closes the ask before the process exits.
 export let cancel: (() => void) | undefined
 
 // Every ask record, a line each: "<id> <code>", id 0 for the code before the ask is stored, then the ask, its
 // re-posts, its reminders and the answer it took. Never pruned, so a code never repeats in this chat: an old
-// "yes <code>" the server sends again can't answer a new ask. The Stop hook keeps answers to asks from Claude
-// by them, however long it waits to read.
+// "yes <code>" the server sends again can't answer a new ask. The router keeps answers to asks from Claude
+// by them, however long it waits to read. "0 <code> relay" tags a relay code, "-1 <code>" marks a closed
+// ask, and "-2 <code>" a "Too late" reply sent; Phase 1 reads those as ids no message has.
 // shortcut: the asks file grows forever (about 30 bytes an ask) and each run reads it whole; pair can reset it if it gets big.
 const ASKS = file('asks')
 const records = () => (existsSync(ASKS) ? readFileSync(ASKS, 'utf8').split('\n').filter(Boolean).map((l) => l.split(' ')) : [])
 export function asked() {
   const r = records()
-  const codes = new Map<string, number[]>() // each code's ids: its ask, re-posts, reminders and the answer it took
+  const codes = new Map<string, number[]>() // each code's ids: its ask, re-posts, reminders, the answer it took, and -1 or -2
   for (const [id, code] of r) codes.set(code, [...(codes.get(code) ?? []), Number(id)])
-  return { ids: new Set(r.map(([id]) => Number(id))), codes }
+  return { ids: new Set(r.map(([id]) => Number(id))), codes, relay: new Set(r.filter((x) => x[2] === 'relay').map((x) => x[1])) }
 }
-const record = (id: number, code: string) => appendFileSync(ASKS, `${id} ${code}\n`, { mode: 0o600 })
+export const record = (id: number, code: string) => appendFileSync(ASKS, `${id} ${code}\n`, { mode: 0o600 })
 
 // 5 letters, a-z without l, never one this chat has had.
 export function newCode() {

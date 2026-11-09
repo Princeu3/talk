@@ -10,7 +10,7 @@ import { b64, deriveIdentity, safetyCode, unwrapConvKey } from '../src/lib/crypt
 import type { Me } from '../shared/types.ts'
 import { ask, cancel } from './ask.ts'
 import { hook, idleSeconds, ourHooks, readSettings, SETTINGS, setHooks } from './hooks.ts'
-import { api, call, CLI, connect, file, limits, log, noteSent, paired, patchProfile, readProfile, REMOVED, saveProfile, say, sessionId, type Paired } from './talk.ts'
+import { api, call, CLI, connect, file, limits, log, noteSent, paired, patchProfile, readProfile, REMOVED, saveProfile, say, sessionId, sessionKey, type Paired } from './talk.ts'
 
 const PAIR = `pair '<agent link>' [--name "Claude AI"]   (make the link in Talk: Settings > Agents)`
 const USAGE = `Usage: node ${CLI} <command>
@@ -44,7 +44,7 @@ for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const)
 // Run from Claude Code, whose Bash sets CLAUDE_CODE_SESSION_ID (the hooks' session_id): name the session, and send a swipe-reply back to it.
 const sid = sessionId(process.env.CLAUDE_CODE_SESSION_ID)
 const label = sid ? `${path.basename(process.cwd())}: ` : ''
-const sent = (id: number) => void (sid && noteSent(sid, id))
+const sent = (id: number) => void (sid && noteSent(sessionKey(sid), id))
 
 async function main(): Promise<number> {
   const { values: o, positionals: [cmd, ...args] } = parseArgs({
@@ -91,7 +91,7 @@ async function main(): Promise<number> {
       }
       try {
         const raw = await readAll(process.stdin) // decodes UTF-8 across chunk boundaries
-        const out = await hook(event, JSON.parse(raw.trim() || '{}'), o.expires === undefined ? undefined : Number(o.expires))
+        const out = await hook(event, JSON.parse(raw.trim() || '{}'), print, o.expires === undefined ? undefined : Number(o.expires))
         if (out) await print(out)
       } catch (e) {
         log('error', { where: `hook ${event}`, message: (e as Error).message })

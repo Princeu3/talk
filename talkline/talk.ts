@@ -1,7 +1,8 @@
 // The Talk client under talkline: the profile on disk, HTTP with the helper's
 // token (or a Phase 0 session cookie), the socket, sealed messages and the events
 // log. All crypto comes from the apps' own src/lib/crypto.ts.
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { appendFileSync, chmodSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -66,6 +67,39 @@ export const hhmm = (t: number) => new Date(t).toLocaleTimeString([], { hour: 'n
 export const sessionId = (v: unknown) => String(v ?? '').replace(/[^A-Za-z0-9_-]/g, '')
 // What a session sent the owner, a message id a line, so the Stop inbox gives a swipe-reply to it back to that session.
 export const noteSent = (sid: string, id: number) => (home(), appendFileSync(file(`sessions/${sid}.sent`), `${id}\n`, { mode: 0o600 }))
+
+// When a process started, as ps prints it, or '' once it's gone. A reused pid has another start time.
+export function lstart(pid: number) {
+  try {
+    return execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8', env: { PATH: process.env.PATH, LC_ALL: 'C' }, stdio: ['ignore', 'pipe', 'ignore'] }).trim()
+  } catch {
+    return ''
+  }
+}
+
+// mcp/<claudePid>.json: a running `talkline mcp`. `key` names its session files, `got` is when it last took
+// a message from the owner, and `waiting` is true while an ask or wait_for_reply call waits.
+export interface Marker {
+  pid: number
+  lstart: string
+  key: string
+  channel: boolean
+  label: string
+  started: number
+  got?: number
+  waiting?: boolean
+}
+// shortcut: dead markers stay in mcp/ until their CLAUDE_PID starts a new server; sweep them at start if the folder grows.
+export function marker(name: string): Marker | undefined {
+  try {
+    const m: Marker = JSON.parse(readFileSync(file(`mcp/${name}`), 'utf8'))
+    return m.lstart && lstart(m.pid) === m.lstart ? m : undefined
+  } catch {}
+}
+export const markers = () => (existsSync(file('mcp')) ? readdirSync(file('mcp')) : []).filter((f) => f.endsWith('.json')).flatMap((f) => marker(f) ?? [])
+// The key a hook or a CLI run files its session's .sent, .last and .held under: a live talkline mcp's
+// for this Claude Code process, which keeps its key across /clear, else the session id.
+export const sessionKey = (sid: string) => (Number(process.env.CLAUDE_PID) && marker(`${Number(process.env.CLAUDE_PID)}.json`)?.key) || sid
 
 // --- HTTP ---
 
@@ -193,15 +227,28 @@ export async function history(p: Paired, cursor: number) {
 }
 
 // The first message id each body of the owner's came under, by the body's IV: lines of "<iv> <id>".
+// Read by byte offset: a process that lives for hours sees what other processes recorded since.
 // shortcut: the seen file grows forever (about 25 bytes per owner message) and each run reads it whole; pair can reset it if it gets big.
-// shortcut: read once per process, so two talkline processes running at once could each take one replayed body in a narrow window; lock the file if that matters.
-let ivs: Map<string, number> | undefined
+// shortcut: ask's catch-up gates outside inbox.lock, so two processes could each take one replayed body in a narrow window; codes never repeat, so a replay can't answer an ask.
+const ivs = new Map<string, number>()
+let seenTo = 0
 function seen() {
-  if (ivs) return ivs
-  ivs = new Map()
-  for (const l of existsSync(file('seen')) ? readFileSync(file('seen'), 'utf8').split('\n') : []) {
-    const [iv, id] = l.split(' ')
-    if (id && !ivs.has(iv)) ivs.set(iv, Number(id))
+  const size = statSync(file('seen'), { throwIfNoEntry: false })?.size ?? 0
+  if (size < seenTo) seenTo = 0 // the file was reset
+  if (size > seenTo) {
+    const fd = openSync(file('seen'), 'r')
+    const buf = Buffer.alloc(size - seenTo)
+    try {
+      readSync(fd, buf, 0, buf.length, seenTo)
+    } finally {
+      closeSync(fd)
+    }
+    const end = buf.lastIndexOf(10) + 1 // a half-written line waits for the next read
+    for (const l of buf.subarray(0, end).toString().split('\n')) {
+      const [iv, id] = l.split(' ')
+      if (id && !ivs.has(iv)) ivs.set(iv, Number(id))
+    }
+    seenTo += end
   }
   return ivs
 }
