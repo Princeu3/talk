@@ -241,7 +241,10 @@ export async function ask(p: Paired, o: AskOptions): Promise<{ verdict: Verdict;
     const { verdict, via, id, note, at } = await settled
     cancels.delete(cancel) // a second signal exits at once
     timers.forEach(clearTimeout) // clears the interval too
-    if (verdict !== 'cancelled') await work // a ring step can take 10 s; a signal leaves 1 s
+    // The close waits for a ring step (up to 10 s), so no call outlives the ask, but no longer: with Talk stalled,
+    // queued reminders and ❓ could take minutes, and the permission hook must close its question within 600 s.
+    // A signal leaves 1 s.
+    if (verdict !== 'cancelled') await Promise.race([work, new Promise((r) => timers.push(setTimeout(r, 10_000)))])
     if (call) {
       s.emit('call:hangup', { id: call })
       log('ring', { result: 'cancelled' })
