@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { AUTO_LOAD, type Talk } from '../lib/useTalk.ts'
 import type { CallKind, FileRef } from '../../shared/types.ts'
-import { convName, fileSize, host, shortTime, URL_RE, userName } from '../lib/format.ts'
+import { convName, fileSize, host, isHelper, shortTime, URL_RE, userName } from '../lib/format.ts'
 import { Avatar } from './Sidebar.tsx'
 import { Confirm, danger, primary, Report, SafetyCode, segment, Sheet } from './Sheets.tsx'
 import { Ban, BellOff, FileIcon, Flag, ImageIcon, LinkIcon, Lock, LogOut, Pencil, Phone, Pin, UserPlus, Video } from './icons.tsx'
@@ -257,18 +257,21 @@ export default function ChatInfo({ talk, convId, onClose, onCall, onAddPeople, o
       </div>
       {error && <p className="mb-3 text-sm text-danger" role="alert">{error}</p>}
 
-      <div className="mb-5 flex gap-2">
-        {([['audio', 'Voice', Phone], ['video', 'Video', Video]] as const).map(([kind, label, Icon]) => (
-          <button
-            key={kind}
-            onClick={() => call(kind)}
-            disabled={!onCall}
-            className="pressable flex min-h-16 flex-1 flex-col items-center justify-center gap-1 rounded-2xl bg-surface text-sm font-medium text-accent disabled:opacity-40"
-          >
-            <Icon size={20} /> {label}
-          </button>
-        ))}
-      </div>
+      {/* a helper takes no calls */}
+      {!isHelper(me, other) && (
+        <div className="mb-5 flex gap-2">
+          {([['audio', 'Voice', Phone], ['video', 'Video', Video]] as const).map(([kind, label, Icon]) => (
+            <button
+              key={kind}
+              onClick={() => call(kind)}
+              disabled={!onCall}
+              className="pressable flex min-h-16 flex-1 flex-col items-center justify-center gap-1 rounded-2xl bg-surface text-sm font-medium text-accent disabled:opacity-40"
+            >
+              <Icon size={20} /> {label}
+            </button>
+          ))}
+        </div>
+      )}
 
       <button onClick={() => setMedia(true)} className={`${row} mb-5`}>
         <span className="text-accent"><ImageIcon size={20} /></span>

@@ -784,6 +784,26 @@ test('pause and push budgets', async () => {
   assert.equal((await send(sc, dm3, tick, { quiet: true })).error, 'Slow down: a helper can send 60 messages a minute.')
 })
 
+// Its own owner: 'pause and push budgets' spends Ruth's 6 loud pushes a minute.
+test('a helper’s loud send reaches the phone while a tab is open', async () => {
+  const alice = await login('Alice')
+  const quinn = await register('Quinn', await invite(alice))
+  const h = await helper(quinn, 'Quill AI')
+  const dm = await allow(quinn, h)
+  const token = randomBytes(32).toString('hex')
+  assert.equal((await api(quinn, 'POST', '/api/devices', { token, kind: 'alert', env: 'sandbox' })).status, 200)
+  const tab = await socket(quinn)
+  tab.emit('active', true) // a Talk tab in front on the Mac
+  const said = (await (await socket(h)).emitWithAck('send', { convId: dm, body: await seal(h, dm, { from: h.id, text: 'Tests pass' }), cid: crypto.randomUUID() })).message as Message
+  assert.deepEqual(await pushed((p) => p.messageId === said.id), { token, env: 'sandbox', type: 'message', convId: dm, messageId: said.id })
+
+  // a person's message still leaves it to the open tab
+  const withAlice = (await createConv(alice, 'dm', [alice, quinn])).id
+  const hi = (await (await socket(alice)).emitWithAck('send', { convId: withAlice, body: await seal(alice, withAlice, { from: alice.id, text: 'hi' }) })).message as Message
+  await new Promise((r) => setTimeout(r, 300))
+  assert.ok(!relayed.some((p) => p.messageId === hi.id), 'no push for a person’s message')
+})
+
 test('ring rules', async () => {
   const alice = await login('Alice')
   const uma = await register('Uma', await invite(alice))
@@ -822,14 +842,26 @@ test('a ring stops at 45 s and an unanswered one counts as not taken', { timeout
   const h = await helper(vic, 'Vesper AI')
   const dm = await allow(vic, h)
   const [so, sh] = await Promise.all([socket(vic), socket(h)])
+  // alongside, another owner's helper rings, and its socket drops for good mid-ring
+  const wes = await register('Wes', await invite(alice))
+  const h2 = await helper(wes, 'Wisp AI')
+  const dm2 = await allow(wes, h2)
+  const [so2, sh2] = await Promise.all([socket(wes), socket(h2)])
+  const ask2 = await ask(h2, sh2, dm2)
   const first = await ask(h, sh, dm)
   const started = Date.now()
   const missed = next<{ id: string; reason: string }>(so, 'call:end').then((e) => ({ ...e, ms: Date.now() - started }))
+  const missed2 = next<{ id: string; reason: string }>(so2, 'call:end').then((e) => ({ ...e, ms: Date.now() - started }))
   const { id } = await ring(sh, dm, first)
+  const { id: id2 } = await ring(sh2, dm2, ask2)
   await new Promise((r) => setTimeout(r, 30_000))
   assert.equal((await sh.emitWithAck('call:rejoin', { id })).id, id, 'the caller is back mid-ring')
+  sh2.disconnect() // its 30 s grace would outlast the ring
   const end = await missed
   assert.deepEqual([end.id, end.reason], [id, 'missed'])
   assert.ok(end.ms < 46_000, `${end.ms} ms`)
+  const end2 = await missed2
+  assert.deepEqual([end2.id, end2.reason], [id2, 'missed'], 'a dropped caller’s ring still ends at 45 s')
+  assert.ok(end2.ms < 46_000, `${end2.ms} ms`)
   assert.equal((await ring(sh, dm, await ask(h, sh, dm))).error, 'Your owner didn’t take the last ring. No more until they write to you.')
 })

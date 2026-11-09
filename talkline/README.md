@@ -32,8 +32,8 @@ node talkline/cli.ts hooks uninstall [--settings <path>]
 This edits `~/.claude/settings.json` (or `--settings`; a symlink stays a symlink), and first saves a copy next to it named `settings.json.talkline-backup-<date>-<time>`. It leaves your other settings and hooks alone. `hooks install` without `--approvals` turns approvals off. Run `hooks install` again after you upgrade Node or move this folder.
 
 - Notification: when Claude needs you or is done and you are away from the Mac, it texts you. Away means no keyboard or mouse for 2 minutes (1 minute when Claude waits for your input).
-- Stop: when a turn ends, Claude gets the messages you sent the helper on Talk since the last one. A reply shows what it quotes, and a forwarded message says someone else wrote it. Each gets 👀 when Claude gets it and ✅ when that turn ends. Answers to questions and call logs don't reach Claude.
-- PermissionRequest, only with `--approvals`: while you are away, a permission prompt comes to Talk as an urgent question with the whole command or tool input (past 6,000 characters, its start and end). Reply `yes <code>` or `no <code>`, or tap Approve or Deny on the web. If you left less than 2 minutes before, it waits until you have been away 2 minutes. No answer in 8 minutes means no, and Claude stops until you're back. If you come back to the Mac first, the prompt goes back to the terminal. If you haven't read the question in 3 minutes, it rings your phone once, within Talk's ring rules.
+- Stop: when a turn ends, Claude gets the messages you sent the helper on Talk since the last one. A reply shows what it quotes, and a forwarded message says someone else wrote it. Each gets 👀 when Claude gets it. Answers to questions and call logs don't reach Claude. A yes or no with no code (or y, n, ok, okay, sure, yeah, yep, yup, nope, nah, approve, approved, deny, denied, 👍 or 👎 alone) that isn't a swipe-reply reaches no session: it gets ❓. A `no <code>` note sent after its question closed goes to the session that asked. Claude is told how to answer you on Talk.
+- PermissionRequest, only with `--approvals`: while you are away, a permission prompt comes to Talk as an urgent question that names the tool and, for a command, Claude's reason, then the whole command or tool input, with `/tmp/…/scratchpad` for the session's scratchpad (past 6,000 characters, its start and end). Reply `yes <code>` or `no <code>`, or tap Approve or Deny on the web. `no <code> <note>` passes your note to Claude. A yes can't carry one. If you left less than 2 minutes before, it waits until you have been away 2 minutes. No answer in 8 minutes leaves the prompt waiting at the Mac. A `claude -p` or background run has no prompt to wait at, so it stops, as before. If you come back to the Mac first, the prompt goes back to the terminal. If you haven't read the question in 3 minutes, it rings your phone once, within Talk's ring rules.
 
 Away is read from this Mac's own keyboard and mouse. Over SSH, on Linux or in a container, talkline can't tell: notifications count you as away, and permission prompts stay in the terminal. To override, set `TALKLINE_AWAY` to `always` or `never` in the `env` block of `~/.claude/settings.json`. The hooks don't see a variable you export in a shell.
 
@@ -42,7 +42,7 @@ Limits of the hooks:
 - Talk messages reach Claude only when a turn ends. A message to an idle session waits until you start its next turn.
 - All Claude Code sessions on this Mac share one inbox. A swipe-reply to what a session sent you goes to that session; any other message goes to the next session that ends a turn.
 - About 9,000 characters reach Claude per turn. More waits for the next turn, and a longer single message is cut.
-- The hooks run in every Claude Code session on this Mac, `claude -p` scripts included. A "waiting" or "done" text includes up to 500 characters of Claude's last reply.
+- The hooks run in every Claude Code session on this Mac, `claude -p` scripts included. A "waiting" or "done" text includes the end of Claude's last reply (500 characters). An AskUserQuestion question shows with its options, and a plan shows its start; you answer both at the Mac.
 - If you answer a permission prompt where this Mac's keyboard can't see it (Remote Control, or SSH with `TALKLINE_AWAY=always`), its Talk question stays open until it expires and may still ring. Ignore it.
 
 `doctor` checks the setup: profile, server, session, owner, chat, safety codes, idle time, hooks and the paths they run. A removed helper fails the session check.
@@ -54,17 +54,17 @@ node talkline/cli.ts notify <text> [--quiet]
 node talkline/cli.ts ask <question> [--detail <text>] [--risk low|high] [--urgent] [--ring-after <seconds>] [--expires <minutes>]
 ```
 
-`notify` sends a message; `--quiet` sends it without a push.
+`notify` sends a message; `--quiet` sends it without a push. Run from Claude Code, `notify` and `ask` start with the session name, and a swipe-reply goes back to that session.
 
-`ask` sends the question with a five-letter code and waits. Reply `yes <code>` or `no <code>`, or tap Approve or Deny under the question on the web; a typo fixed with Edit counts. A swipe-reply `no` always counts. On a low-risk ask, a swipe-reply `yes` or a 👍 counts too; on a high-risk ask (the default) they get a reminder that the code is needed. The question closes after `--expires` minutes (default 10, at most 14). `--urgent` sends the question as time-sensitive, and rings your phone once after `--ring-after` seconds (default 180) if you haven't read it, within Talk's ring rules. Pick up and the question comes back below the call.
+`ask` sends the question with a five-letter code and waits. Reply `yes <code>` or `no <code>`, or tap Approve or Deny under the question on the web; a typo fixed with Edit counts. `Yes, <code>.` counts too. A note after `no <code>` reaches Claude: `ask` prints it on a second line. A yes can't carry one: `yes <code>` with anything after it gets ❓. A swipe-reply `no` to the question, or to a reminder under it, always counts. On a low-risk ask, a swipe-reply `yes` or a 👍 on the question counts too; on a high-risk ask (the default) they get a reminder that the code is needed. A yes or no with no code that isn't a swipe-reply gets ❓ and one reply with the code to use. The question closes after `--expires` minutes (default 10, at most 14). `--urgent` sends the question as time-sensitive, and rings your phone once after `--ring-after` seconds (default 180) if you haven't read it, within Talk's ring rules. Pick up and the question comes back below the call.
 
-| Answer  | Prints    | Exit code |
-| ------- | --------- | --------- |
-| yes     | `yes`     | 0         |
-| no      | `no`      | 1         |
-| none    | `expired` | 2         |
-| error   |           | 3         |
-| stopped |           | 128 + the signal (130 for Ctrl+C) |
+| Answer  | Prints              | Exit code |
+| ------- | ------------------- | --------- |
+| yes     | `yes`               | 0         |
+| no      | `no`, then any note | 1         |
+| none    | `expired`           | 2         |
+| error   |                     | 3         |
+| stopped |                     | 128 + the signal (130 for Ctrl+C) |
 
 Stopped by Ctrl+C or a signal, `ask` hangs up a ring and marks the question Cancelled first.
 
@@ -76,9 +76,9 @@ All in `~/.talkline` (or `$TALKLINE_HOME`), a folder only you can open (0700):
 
 - `profile.json` (0600): the server, the helper's account, passphrase and token, your account and key as the link pinned them, the chat key, and how far the Stop hook has read.
 - `events.jsonl` (0600): one line per event, never message text. `stats` counts the last 7 days.
-- `asks` (0600): the ids and codes of all your questions, so a code never repeats and the Stop hook keeps your answers from Claude.
+- `asks` (0600): the ids and codes of all your questions, the reminders they sent and the answers they took, so a code never repeats and the Stop hook keeps your answers from Claude.
 - `seen` (0600): an id for each of your messages, so talkline takes each one once.
-- `sessions/`: per Claude Code session, its last reply (added to notifications), the ids of what it sent you, your replies waiting for its next turn, and a marker while a permission question waits.
+- `sessions/`: per Claude Code session, the end of its last reply (added to notifications), its last AskUserQuestion or plan, the ids of what it sent you, your replies waiting for its next turn, and a marker while a permission question waits.
 - `inbox.lock`: held while the Stop hook reads your messages.
 
 Anyone who can read `profile.json` can act as the helper.
@@ -92,6 +92,6 @@ Anyone who can read `profile.json` can act as the helper.
 - The server sees the helper's name and its Mac's host name, your time zone, when it last sent a message, and which messages are questions or urgent. It never sees what they say.
 - The web app comes from the server, so a server that serves altered code could approve for you. Allow in the Phase 4 iPhone build removes that.
 - No voice: calls to the helper are declined.
-- Talk doesn't push to your phone while a Talk tab is open and visible on another device. If that tab shows the helper's chat, it also marks questions read, so the phone won't ring. Close or hide Talk on the Mac when you leave.
+- A Talk tab left open on the helper's chat marks questions read, so the phone won't ring. Close or hide Talk on the Mac when you leave.
 - `unpair --yes` removes the helper, as Remove does, and deletes the profile. Run `hooks uninstall` to remove the hooks.
 - A Phase 0 profile (from `pair` with an invite link) keeps working: everyone on the server can see and message that helper, and `doctor` says so. To upgrade, run `unpair --yes`, then link a new helper. For a Phase 0 profile, `unpair --yes` deletes the old helper's messages from your chat.

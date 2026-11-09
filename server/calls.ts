@@ -308,7 +308,9 @@ export function callHandlers(io: Server) {
         if (c.device[me] !== socket.id) continue
         c.device[me] = null
         clearTimeout(c.timer)
-        c.timer = setTimeout(() => end(c, 'lost'), GRACE_MS)
+        // An unanswered ring still stops at `until` when that comes before the grace runs out.
+        if (!c.answered && c.until < Date.now() + GRACE_MS) ringFor(c)
+        else c.timer = setTimeout(() => end(c, 'lost'), GRACE_MS)
       }
       for (const g of groups.values()) {
         if (g.peers.get(me) !== socket.id) continue

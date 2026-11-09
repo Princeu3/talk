@@ -32,13 +32,15 @@ export type Apns =
 
 // Payload carries no message content: the sender name and conversation id only.
 // Pushes only to someone with no visible tab or open app; those show it themselves.
+// A helper's loud send (`always`) still reaches the phone.
 // These users' sockets. An empty room list would reach every socket, so it reaches none.
 export const toUsers = (io: Server, ids: string[]) => io.to(ids.length ? ids.map((u) => `user:${u}`) : 'nobody')
 
-export async function notifyIfAway(io: Server, userId: string, payload: Payload, opts: { ttl?: number; apns?: Apns } = {}) {
+export async function notifyIfAway(io: Server, userId: string, payload: Payload, opts: { ttl?: number; apns?: Apns; always?: boolean } = {}) {
   const sockets = await io.in(`user:${userId}`).fetchSockets()
-  if (sockets.some((s) => s.data.active)) return
-  await Promise.all([notify(userId, payload, opts.ttl), opts.apns && apns(userId, opts.apns)])
+  const here = sockets.some((s) => s.data.active)
+  if (here && !opts.always) return
+  await Promise.all([!here && notify(userId, payload, opts.ttl), opts.apns && apns(userId, opts.apns)]) // a visible tab shows it; the phone still buzzes
 }
 
 type Payload = { title: string; body: string; convId: string }

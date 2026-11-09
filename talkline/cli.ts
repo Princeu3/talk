@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // talkline: the Claude Code bridge to Talk (Phase 1). Commands below; see talkline/README.md.
 import { createHmac } from 'node:crypto'
-import { existsSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { appendFileSync, existsSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { constants, hostname } from 'node:os'
 import { text as readAll } from 'node:stream/consumers'
 import { parseArgs } from 'node:util'
@@ -9,7 +9,7 @@ import { b64, deriveIdentity, safetyCode, unwrapConvKey } from '../src/lib/crypt
 import type { Me } from '../shared/types.ts'
 import { ask, cancel } from './ask.ts'
 import { hook, idleSeconds, ourHooks, readSettings, SETTINGS, setHooks } from './hooks.ts'
-import { api, call, CLI, connect, file, limits, log, paired, patchProfile, readProfile, REMOVED, request, saveProfile, say, type Paired } from './talk.ts'
+import { api, call, CLI, connect, file, home, limits, log, paired, patchProfile, readProfile, REMOVED, request, saveProfile, say, type Paired } from './talk.ts'
 
 const PAIR = `pair '<agent link>' [--name "Claude AI"]   (make the link in Talk: Settings > Agents)`
 const USAGE = `Usage: node ${CLI} <command>
@@ -40,6 +40,11 @@ for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const)
     setTimeout(() => process.exit(), 1000).unref()
   })
 
+// Run from Claude Code, whose Bash sets CLAUDE_CODE_SESSION_ID (the hooks' session_id): name the session, and send a swipe-reply back to it.
+const sid = process.env.CLAUDE_CODE_SESSION_ID?.replace(/[^A-Za-z0-9_-]/g, '')
+const label = sid ? `${process.cwd().split('/').pop()}: ` : ''
+const sent = (id: number) => void (sid && (home(), appendFileSync(file(`sessions/${sid}.sent`), `${id}\n`, { mode: 0o600 })))
+
 async function main(): Promise<number> {
   const { values: o, positionals: [cmd, ...args] } = parseArgs({
     allowPositionals: true,
@@ -56,7 +61,7 @@ async function main(): Promise<number> {
       return pair(args[0], o.name ?? 'Claude AI')
     case 'notify':
       if (!args.length) break
-      await say(paired(), args.join(' '), { quiet: o.quiet })
+      sent((await say(paired(), label + args.join(' '), { quiet: o.quiet })).id)
       return 0
     case 'ask': {
       const risk = o.risk ?? 'high'
@@ -65,9 +70,9 @@ async function main(): Promise<number> {
       if (!args.length || (risk !== 'low' && risk !== 'high') || !(ringAfter >= 0)) break
       if (!(expires > 0 && expires <= 14))
         throw new Error('--expires takes minutes, more than 0 and at most 14: closing the question edits it, and Talk allows edits for 15 minutes.')
-      const verdict = await ask(paired(), { question: args.join(' '), detail: o.detail, risk, urgent: !!o.urgent, ringAfter, expires, source: 'cli' })
+      const { verdict, note } = await ask(paired(), { question: label + args.join(' '), detail: o.detail, risk, urgent: !!o.urgent, ringAfter, expires, source: 'cli', posted: sent })
       if (verdict === 'cancelled') return Number(process.exitCode)
-      await print(verdict)
+      await print(note ? `${verdict}\n${note}` : verdict) // only a no carries a note
       return verdict === 'yes' ? 0 : verdict === 'no' ? 1 : 2
     }
     case 'hooks':
@@ -170,7 +175,7 @@ async function pair(link: string | undefined, name: string) {
     // Saved only once the hello is through: a refused hello (the owner blocked this helper) leaves dm unset, so pair resumes.
     const hello = await say(
       full,
-      `Hi, I'm ${full.agent.name} on ${hostname()}. I'll message you here when I need you. When I ask you something, reply yes or no with the code I send, like "yes kxqzm".`,
+      `Hi, I'm ${full.agent.name} on ${hostname().replace(/\.local$/, '')}. Claude Code on this Mac texts you here when it needs you. Answer a question with its code, like "yes kxqzm" or "no kxqzm". To answer one session, swipe-reply to its message.`,
     )
     saveProfile({ ...full, cursor: hello.id })
     await print(`Paired with ${full.owner.name} as "${full.agent.name}" on ${full.server}.\n\nNext: node ${CLI} hooks install`)

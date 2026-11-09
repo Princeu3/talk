@@ -6,7 +6,7 @@ import { homedir } from 'node:os'
 import path from 'node:path'
 import { setTimeout as pause } from 'node:timers/promises'
 import type { Message, MessageBody } from '../shared/types.ts'
-import { ask, asked, BARE, TYPED } from './ask.ts'
+import { ask, asked, noteOf, PLAIN, TYPED } from './ask.ts'
 import { CLI, dmKey, file, gate, history, hhmm, home, log, paired, patchProfile, react, read, readProfile, say, type Paired } from './talk.ts'
 
 export const SETTINGS = path.join(homedir(), '.claude', 'settings.json')
@@ -131,6 +131,7 @@ interface Input {
   last_assistant_message?: string
   tool_name?: string
   tool_input?: Record<string, unknown>
+  scratchpad_dir?: string
 }
 
 const TEN_MINUTES = 600_000
@@ -152,6 +153,15 @@ const live = (at: string, ms: number) => {
   }
 }
 
+// What an AskUserQuestion or a plan, saved by the permission hook, asks. Options get "- ", never numbers: a bare
+// "1" sent back from the phone would reach whichever session stops next, as chat, while this one waits at its dialog.
+type Question = { question: string; options: { label: string; description?: string }[] }
+function prompted(label: string, { tool, ti }: { tool: string; ti: { plan?: string; questions?: Question[] } }) {
+  if (tool === 'ExitPlanMode') return `${label} has a plan for you. Approve it at the Mac:\n${ti.plan!.slice(0, 600)}${ti.plan!.length > 600 ? '…' : ''}`
+  const qs = ti.questions!.map((q) => [q.question, ...q.options.map((o) => `- ${o.label}${o.description ? `: ${o.description.slice(0, 60)}` : ''}`)].join('\n'))
+  return `${label} has ${qs.length > 1 ? 'questions' : 'a question'} for you. Answer at the Mac:\n${qs.join('\n\n')}`
+}
+
 // Returns what to print on stdout: nothing, or the decision JSON.
 export async function hook(event: string, input: Input, expires?: number): Promise<string | void> {
   const profile = readProfile()
@@ -171,15 +181,22 @@ export async function hook(event: string, input: Input, expires?: number): Promi
     // Claude Code sends idle_prompt after 60 s without typing, so 60 s idle means the owner left before Claude finished. Unknown counts as away.
     const idle = idleSeconds()
     if (idle !== null && idle < (kind === 'idle_prompt' ? 60 : 120)) return log('notification', { kind, sent: false, why: 'keyboard' })
-    let text = `${label}: ${input.message ?? ''}`
-    // Cut on read too: an older talkline wrote up to 2,000 characters there.
-    if ((kind === 'idle_prompt' || kind === 'agent_completed') && fresh(session('last'), TEN_MINUTES)) text += '\n' + readFileSync(session('last'), 'utf8').slice(0, 500)
+    // A Talk reply can't reach a session waiting at the Mac, so the text says where to answer.
+    let text = `${label}${kind === 'agent_completed' ? ':' : ' needs you at the Mac:'} ${input.message ?? ''}`
+    if (kind === 'permission_prompt' && /AskUserQuestion|ExitPlanMode/.test(String(input.message)) && fresh(session('prompt'), TEN_MINUTES))
+      try {
+        text = prompted(label, JSON.parse(readFileSync(session('prompt'), 'utf8')))
+      } catch {} // a shape we don't know keeps the plain text
+    // Cut on read too, keeping the end: an older talkline wrote up to 2,000 characters there.
+    if ((kind === 'idle_prompt' || kind === 'agent_completed') && fresh(session('last'), TEN_MINUTES)) text += '\n' + readFileSync(session('last'), 'utf8').slice(-501)
     sent((await say(p, text, { quiet: kind === 'agent_completed' })).id)
     return log('notification', { kind, sent: true })
   }
 
   if (event === 'stop') {
-    if (typeof input.last_assistant_message === 'string') writeFileSync(session('last'), input.last_assistant_message.slice(0, 500), { mode: 0o600 })
+    // The end of the reply, where a closing question sits: its last 500 characters, from a word start.
+    const t = input.last_assistant_message
+    if (typeof t === 'string') writeFileSync(session('last'), t.length > 500 ? '…' + t.slice(-500).replace(/^\S*\s+/, '') : t, { mode: 0o600 })
     const lock = file('inbox.lock')
     try {
       writeFileSync(lock, String(process.pid), { flag: 'wx' })
@@ -201,7 +218,8 @@ export async function hook(event: string, input: Input, expires?: number): Promi
 
   // permission
   const tool = String(input.tool_name)
-  if (tool === 'AskUserQuestion' || tool === 'ExitPlanMode') return // these need the terminal
+  // These need the terminal. Keep the input, so the permission_prompt text can show the question.
+  if (tool === 'AskUserQuestion' || tool === 'ExitPlanMode') return writeFileSync(session('prompt'), JSON.stringify({ tool, ti: input.tool_input ?? {} }), { mode: 0o600 })
   const skip = (why: string) => log('notification', { kind: 'permission', sent: false, why })
   const t0 = Date.now()
   let idle = idleSeconds()
@@ -214,11 +232,32 @@ export async function hook(event: string, input: Input, expires?: number): Promi
   // 6,000 fits Talk's 64 KB message limit even when every char escapes to 6 bytes of JSON.
   const cut = (t: string) =>
     t.length <= 6000 ? t : `${t.slice(0, 3000)}\n… ${t.length - 6000} more characters not shown. If unsure, reply no and check at the Mac …\n${t.slice(-3000)}`
+  const dir = String(input.cwd ?? '')
+  // Display only: a yes approves the raw input, cut as before at 6,000 characters. /tmp/…/scratchpad is this
+  // session's scratchpad, and ~ your home, each only at the start of a path. ~ shows only in the question line:
+  // in a command or file content a quoted ~ stays a literal ~, so '~/x' would read as a harmless folder.
+  const at = (prefix: string) => new RegExp(`(?<=^|[\\s'"=:(])${prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=/|[\\s'";|&)]|$)`, 'g')
+  const pad = String(input.scratchpad_dir ?? '')
+  const scratch = (t: string) => (pad ? t.replace(at(pad), '/tmp/…/scratchpad') : t)
+  const tidy = (t: string) => scratch(t).replace(at(homedir()), '~')
+  // A value with a line break shows as a quoted JSON string, so it can't pass for another field or line.
+  // JSON.stringify leaves NEL, LS and PS raw, and the iPhone breaks lines on them.
+  const json = (v: unknown) => JSON.stringify(v).replace(/[\u0085\u2028\u2029]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`)
+  const one = (s: string) => (/[\r\n\u0085\u2028\u2029]/.test(s) ? json(s) : s)
+  const where = one(dir && target.startsWith(dir + '/') ? target.slice(dir.length + 1) : tidy(target))
+  const mark = (s: unknown, m: string) => String(s ?? '').split(/\r\n?|[\n\u0085\u2028\u2029]/).map((l) => m + l).join('\n') // a mark on every shown line
+  const fields = () => Object.entries(ti).map(([k, v]) => `${one(k)}: ${typeof v === 'string' ? one(v) : json(v)}`).join('\n')
   const [action, detail] =
-    tool === 'Bash' ? ['run a command', cut(String(ti.command ?? ''))]
-    : ['Edit', 'Write', 'MultiEdit', 'NotebookEdit'].includes(tool) ? [`edit ${input.cwd ? path.relative(input.cwd, target) : target}`, cut(JSON.stringify(ti))]
-    : tool === 'WebFetch' ? [`fetch ${ti.url}`]
-    : [`use ${tool}`, cut(JSON.stringify(ti))]
+    tool === 'Bash' ? [`run this command${ti.run_in_background ? ' in the background' : ''}${ti.dangerouslyDisableSandbox ? ' outside the sandbox' : ''}`, String(ti.command ?? '')]
+    : tool === 'Edit' ? [`edit ${where}`, `${mark(ti.old_string, '- ')}\n${mark(ti.new_string, '+ ')}${ti.replace_all ? '\n(every match)' : ''}`]
+    : tool === 'Write' ? [`write ${where}`, String(ti.content ?? '')]
+    : tool === 'MultiEdit' || tool === 'NotebookEdit' ? [`edit ${where}`, fields()]
+    : tool === 'WebFetch' ? [`fetch ${one(String(ti.url))}`, '']
+    : [`use ${tool.replace(/^mcp__(.+?)__/, '$1 ')}`, fields()]
+  // Only Bash's description is Claude's reason. An MCP tool's description field is content, shown with the fields.
+  const why = tool === 'Bash' ? String(ti.description ?? '').replace(/[\s\u0085]+/g, ' ').trim().slice(0, 120) : '' // \s misses NEL
+  // Claude Code 2.1.319 sets CLAUDE_CODE_SESSION_ATTENDED to "1" in interactive and desktop sessions, "0" in -p, background and daemon runs.
+  const waits = process.env.CLAUDE_CODE_SESSION_ATTENDED !== '0' // unset (older versions) counts as attended
   writeFileSync(session('pending'), String(process.pid))
   try {
     // Claude Code asks once, so wait here until 2 minutes without keyboard or mouse; touching the Mac first leaves it to the terminal.
@@ -226,21 +265,22 @@ export async function hook(event: string, input: Input, expires?: number): Promi
       await pause(2000)
       if (touchedSince(t0, (idle = idleSeconds()))) return skip('keyboard')
     }
-    const verdict = await ask(p, {
-      question: `${label}: Claude wants to ${action}`,
-      detail,
+    const { verdict, note } = await ask(p, {
+      question: `${label}: ${action}?${why ? `\nClaude says: ${tidy(why)}` : ''}`,
+      detail: cut(scratch(detail)),
       risk: 'high',
       urgent: true,
       ringAfter: 180,
       expires: (expires ?? 8) - (Date.now() - t0) / 60_000, // settles, close-out included, before Claude Code's 600 s hook timeout
       source: 'permission',
+      waits,
       atMac: touchedSince,
       posted: sent,
     })
-    if (verdict === 'keyboard' || verdict === 'cancelled') return // the terminal dialog takes it
+    if (verdict === 'keyboard' || verdict === 'cancelled' || (verdict === 'expired' && waits)) return // the terminal dialog takes it
     const decision =
       verdict === 'yes' ? { behavior: 'allow' }
-      : verdict === 'no' ? { behavior: 'deny', message: 'Denied on Talk' }
+      : verdict === 'no' ? { behavior: 'deny', message: note ? `Denied on Talk: ${note}` : 'Denied on Talk' }
       : { behavior: 'deny', message: 'No answer on Talk', interrupt: true } // stops Claude: each new try would ask and ring again
     return JSON.stringify({ hookSpecificOutput: { hookEventName: 'PermissionRequest', decision } })
   } finally {
@@ -251,23 +291,27 @@ export async function hook(event: string, input: Input, expires?: number): Promi
 const CAP = 9000 // Claude Code moves additionalContext over 10,000 chars to a file it doesn't ask Claude to read
 
 // The line Claude gets for an owner message, or '' for one that isn't for Claude: an answer to an ask
-// (its code typed, or a bare yes or no swiped at it, by the asks file), call logs and group events.
+// (its code typed, by the asks file, or a plain yes or no), call logs and group events.
 function shown(m: Message, b: MessageBody, asks: ReturnType<typeof asked>) {
   const text = String(b.text ?? '')
-  const code = TYPED.exec(text)?.[2].toLowerCase()
-  if (b.system || (code && asks.codes.has(code)) || (BARE.test(text) && asks.ids.has(Number(b.reply?.id)))) return ''
+  const typed = TYPED.exec(text)
+  const code = typed?.[2].toLowerCase()
+  // An answer, never chat: a known code that an ask took or that carries no note, or a plain yes or no. A plain
+  // word is a swipe at a question or a reminder, or, with no swipe, for no session at all.
+  if (b.system || (code && asks.codes.has(code) && (asks.ids.has(m.id) || !noteOf(typed![3]))) || (PLAIN.test(text) && (!b.reply || asks.ids.has(Number(b.reply.id))))) return ''
   const said = text || (b.files?.length ? '(sent a file, not shown)' : '')
   if (!said) return ''
   const quote = b.reply ? `(reply to "${String(b.reply.preview ?? '').replace(/\s+/g, ' ')}") ` : ''
+  const age = (Date.now() - m.createdAt) / 3_600_000 // hours
   // Indented continuation lines can't pass for messages of their own.
-  return `[${hhmm(m.createdAt)}] ${b.forwarded ? '(forwarded; written by someone else) ' : ''}${quote}${said}`.replaceAll('\n', '\n  ')
+  return `[${hhmm(m.createdAt)}${age > 6 ? `, ${Math.round(age)} h ago` : ''}] ${b.forwarded ? '(forwarded; written by someone else) ' : ''}${quote}${said}`.replaceAll('\n', '\n  ')
 }
 
 // The Stop hook's inbox: the owner's messages since the cursor, handed to Claude as context, oldest
 // first. A reply to a message another session sent waits in that session's .held file for its Stop.
 async function inbox(p: Paired, sid: string, label: string) {
   const key = await dmKey(p)
-  const head = `${p.owner.name} sent these messages on Talk, from ${p.owner.name}'s own account (end-to-end encrypted), while Claude Code session "${label}" worked. Other Claude Code sessions on this Mac share this inbox, so a message that isn't a reply may be meant for another session:`
+  const head = `${p.owner.name} sent these messages on Talk, from ${p.owner.name}'s own account (end-to-end encrypted), while Claude Code session "${label}" worked. To answer on Talk, run node "${CLI}" notify "<text>", or ask "<question>?" for a yes or no. Other Claude Code sessions on this Mac share this inbox, so a message that isn't a reply may be meant for another session:`
   const lines: { id: number; line: string }[] = []
   let size = head.length
   // Takes the line if it fits under CAP. The first always does, cut if it must be; the rest wait for the next Stop.
@@ -283,33 +327,33 @@ async function inbox(p: Paired, sid: string, label: string) {
   const held: { id: number; line: string }[] = existsSync(heldAt) ? readFileSync(heldAt, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []
   let taken = 0
   while (taken < held.length && fit(held[taken].id, held[taken].line)) taken++
-  // ✅ replaces the 👀 on what the last Stop handed over, while the new messages load. Talk unreachable: the rest wait for the next Stop.
-  const handed = p.handed ?? []
-  const [missed, news] = await Promise.all([
-    Promise.all(handed.map((id) => react(p, key, id, '✅').then(() => [], () => [id]))).then((x) => x.flat()),
-    taken === held.length ? history(p, p.cursor ?? 0) : [],
-  ])
-  if (handed.length) patchProfile({ handed: missed })
-  if (missed.length) throw new Error(`Could not reach ${p.server}.`)
+  const news = taken === held.length ? await history(p, p.cursor ?? 0) : []
 
   const bodies = await Promise.all(news.map((m) => gate(p, key, m)))
   const asks = asked()
-  // shortcut: a reply means reading every session's .sent file; prune old sessions if that ever shows.
+  // shortcut: a reply or a code means reading every session's .sent file; prune old sessions if that ever shows.
   const sender = new Map<number, string>()
-  if (bodies.some((b) => b?.reply))
+  if (bodies.some((b) => b?.reply || TYPED.test(String(b?.text ?? ''))))
     for (const f of readdirSync(file('sessions')))
       if (f.endsWith('.sent')) for (const id of readFileSync(file(`sessions/${f}`), 'utf8').split('\n')) if (id) sender.set(Number(id), f.slice(0, -5))
   const holds: { to: string; id: number; line: string }[] = []
+  const puzzled: number[] = [] // ❓: what no session takes
   let cursor = p.cursor ?? 0
   for (const [i, m] of news.entries()) {
     const body = bodies[i]
     const line = body ? shown(m, body, asks) : ''
-    const to = body?.reply && sender.get(body.reply.id)
-    if (line && to && to !== sid) holds.push({ to, id: m.id, line })
+    if (body && !body.reply && PLAIN.test(String(body.text ?? ''))) puzzled.push(m.id)
+    // A note on a known code goes to the session that asked, whatever it replies to.
+    // shortcut: a Stop that reads a note the moment before its open ask takes it holds it too: Claude gets it twice, and 👀 replaces the ❌.
+    const ids = asks.codes.get(TYPED.exec(String(body?.text ?? ''))?.[2].toLowerCase() ?? '')
+    const to = ids ? ids.map((id) => sender.get(id)).find(Boolean) : body?.reply && sender.get(body.reply.id)
+    if (line && ids && !to) puzzled.push(m.id) // no session asked it: a CLI ask run outside Claude Code
+    else if (line && to && to !== sid) holds.push({ to, id: m.id, line })
     else if (line && !fit(m.id, line)) break
     cursor = m.id // past the agent's own messages too: the DM has two members, and ids only grow
   }
 
+  const marking = Promise.all(puzzled.map((id) => react(p, key, id, '❓').catch(() => {}))) // with the 👀, not after: Stop has 3 s per request and 5 s in all
   if (lines.length) {
     // The first 👀 alone, before anything is saved: 403 means the owner blocked the agent, so nothing more reaches Claude.
     const status = await react(p, key, lines[0].id, '👀')
@@ -322,10 +366,11 @@ async function inbox(p: Paired, sid: string, label: string) {
     await Promise.all(lines.slice(1).map((l) => react(p, key, l.id, '👀').catch(() => {})))
     await read(p, cursor).catch(() => {})
   }
+  await marking
   for (const h of holds) appendFileSync(file(`sessions/${h.to}.held`), JSON.stringify({ id: h.id, line: h.line }) + '\n', { mode: 0o600 })
   if (taken < held.length) writeFileSync(heldAt, held.slice(taken).map((h) => JSON.stringify(h) + '\n').join(''), { mode: 0o600 })
   else rmSync(heldAt, { force: true })
-  patchProfile({ cursor, handed: lines.map((l) => l.id) })
+  patchProfile({ cursor })
   if (!lines.length) return
   log('inbox', { count: lines.length })
   return JSON.stringify({ hookSpecificOutput: { hookEventName: 'Stop', additionalContext: [head, ...lines.map((l) => l.line)].join('\n') } })

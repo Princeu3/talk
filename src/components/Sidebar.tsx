@@ -28,8 +28,8 @@ export function Avatar({ name, size = 44 }: { name: string; size?: number }) {
   )
 }
 
-// Next to a helper's name.
-export const AiBadge = () => <span className="ml-1.5 shrink-0 rounded-full bg-fill px-1.5 py-px text-xs font-semibold text-on-fill">AI</span>
+// Next to a helper's name. Hidden from screen readers: helper names already end in "AI".
+export const AiBadge = () => <span aria-hidden className="ml-1.5 shrink-0 rounded-full bg-fill px-1.5 py-px text-xs font-semibold text-on-fill">AI</span>
 
 export const iconButton = 'pressable flex h-11 w-11 shrink-0 items-center justify-center rounded-full text-accent hover:bg-raised'
 

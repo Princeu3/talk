@@ -647,12 +647,17 @@ export default function Chat({ talk, convId, onBack, onCall, onJoin, onAddPeople
             </p>
           </div>
         </button>
-        <button onClick={() => onCall?.('audio')} disabled={!onCall} aria-label="Voice call" className={iconButton}>
-          <Phone size={22} />
-        </button>
-        <button onClick={() => onCall?.('video')} disabled={!onCall} aria-label="Video call" className={iconButton}>
-          <Video size={24} />
-        </button>
+        {/* a helper takes no calls */}
+        {!helper && (
+          <>
+            <button onClick={() => onCall?.('audio')} disabled={!onCall} aria-label="Voice call" className={iconButton}>
+              <Phone size={22} />
+            </button>
+            <button onClick={() => onCall?.('video')} disabled={!onCall} aria-label="Video call" className={iconButton}>
+              <Video size={24} />
+            </button>
+          </>
+        )}
       </header>
       {conv.call && (
         <button onClick={() => onJoin(convId)} className="flex min-h-11 items-center gap-2.5 border-t border-line bg-surface px-4 py-1.5 text-left text-sm">

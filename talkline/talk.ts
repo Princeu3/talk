@@ -22,7 +22,6 @@ export interface Profile {
   owner?: { id: string; name: string; pubkey: string } // pinned at pairing: the id and key from the link
   dm?: { id: string; key: string } // raw DM key, base64url
   cursor?: number // Stop-hook inbox: the last message id in the DM already handled
-  handed?: number[] // inbox messages reacted 👀 that get ✅ at the next Stop
   loginFailedAt?: number // when signing in again last got 401 (the account is gone)
 }
 export type Paired = Profile & Required<Pick<Profile, 'owner' | 'dm'>>

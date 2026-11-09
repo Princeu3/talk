@@ -274,7 +274,12 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
       setTyper(msg.convId, msg.senderId, false)
       const mine = msg.senderId === meRef.current?.user.id
       const seen = (activeRef.current === msg.convId && !document.hidden) || !!d.content?.call?.ms || d.system
-      setMe((m) => m && { ...m, conversations: bump(m.conversations, msg, !mine && !seen) })
+      setMe((m) => m && {
+        ...m,
+        conversations: bump(m.conversations, msg, !mine && !seen),
+        // Settings > Agents shows when each of my helpers last sent a message
+        agents: m.agents?.map((a) => (a.id === msg.senderId ? { ...a, activeAt: msg.createdAt } : a)),
+      })
     }
     const onReaction = async ({ messageId, convId, userId, body }: { messageId: number; convId: string; userId: string; body: string | null }) => {
       const emoji = body && (await openReaction((await keyFor(convId)).key, convId, messageId, { userId, body }))
@@ -519,7 +524,7 @@ export function useTalk(privateKey: CryptoKey, onSignedOut: () => void) {
     const s = c.b64(crypto.getRandomValues(new Uint8Array(32)))
     // shortcut: only the browser that made the link can Allow, and unused entries stay; sync the secret across devices if owners link on one and allow on another.
     localStorage.setItem(`talk:agent-link:${code}`, s)
-    return { link: `${location.origin}/?agent=${code}#o=${m.user.id}&k=${k}&s=${s}`, expiresAt }
+    return { code, link: `${location.origin}/?agent=${code}#o=${m.user.id}&k=${k}&s=${s}`, expiresAt }
   }
 
   // Allow: the DM is the approval. Its key is wrapped for the helper key whose proof just checked and for

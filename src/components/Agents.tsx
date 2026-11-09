@@ -10,6 +10,9 @@ import { Pause, Play } from './icons.tsx'
 
 type Run = (f: () => Promise<unknown>) => void
 
+// The pair hint, one argument a piece: a line breaks only between arguments, never inside a flag or the quoted name.
+const PAIR = ['node', 'talkline/cli.ts', 'pair', `'<link>'`, '--name', `'Claude AI'`]
+
 // Deny and Remove are one call. The server's sync reloads `me`, which drops the row.
 async function remove(a: Agent) {
   await api('DELETE', `/api/agents/${a.id}`)
@@ -71,8 +74,14 @@ function Helper({ talk, a, dm, busy, run }: { talk: Talk; a: Agent; dm: Conversa
   const small = 'pressable flex min-h-9 items-center gap-1.5 rounded-full bg-raised px-3.5 text-sm font-semibold disabled:opacity-40'
   return (
     <li className="py-2">
+      {/* a long host name gives way, so the time always shows */}
       <Who a={a}>
-        {dm.muted ? 'Paused · can’t buzz you' : `${a.where} · ${a.activeAt ? `last message ${shortTime(a.activeAt)}` : 'no messages yet'}`}
+        {dm.muted ? 'Paused · can’t buzz you' : (
+          <span className="flex">
+            <span className="truncate">{a.where}</span>
+            <span className="shrink-0 whitespace-pre">{` · ${a.activeAt ? `last message ${shortTime(a.activeAt)}` : 'no messages yet'}`}</span>
+          </span>
+        )}
       </Who>
       <div className="mt-2 flex gap-2 pl-13">
         <button onClick={() => run(() => talk.setMine(dm.id, { muted: !dm.muted }))} disabled={busy} className={small}>
@@ -87,10 +96,14 @@ function Helper({ talk, a, dm, busy, run }: { talk: Talk; a: Agent; dm: Conversa
 export default function Agents({ talk }: { talk: Talk }) {
   const me = talk.me!
   const agents = me.agents ?? []
-  const [made, setMade] = useState<{ link: string; expiresAt: number }>()
+  const [made, setMade] = useState<{ code: string; link: string; expiresAt: number }>()
   const [copied, setCopied] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  // The link works once: its box goes when its helper shows up, pending or allowed.
+  useEffect(() => {
+    if (made && agents.some((a) => a.invite === made.code)) setMade(undefined)
+  }, [made, agents])
   const run: Run = async (f) => {
     setBusy(true)
     setError('')
@@ -135,7 +148,8 @@ export default function Agents({ talk }: { talk: Talk }) {
           </div>
           <p className="mt-2 text-sm text-mut">Works once, until {new Date(made.expiresAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}.</p>
           <p className="mt-1 text-sm text-mut">
-            On your Mac: <span className="break-all font-mono">{`node talkline/cli.ts pair '<link>' --name 'Claude AI'`}</span>
+            On your Mac:{' '}
+            <span className="font-mono">{PAIR.flatMap((w, i) => [i ? ' ' : '', <span key={w} className="whitespace-nowrap">{w}</span>])}</span>
           </p>
         </>
       )}

@@ -620,6 +620,7 @@ io.on('connection', (socket) => {
     for (const u of to) if (u !== me && !muted.has(u))
       notifyIfAway(io, u, { title: sender, body: 'New message', convId: p.convId }, {
         apns: { type: 'message', convId: p.convId, messageId: message.id, ...(b.level && { level: b.level }) },
+        always: !!owner,
       })
   })
 
