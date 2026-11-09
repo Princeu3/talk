@@ -218,13 +218,18 @@ app.delete('/api/me', (req, res) => {
     ]) db.prepare(sql).run(req.userId)
     // shortcut: attachment blobs stay on disk (sealed, now unreachable); sweep orphans if storage matters.
     db.prepare(`update users set name = id, auth_hash = '', deleted_at = ?, tz = null where id = ?`).run(Date.now(), req.userId)
+    // Their helpers go too, as Remove does, in the same transaction: a failed delete leaves none orphaned.
+    db.prepare(`update users set name = id, auth_hash = '', deleted_at = ? where owner_id = ? and deleted_at is null`).run(Date.now(), req.userId)
     db.exec('commit')
   } catch (e) {
     db.exec('rollback')
     throw e
   }
   io.in(`user:${req.userId}`).disconnectSockets(true)
-  for (const h of helpers) removeAgent(h) // their helpers go too, as Remove does
+  for (const h of helpers) {
+    calls.hangUp(h)
+    io.in(`user:${h}`).disconnectSockets(true)
+  }
   sync([...others])
   clearSession(res)
   res.json({ ok: true })

@@ -8,6 +8,7 @@ import { createServer } from 'node:http'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { io as connect, type Socket } from 'socket.io-client'
 import * as c from '../src/lib/crypto.ts'
 import { blocked, parseHead } from '../server/unfurl.ts'
@@ -727,10 +728,19 @@ test('remove: locks out in under a second, keeps the chat', async () => {
   assert.equal((await api(again, 'GET', '/api/me')).status, 401)
   assert.deepEqual((await me(nora)).agents, [])
 
-  // deleting an owner's account removes their helpers
+  // deleting an owner's account removes their helpers, in one transaction: when a helper's write
+  // fails (a full disk, say), the owner keeps the account and can try again
   const olive = await register('Olive', await invite(alice))
   const h2 = await helper(olive, 'Orbit AI')
   await allow(olive, h2)
+  const file = new DatabaseSync(path.join(dataDir, 'talk.db'))
+  file.exec(`create trigger fail_helper before update of deleted_at on users when old.owner_id is not null
+             begin select raise(abort, 'test: injected write failure'); end`)
+  assert.equal((await api(olive, 'DELETE', '/api/me', { auth: olive.ident.auth })).status, 500)
+  file.exec('drop trigger fail_helper')
+  file.close()
+  assert.equal((await api(olive, 'GET', '/api/me')).status, 200)
+  assert.equal((await api(h2, 'GET', '/api/me')).status, 200)
   const s2 = await socket(h2)
   const gone = next(s2, 'disconnect')
   assert.equal((await api(olive, 'DELETE', '/api/me', { auth: olive.ident.auth })).status, 200)
