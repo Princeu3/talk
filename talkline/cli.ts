@@ -147,8 +147,7 @@ async function pair(link: string | undefined, owner: string | undefined, name: s
     dm = { id: conv.id, key: b64((await unwrapConvKey(conv.wrappedKey, ident.privateKey, by.pubkey, conv.id, agentId)).raw) }
   } else if (r.status !== 200) throw new Error(`Could not open a chat with ${o.name}: ${r.data?.error ?? r.status}`)
   const full: Paired = { ...p, owner: { id: o.id, name: o.name, pubkey: o.pubkey }, dm }
-  saveProfile(full)
-
+  // Saved only once the hello is through: a failed hello leaves the owner unset, so pair can resume.
   const hello = await say(
     full,
     `Hi, I'm ${full.agent.name} on ${hostname()}. I'll message you here when I need you. When I ask you something, reply yes or no with the code I send, like "yes kxqzm".`,

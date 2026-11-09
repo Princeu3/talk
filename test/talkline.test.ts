@@ -259,6 +259,13 @@ test('pair: resumes after a wrong owner name, prints both safety codes, says hel
   assert.equal(r.code, 3, r.stderr)
   assert.match(r.stderr, /odie all match ÉLODIE\. Run pair again with the exact name\./)
 
+  // A hello Talk refuses (Prince blocked the agent) leaves the owner unset, so the next run resumes.
+  await api(prince, 'PUT', `/api/blocks/${saved.agent.id}`)
+  r = await cli(['pair', link, '--owner', 'prince'])
+  assert.equal(r.code, 3, r.stderr)
+  assert.equal(profile().owner, undefined, 'no owner saved before the hello')
+  await api(prince, 'DELETE', `/api/blocks/${saved.agent.id}`)
+
   // The invite is used up, so this only passes by resuming the saved profile.
   r = await cli(['pair', link, '--owner', 'prince'])
   assert.equal(r.code, 0, r.stderr)
