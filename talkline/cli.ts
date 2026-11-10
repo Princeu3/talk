@@ -10,7 +10,7 @@ import { b64, deriveIdentity, safetyCode, unwrapConvKey } from '../src/lib/crypt
 import type { Me } from '../shared/types.ts'
 import { ask, cancels } from './ask.ts'
 import { hook, idleSeconds, ourHooks, readSettings, SETTINGS, setHooks } from './hooks.ts'
-import { api, call, CLI, connect, file, limits, log, noteSent, paired, patchProfile, readProfile, REMOVED, saveProfile, say, sessionId, sessionKey, type Paired } from './talk.ts'
+import { api, call, CLI, connect, deepgramKey, file, limits, log, noteSent, paired, patchProfile, readProfile, REMOVED, saveProfile, say, sessionId, sessionKey, type Paired } from './talk.ts'
 
 const PAIR = `pair '<agent link>' [--name "Claude AI"]   (make the link in Talk: Settings > Agents)`
 const USAGE = `Usage: node ${CLI} <command>
@@ -253,6 +253,20 @@ async function doctor(settings: string) {
     if (v === 'always' || v === 'never') return `TALKLINE_AWAY=${v}`
     const idle = idleSeconds()
     return idle === null ? 'unknown: notifications count you as away, permission prompts stay in the terminal' : `${Math.round(idle)} s`
+  })
+  // Never prints the key: deepgramKey() refuses one an error message would echo.
+  await check('voice', async () => {
+    const key = deepgramKey()
+    const env = !!process.env.DEEPGRAM_API_KEY
+    const where = env ? 'DEEPGRAM_API_KEY' : file('deepgram')
+    if (!key) {
+      if (env || existsSync(file('deepgram'))) throw new Error(`the Deepgram key in ${where} isn't one line of letters, digits and symbols`)
+      return 'off: no Deepgram key, so a ring you pick up posts the question again below'
+    }
+    const mode = env ? 0o600 : statSync(file('deepgram')).mode & 0o777
+    if (mode !== 0o600) throw new Error(`${file('deepgram')} has mode ${mode.toString(8)}, want 600`)
+    await (await import('./voice.ts')).tts(key, 'ok') // loads werift; Deepgram takes the key
+    return `on (${where})`
   })
   await check('hooks', () => {
     const events = [...new Set(ourHooks(readSettings(settings)).map((h) => h.event))]

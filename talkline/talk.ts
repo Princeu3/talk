@@ -113,6 +113,16 @@ export const sessionKey = (sid: string) => mcpMarker()?.key || sid
 // The permission relay (4.6): a channel session's prompts reach the owner through its talkline mcp, not the
 // PermissionRequest hook. TALKLINE_RELAY=0 turns it off, for both.
 export const RELAY = process.env.TALKLINE_RELAY !== '0'
+// Voice: the Deepgram key, from the env, else ~/.talkline/deepgram. Never logged, printed or sent to Talk.
+// One token of printable ASCII or none: fetch and WebSocket put a bad header value, key and all, in their error message.
+export const deepgramKey = () => {
+  let raw = ''
+  try {
+    raw = process.env.DEEPGRAM_API_KEY || readFileSync(file('deepgram'), 'utf8')
+  } catch {} // none, or unreadable (a folder, mode 000): no voice, the ring works as today, and doctor flags it
+  const key = raw.trim()
+  return /^[\x21-\x7e]+$/.test(key) ? key : undefined
+}
 
 // --- HTTP ---
 
@@ -169,7 +179,7 @@ export async function api<T = unknown>(p: Profile, method: string, url: string, 
 
 // --- the socket ---
 
-// Resolves once connected. Calls to the agent, from anyone, are declined at once: talkline has no voice,
+// Resolves once connected. Calls to the agent, from anyone, are declined at once: talkline only calls out (Phase 3a),
 // and a ringing call would keep the agent's own ring from starting. `onDead` hears of a session Talk
 // refuses or drops after the connect, which socket.io won't retry. socket.io-client loads here, so Stop runs skip it.
 export async function connect(p: Profile, onDead?: (e: Error) => void): Promise<Socket> {

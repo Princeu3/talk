@@ -1,6 +1,6 @@
 # talkline
 
-talkline lets Claude Code reach you on Talk. It pairs as your helper: a Talk account that only you can see or message, named "Claude AI" unless you pick another name. It texts you, asks you yes/no questions, and can ring your phone once. Everything is end-to-end encrypted with Talk's own crypto (`src/lib/crypto.ts`).
+talkline lets Claude Code reach you on Talk. It pairs as your helper: a Talk account that only you can see or message, named "Claude AI" unless you pick another name. It texts you, asks you yes/no questions, and can ring your phone once. Its messages are end-to-end encrypted with Talk's own crypto (`src/lib/crypto.ts`). With a Deepgram key, the ring talks, and what you say on that call goes to Deepgram: see [Voice](#voice).
 
 Since Phase 1 the helper has its own key and an AI badge in Talk, and you can pause or remove it there. Phase 2 adds `talkline mcp`, Talk tools for a Claude Code session. Started with `claudet` (see [MCP and channel](#mcp-and-channel)), it is also a channel: your messages reach the session as you send them, and its permission prompts come to Talk.
 
@@ -51,7 +51,7 @@ Limits of the hooks:
 - The hooks run in every Claude Code session on this Mac, `claude -p` scripts included. A "waiting" or "done" text includes the end of Claude's last reply (500 characters). An AskUserQuestion question shows with its options, and a plan shows its start; you answer both at the Mac.
 - If you answer a permission prompt where this Mac's keyboard can't see it (Remote Control, or SSH with `TALKLINE_AWAY=always`), its Talk question stays open until it expires and may still ring. Ignore it.
 
-`doctor` checks the setup: profile, server, session, owner, chat, safety codes, idle time, hooks and the paths they run. A removed helper fails the session check.
+`doctor` checks the setup: profile, server, session, owner, chat, safety codes, idle time, voice, hooks and the paths they run. A removed helper fails the session check.
 
 ## notify and ask
 
@@ -62,7 +62,7 @@ node talkline/cli.ts ask <question> [--detail <text>] [--risk low|high] [--urgen
 
 `notify` sends a message; `--quiet` sends it without a push. Run from Claude Code, `notify` and `ask` start with the session name, and a swipe-reply goes back to that session.
 
-`ask` sends the question with a five-letter code and waits. Reply `yes <code>` or `no <code>`, or tap Approve or Deny under the question on the web; a typo fixed with Edit counts. `Yes, <code>.` counts too. A note after `no <code>` reaches Claude: `ask` prints it on a second line. A yes can't carry one: `yes <code>` with anything after it gets ❓. A swipe-reply `no` to the question, or to a reminder under it, always counts. On a low-risk ask, a swipe-reply `yes` or a 👍 on the question counts too; on a high-risk ask (the default) they get a reminder that the code is needed. A yes or no with no code that isn't a swipe-reply gets ❓ and one reply with the code to use. The question closes after `--expires` minutes (default 10, at most 14). `--urgent` sends the question as time-sensitive, and rings your phone once after `--ring-after` seconds (default 180) if you haven't read it, within Talk's ring rules. Pick up and the question comes back below the call.
+`ask` sends the question with a five-letter code and waits. Reply `yes <code>` or `no <code>`, or tap Approve or Deny under the question on the web; a typo fixed with Edit counts. `Yes, <code>.` counts too. A note after `no <code>` reaches Claude: `ask` prints it on a second line. A yes can't carry one: `yes <code>` with anything after it gets ❓. A swipe-reply `no` to the question, or to a reminder under it, always counts. On a low-risk ask, a swipe-reply `yes` or a 👍 on the question counts too; on a high-risk ask (the default) they get a reminder that the code is needed. A yes or no with no code that isn't a swipe-reply gets ❓ and one reply with the code to use. The question closes after `--expires` minutes (default 10, at most 14). `--urgent` sends the question as time-sensitive, and rings your phone once after `--ring-after` seconds (default 180) if you haven't read it, within Talk's ring rules. Pick up and, with a Deepgram key, the helper reads you the question and takes a spoken answer (see [Voice](#voice)). Without one, or if voice fails, the question comes back below the call.
 
 | Answer  | Prints              | Exit code |
 | ------- | ------------------- | --------- |
@@ -75,6 +75,38 @@ node talkline/cli.ts ask <question> [--detail <text>] [--risk low|high] [--urgen
 Stopped by Ctrl+C or a signal, `ask` hangs up a ring and marks the question Cancelled first.
 
 Only your own account can answer. Messages from anyone else, or that fail to decrypt, are ignored. A code never repeats in your chat, and talkline takes each of your messages once, so the server can't replay an old yes.
+
+## Voice
+
+With a Deepgram key, the ring of an urgent question talks: pick up, and the helper reads you the question and takes your yes or no.
+
+Set it up:
+
+1. Get an API key at deepgram.com. New accounts get $200 of credit.
+2. Copy it, then run `pbpaste > ~/.talkline/deepgram && chmod 600 ~/.talkline/deepgram`. `DEEPGRAM_API_KEY` in the env works too, but the file is better: `claudet`'s `Read(~/.talkline/**)` deny rule keeps Claude's file tools off it.
+3. `node talkline/cli.ts doctor` shows `voice: on`.
+
+The call:
+
+- The helper says "Hi, this is Claude AI, an AI helper, not a person. Deepgram transcribes this call." (with its own name), then reads the question. It never reads the details, and says an `http://` or `https://` address as its site only.
+- A low-risk question with no details: say yes or no.
+- A high-risk question, or one with details: say no, or open the chat and say yes and the six digits the helper posts under the question as the call starts. They're new each call. Say them one at a time; they can come in a second breath after the yes.
+- Yes is yes, yeah, yep, yup, sure, approve, approved, "go ahead" or "do it". No is no, nope, nah, deny, denied, don't, stop, cancel or "do not". A no wins, even said just after a yes. A yes with anything else in it ("yes, but not on prod"), or said while the helper talks, isn't taken.
+- If the helper doesn't catch an answer, it asks once more. Then it says goodbye, and the question comes back below the call. An answer in the chat ends the call.
+- Afterwards the chat shows the call and a note of what the helper heard.
+- If voice fails at any step (Deepgram refuses the key, the call doesn't connect in 15 s), the ring works as it does without a key.
+
+Your voice goes from your phone to this Mac over the encrypted call, then to Deepgram, which turns it into text; it starts after the helper says Deepgram transcribes the call. The question's text goes to Deepgram to be spoken, with any `http://` or `https://` address cut to its site. The details and the typed code never go there. The six digits reach Deepgram when you say them; they work for that call only.
+
+talkline asks Deepgram not to keep any of it (`mip_opt_out`). That doubles Deepgram's price, to about 4 cents a call (listed: Flux $0.0077 a minute, Aura-2 $0.030 per 1,000 characters). `events.jsonl` holds outcomes and timings only.
+
+Limits:
+
+- On a low-risk question with no details, anyone who answers your locked phone can say yes.
+- English only, and phone-line (8 kHz) sound.
+- 2 minutes a call, and you can't interrupt the helper.
+- No TURN relay for the helper: a Mac network that blocks UDP can't connect, and the question comes back below the call.
+- Calls to the helper are still declined.
 
 ## MCP and channel
 
@@ -176,6 +208,7 @@ All in `~/.talkline` (or `$TALKLINE_HOME`), a folder only you can open (0700):
 - `events.jsonl` (0600): one line per event, never message text. `stats` counts the last 7 days.
 - `asks` (0600): the ids and codes of all your questions, the reminders they sent and the answers they took, so a code never repeats and your answers stay away from Claude. Other lines tag relay codes, and mark closed questions and sent "Too late" replies.
 - `seen` (0600): an id for each of your messages, so talkline takes each one once.
+- `deepgram` (0600, optional): your Deepgram API key, one line.
 - `sessions/`: per Claude Code session, the end of its last reply (added to notifications), its last AskUserQuestion or plan, the ids of what it sent you, your messages waiting for it (`.held`, a JSON record each: id, time, text, what it quotes, and whether it's forwarded), and a marker while a permission question waits. Also `.taking.<pid>`, lines a process is handing to Claude, so a crash loses none; `.ended`, the name of a session whose talkline mcp exited; and `.delivered` and `.nochannel`, the channel's delivery check. While a talkline mcp runs, its session's files go under the session it started with, which outlives `/clear`.
 - `mcp/`: a marker per running talkline mcp, named after its Claude Code process: its session, name and mode, and when you last traded messages.
 - `wentto`: its time spaces out the "Went to" replies.
@@ -191,7 +224,7 @@ Anyone who can read `profile.json` can act as the helper.
 - Time-sensitive alerts need the Phase 4 iPhone build (12 or later). Until then, the iPhone shows them as normal ones.
 - The server sees the helper's name and its Mac's host name, your time zone, when it last sent a message, and which messages are questions or urgent. It never sees what they say.
 - The web app comes from the server, so a server that serves altered code could approve for you. Allow in the Phase 4 iPhone build removes that.
-- No voice: calls to the helper are declined.
+- Calls to the helper are declined. It only calls you.
 - A Talk tab left open on the helper's chat marks questions read, so the phone won't ring. Close or hide Talk on the Mac when you leave.
 - `unpair --yes` removes the helper, as Remove does, and deletes the profile. Run `hooks uninstall` to remove the hooks.
 - A Phase 0 profile (from `pair` with an invite link) keeps working: everyone on the server can see and message that helper, and `doctor` says so. To upgrade, run `unpair --yes`, then link a new helper. For a Phase 0 profile, `unpair --yes` deletes the old helper's messages from your chat.
