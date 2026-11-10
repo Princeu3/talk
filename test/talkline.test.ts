@@ -6,14 +6,18 @@ import { test, describe, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
 import { appendFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, truncateSync, utimesSync, writeFileSync } from 'node:fs'
+import { createServer as httpServer } from 'node:http'
 import { createConnection, createServer, type AddressInfo, type Socket as Conn } from 'node:net'
 import { hostname, tmpdir } from 'node:os'
 import path from 'node:path'
 import { setTimeout as pause } from 'node:timers/promises'
 import { io as connect, type Socket } from 'socket.io-client'
+import { MediaStreamTrack, RTCPeerConnection, RtpHeader, RtpPacket } from 'werift'
+import { WebSocketServer, type WebSocket as Flux } from 'ws' // shortcut: ws comes with socket.io (engine.io); list it in devDependencies if that ever changes.
 import * as c from '../src/lib/crypto.ts'
 import { closedAsk } from '../src/lib/format.ts'
 import type { Agent, CallRing, Me, Message, MessageBody, ReactionBody, User } from '../shared/types.ts'
+import { verdict, type Signal } from '../talkline/voice.ts'
 
 const PORT = 7100 + Math.floor(Math.random() * 900) // skips fetch's bad ports 6000 to 6697
 const BASE = `http://localhost:${PORT}`
@@ -40,6 +44,50 @@ let dm: string // Prince's DM with the agent
 let dmKey: CryptoKey
 let hello: Message // the agent's first message
 let notified: Message // a text the notification hook sent for session n1
+
+// A fake Deepgram on this machine: Aura-2's speak, which says every line as the same 0.2 s of loud µ-law (short
+// keeps tests fast), and a Flux socket the test speaks into with dg.turn.
+const CLIP = Buffer.from(Array.from({ length: 1600 }, (_, i) => (i % 2 ? 0xa0 : 0x20)))
+const loudIn = (b: Buffer) => b.some((x) => x !== 0xff && x !== 0x7f) // µ-law silence is 0xFF or 0x7F
+const dg = {
+  spoke: [] as { text: string; auth?: string; url: string }[], // each speak request
+  flux: undefined as Flux | undefined,
+  fluxAuth: '',
+  fluxUrl: '',
+  fluxLoud: 0, // audio frames that held sound
+  seq: 0,
+  reset(): void {
+    Object.assign(dg, { spoke: [], flux: undefined, fluxAuth: '', fluxUrl: '', fluxLoud: 0 })
+  },
+  send(m: object): void {
+    dg.flux!.send(JSON.stringify({ ...m, sequence_id: ++dg.seq }))
+  },
+  // A turn as Flux reports one: it starts, and 50 ms later ends with what was said.
+  turn(t: string): void {
+    const n = dg.seq
+    dg.send({ type: 'TurnInfo', event: 'StartOfTurn', turn_index: n, transcript: '', words: [], end_of_turn_confidence: 0 })
+    setTimeout(() => dg.send({ type: 'TurnInfo', event: 'EndOfTurn', turn_index: n, transcript: t, words: [], end_of_turn_confidence: 0.9, trigger: 'model' }), 50)
+  },
+  // The socket stays open: the worst case.
+  fatal(): void {
+    dg.send({ type: 'Error', code: 'TEST', description: 'fake failure' })
+  },
+}
+const deepgram = httpServer((req, res) => {
+  let body = ''
+  req.on('data', (d) => (body += d))
+  req.on('end', () => {
+    dg.spoke.push({ text: JSON.parse(body).text, auth: req.headers.authorization, url: req.url! })
+    if (req.headers.authorization === 'Token dg-test-key') return void res.writeHead(200, { 'content-type': 'audio/basic' }).end(CLIP)
+    res.writeHead(401, { 'content-type': 'application/json' }).end(JSON.stringify({ err_code: 'INVALID_AUTH', err_msg: 'Invalid credentials.', request_id: 't' }))
+  })
+})
+const listening = new WebSocketServer({ server: deepgram, path: '/v2/listen' }).on('connection', (ws, req) => {
+  Object.assign(dg, { flux: ws, fluxAuth: req.headers.authorization, fluxUrl: req.url })
+  ws.send(JSON.stringify({ type: 'Connected', request_id: 't', sequence_id: 0 }))
+  ws.on('message', (d, binary) => binary && loudIn(d as Buffer) && dg.fluxLoud++)
+})
+let VOICE: Record<string, string> // a talkline run's env with the fake's key and origin
 
 // Waits for the server's own "talk on" line: another server on the port would answer /healthz too.
 async function startServer() {
@@ -75,6 +123,8 @@ async function reconnected() {
 }
 
 before(async () => {
+  await new Promise<void>((r) => deepgram.listen(0, r))
+  VOICE = { DEEPGRAM_API_KEY: 'dg-test-key', DEEPGRAM_ORIGIN: `http://localhost:${(deepgram.address() as AddressInfo).port}` }
   await startServer()
   prince = await register('Prince', 'setup-test')
   mallory = await register('Mallory', await invite(prince))
@@ -85,6 +135,9 @@ after(() => {
   for (const s of sockets) s.close()
   for (const child of children) child.kill()
   server.kill()
+  for (const ws of listening.clients) ws.terminate()
+  deepgram.closeAllConnections()
+  deepgram.close()
   rmSync(tmp, { recursive: true, force: true })
 })
 
@@ -219,10 +272,11 @@ interface Done {
 interface Opts {
   input?: string
   env?: Record<string, string>
+  ms?: number
 }
 // Runs talkline with a temp HOME, away from the keyboard unless env says otherwise.
-// A run still going after 20 s is killed, so a stuck CLI fails instead of hanging.
-function start(args: string[], { input = '', env = {} }: Opts = {}) {
+// A run still going after `ms` (20 s) is killed, so a stuck CLI fails instead of hanging.
+function start(args: string[], { input = '', env = {}, ms = 20_000 }: Opts = {}) {
   const child = spawn(process.execPath, ['talkline/cli.ts', ...args], {
     env: { PATH: process.env.PATH, HOME: tmp, TALKLINE_HOME: TL, TALKLINE_AWAY: 'always', ...env },
   })
@@ -233,7 +287,7 @@ function start(args: string[], { input = '', env = {} }: Opts = {}) {
   child.stderr.setEncoding('utf8').on('data', (d: string) => (stderr += d))
   child.stdin.on('error', () => {}) // a run may exit without reading its stdin
   child.stdin.end(input)
-  const timer = setTimeout(() => child.kill(), 20_000)
+  const timer = setTimeout(() => child.kill(), ms)
   const done = new Promise<Done>((resolve) =>
     child.on('close', (code) => {
       clearTimeout(timer)
@@ -488,16 +542,31 @@ test('pair: a helper link, the code to check, a resumed wait, Allow, and the hel
 })
 
 // doctor, with talkline's hooks in a settings file of its own.
-async function doctor() {
+async function doctor(env?: Record<string, string>) {
   const settings = path.join(mkdtempSync(path.join(tmp, 'claude-')), 'settings.json')
   assert.equal((await cli(['hooks', 'install', '--settings', settings])).code, 0)
-  return cli(['doctor', '--settings', settings])
+  return cli(['doctor', '--settings', settings], { env })
 }
 
 test('doctor passes for a paired helper', { timeout: 30_000 }, async () => {
   const r = await doctor()
   assert.equal(r.code, 0, r.stdout)
   assert.ok(!r.stdout.includes('Phase 0'), r.stdout)
+  assert.match(r.stdout, /^ok   voice: off/m)
+
+  // Voice: on with a key Deepgram takes; never the key itself, whatever happens.
+  const on = await doctor(VOICE)
+  assert.equal(on.code, 0, on.stdout)
+  assert.match(on.stdout, /^ok   voice: on \(DEEPGRAM_API_KEY\)$/m)
+  assert.ok(!on.stdout.includes('dg-test-key'), on.stdout)
+  const bad = await doctor({ ...VOICE, DEEPGRAM_API_KEY: 'dg-bad-key-7f3a' })
+  assert.equal(bad.code, 3, bad.stdout)
+  assert.match(bad.stdout, /^FAIL voice: Deepgram speak: Invalid credentials\.$/m)
+  assert.ok(!bad.stdout.includes('dg-bad-key-7f3a'), bad.stdout)
+  const torn = await doctor({ ...VOICE, DEEPGRAM_API_KEY: 'dg\nbad' })
+  assert.equal(torn.code, 3, torn.stdout)
+  assert.match(torn.stdout, /^FAIL voice: the Deepgram key in DEEPGRAM_API_KEY isn't one line/m)
+  assert.ok(!torn.stdout.includes('dg\nbad'), torn.stdout)
 })
 
 test('pair refuses a chat sealed by another key than its link pinned', { timeout: 30_000 }, async () => {
@@ -715,13 +784,17 @@ test('ask: a typed answer may carry punctuation, and a note only after no', { ti
 
 // Asks `q` urgently, ringing after 1 s; waits for the ring. Talk rings a helper's owner only for an
 // ask it names, 10 minutes apart: a ring at all shows talkline sent the ask's id.
-async function ringing(q: string, ...flags: string[]) {
+const ringing = (q: string, ...flags: string[]) => voiceRinging(q, {}, ...flags)
+// The same, for a talkline run with `opts`: env VOICE gives it the fake Deepgram.
+async function voiceRinging(q: string, opts: Opts, ...flags: string[]) {
   const rang = next<CallRing>(so, 'call:ring')
-  const a = await ask(q, '--urgent', '--ring-after', '1', ...flags)
+  const a = await asking(['ask', q, '--urgent', '--ring-after', '1', ...flags], `${q}\n`, opts)
   return { ...a, ring: await during(a, rang) }
 }
 
+// With no Deepgram key (these runs pass none), a ring picked up hangs up and posts the question again below.
 test('ask --urgent: rings while unread, re-posts after an answered ring, stays quiet once read', { timeout: 30_000 }, async () => {
+  mkdirSync(path.join(TL, 'deepgram')) // a key file that can't be read is no key too
   const { ring, ...a } = await ringing('Merge to master?', '--expires', '0.5')
   assert.equal(ring.convId, dm)
   const ended = next<{ id: string; reason: string }>(so, 'call:end', (e) => e.id === ring.id)
@@ -734,6 +807,7 @@ test('ask --urgent: rings while unread, re-posts after an answered ring, stays q
   assert.deepEqual([edit.m.id, edit.b.text], [a.m.id, 'Merge to master?\nSent again below'])
   await send({ text: `yes ${a.code}` })
   result(await a.done, 0, 'yes')
+  rmSync(path.join(TL, 'deepgram'), { recursive: true })
 
   await restart() // forgets the last ring, 10 minutes apart
   await reconnected() // the ring comes at about 1 s, which can beat the sockets back
@@ -771,6 +845,263 @@ test('ask: Ctrl+C hangs up the ring, marks the question Cancelled and exits 130'
   result(await a.done, 130, '')
   assert.equal((await ended).reason, 'cancelled')
   assert.equal((await closed).b.text, 'Reset the branch?\nCancelled: no answer needed')
+})
+
+// Prince's phone picks up `ring` as useCall's callee does: accepts, then offers with werift's default codecs (Opus
+// and PCMU, like an iPhone's offer; VP8 for video) and a mic that sends loud µ-law. It counts the loud frames it hears.
+async function pickUp(ring: CallRing) {
+  const pc = new RTCPeerConnection({ iceServers: [], iceStunGatherTimeout: 1, bundlePolicy: 'max-bundle' })
+  const mic = new MediaStreamTrack({ kind: 'audio' })
+  pc.addTrack(mic)
+  let loud = 0
+  let lastLoudAt = 0
+  let fluxAtFirstWord: number | undefined // the mic's loud batches Flux had when the phone first heard a word
+  const onAudio = (b: Buffer) => void (loudIn(b) && ((fluxAtFirstWord ??= dg.fluxLoud), loud++, (lastLoudAt = performance.now())))
+  pc.onTrack.subscribe((t) => t.onReceiveRtp.subscribe(({ payload }) => onAudio(payload)))
+  const answers: string[] = [] // talkline's answers' SDP
+  let local: Promise<unknown> = Promise.resolve() // the offer's SLD: talkline's answer can arrive first
+  const onSignal = ({ id, data }: { id: string; data: Signal }) => {
+    if (id !== ring.id) return
+    if (data.description) answers.push(data.description.sdp)
+    local = local.then(() => (data.description ? pc.setRemoteDescription(data.description) : data.candidate && pc.addIceCandidate(data.candidate))).catch(() => {})
+  }
+  so.on('call:signal', onSignal)
+  pc.onicecandidate = ({ candidate }) => candidate && so.emit('call:signal', { id: ring.id, data: { candidate: candidate.toJSON() } })
+  const offer = async () => {
+    const o = await pc.createOffer()
+    so.emit('call:signal', { id: ring.id, data: { description: { type: 'offer', sdp: o.sdp } } })
+    local = local.then(() => pc.setLocalDescription(o))
+  }
+  assert.equal((await so.timeout(5000).emitWithAck('call:accept', { id: ring.id })).id, ring.id)
+  await offer()
+  // Last: a failed pick-up must leave no timer running, or it holds the test run open.
+  let n = 0
+  const talk = setInterval(() => mic.writeRtp(new RtpPacket(new RtpHeader({ payloadType: 0, sequenceNumber: n & 0xffff, timestamp: n++ * 160 }), CLIP.subarray(0, 160))), 20)
+  return {
+    loud: () => loud,
+    quiet: () => performance.now() - lastLoudAt, // ms since the last loud frame
+    fluxAtFirstWord: () => fluxAtFirstWord,
+    // Camera on, as useCall's setVideo does: a video track, so a new offer. Resolves with talkline's answer to it.
+    camera: async () => {
+      const k = answers.length
+      pc.addTrack(new MediaStreamTrack({ kind: 'video' }))
+      await offer()
+      return until(() => answers[k])
+    },
+    close: () => (clearInterval(talk), so.off('call:signal', onSignal), pc.close().catch(() => {})),
+  }
+}
+type Phone = Awaited<ReturnType<typeof pickUp>>
+// A whole new 0.2 s clip has played and stopped since the phone had heard `n` loud frames. Take `n` before each
+// dg.turn, so a wait never passes in the gap before the next clip's first frame lands.
+const said = (phone: Phone, n: number) => until(() => phone.loud() >= n + 10 && phone.quiet() >= 700)
+// The disclosure and the question have both played.
+const opened = async (phone: Phone) => (await until(() => dg.spoke.length >= 2), said(phone, 10))
+// A line talkline had Deepgram speak. The two opening requests run at once and can land in either order.
+const spoke = (re: RegExp) => dg.spoke.find((x) => re.test(x.text))
+const words = (digits: string) => [...digits].map((d) => ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine'][Number(d)]).join(' ')
+const events = () => readFileSync(path.join(TL, 'events.jsonl'), 'utf8')
+const lastEvent = (ev: string) => events().split('\n').filter((l) => l.includes(`"ev":"${ev}"`)).at(-1) ?? ''
+// Each voice call: the server forgets the last ring (10 minutes apart), the fake Deepgram its last call.
+async function fresh() {
+  await restart()
+  await reconnected() // the ring comes at about 1 s, which can beat the sockets back
+  dg.reset()
+}
+
+test('voice: a spoken yes approves a low-risk ask, and a word at pick-up is not taken', { timeout: 30_000 }, async () => {
+  await fresh()
+  const { ring, ...a } = await voiceRinging('Deploy HTTPS://bot:notreal@ci.example.com/r/42?t=notreal to prod?', { env: VOICE }, '--risk', 'low', '--expires', '1')
+  const phone = await pickUp(ring)
+  try {
+    await during(a, until(() => dg.flux))
+    dg.turn('Yeah?') // before the question: shows in the note, settles nothing
+    await during(a, opened(phone))
+    assert.equal(a.child.exitCode, null, 'the ask should still be open')
+    assert.ok(spoke(/an AI helper, not a person/), JSON.stringify(dg.spoke))
+    assert.ok(spoke(/^Deploy ci\.example\.com to prod\? Say yes or no\.$/), JSON.stringify(dg.spoke))
+    assert.ok(!dg.spoke.some((x) => x.text.includes('notreal')))
+    for (const x of dg.spoke) {
+      assert.equal(x.auth, 'Token dg-test-key')
+      for (const q of ['encoding=mulaw', 'sample_rate=8000', 'container=none', 'mip_opt_out=true']) assert.ok(x.url.includes(q), x.url)
+    }
+    assert.equal(dg.fluxAuth, 'Token dg-test-key')
+    for (const q of ['model=flux-general-en', 'encoding=mulaw', 'mip_opt_out=true']) assert.ok(dg.fluxUrl.includes(q), dg.fluxUrl)
+    assert.ok(dg.fluxLoud > 0, "the phone's audio reached Flux")
+    assert.equal(phone.fluxAtFirstWord(), 0, "the phone's audio reached Flux before the disclosure")
+    assert.ok(phone.loud() >= 20, `${phone.loud()} loud frames`)
+
+    // Camera on mid-call: video is answered inactive, not rejected (port 0), which would stop the web app's video
+    // sender and fail its next replaceTrack.
+    const video = (await during(a, phone.camera())).split('\r\nm=').find((m) => m.startsWith('video')) ?? ''
+    assert.match(video, /^video 9 /, video)
+    assert.match(video, /\r\na=inactive\r\n/, video)
+
+    const ended = next<{ id: string; reason: string }>(so, 'call:end', (e) => e.id === ring.id)
+    const logged = fromAgent((b) => !!b.call)
+    const heard = fromAgent((b) => !!b.text?.startsWith('On the call'))
+    dg.turn('Yes.')
+    result(await a.done, 0, 'yes')
+    assert.equal((await ended).reason, 'hangup')
+    assert.ok(((await logged).b.call?.ms ?? 0) > 0)
+    assert.equal((await heard).b.text, 'On the call I heard: “Yeah?” (said over me, not taken), “Yes.”.')
+    assert.ok(spoke(/^Got it: yes\. Bye\.$/))
+    assert.match(lastEvent('answer'), /"ev":"answer","verdict":"yes","via":"voice"/)
+    assert.match(lastEvent('voice'), /"ev":"voice","result":"yes","connectMs":\d+,/)
+  } finally {
+    phone.close()
+  }
+})
+
+test('voice: high risk needs the voice code, which can come over two turns', { timeout: 30_000 }, async () => {
+  await fresh()
+  const { ring, ...a } = await voiceRinging('Drop the staging table?', { env: VOICE }, '--expires', '1')
+  const coded = fromAgent((b) => !!b.text?.startsWith('Voice code for this call: '))
+  const phone = await pickUp(ring)
+  try {
+    const shown = /^Voice code for this call: (\d{3}) (\d{3})\. Say yes and these six digits to approve\.$/.exec((await coded).b.text!)
+    assert.ok(shown, 'the voice code')
+    const digits = shown[1] + shown[2]
+    await during(a, opened(phone))
+    assert.ok(spoke(/^Drop the staging table\? To approve, open our chat, then say yes and the six digits shown there\. To deny, say no\.$/), JSON.stringify(dg.spoke))
+    assert.ok(!dg.spoke.some((x) => x.text.includes(digits) || x.text.includes(a.code)))
+
+    let n = phone.loud()
+    dg.turn('Yes.')
+    await during(a, said(phone, n))
+    assert.ok(spoke(/^I need the six digits shown in our chat too\. Say them one at a time\.$/))
+    assert.equal(a.child.exitCode, null, 'a bare yes should not approve')
+    dg.turn(`Yes, ${words(digits.slice(0, 3))}.`)
+    await pause(300)
+    dg.turn(words(digits.slice(3)))
+    result(await a.done, 0, 'yes')
+  } finally {
+    phone.close()
+  }
+})
+
+test('voice: unclear re-asks once, then the question comes back below; a yes with more after it is not taken', { timeout: 60_000 }, async () => {
+  await fresh()
+  const { ring, ...a } = await voiceRinging('Restart the workers?', { env: VOICE, ms: 40_000 }, '--risk', 'low', '--expires', '1')
+  const phone = await pickUp(ring)
+  try {
+    await during(a, opened(phone))
+    // A yes, then a next turn that starts and never ends ("but not on prod" over noise): cut off after 15 s, it
+    // reads as unclear, and its late end isn't taken either.
+    const n = phone.loud()
+    dg.turn('Yes.')
+    await pause(300)
+    dg.send({ type: 'TurnInfo', event: 'StartOfTurn', transcript: '' })
+    await pause(15_000)
+    await during(a, said(phone, n))
+    assert.ok(spoke(/^Sorry, I didn't catch that\. Please say yes or no\.$/))
+    assert.equal(a.child.exitCode, null, 'a yes before a cut-off turn should not approve')
+    dg.send({ type: 'TurnInfo', event: 'EndOfTurn', transcript: 'But not on prod.' })
+
+    const ended = next<{ id: string; reason: string }>(so, 'call:end', (e) => e.id === ring.id)
+    const logged = fromAgent((b) => !!b.call)
+    const heard = fromAgent((b) => !!b.text?.startsWith('On the call'))
+    const reposted = fromAgent((b) => b.text === a.text)
+    const moved = fromAgent(() => true, 'edit')
+    dg.turn('Yes.')
+    await pause(300)
+    dg.turn('Hmm.')
+    assert.equal((await ended).reason, 'hangup')
+    assert.ok(spoke(/^I'll post the question in our chat\. Bye\.$/))
+    assert.ok(((await logged).b.call?.ms ?? 0) > 0)
+    assert.equal((await heard).b.text, 'On the call I heard: “Yes.”, “But not on prod.” (said over me, not taken), “Yes.”, “Hmm.”.')
+    assert.notEqual((await reposted).m.id, a.m.id)
+    const edit = await moved
+    assert.deepEqual([edit.m.id, edit.b.text], [a.m.id, 'Restart the workers?\nSent again below'])
+    assert.match(lastEvent('voice'), /"result":"gave up"/)
+    await send({ text: `yes ${a.code}` })
+    result(await a.done, 0, 'yes')
+    assert.match(lastEvent('answer'), /"via":"typed"/)
+  } finally {
+    phone.close()
+  }
+})
+
+test('voice: Flux failing mid-call says goodbye and posts the question below', { timeout: 30_000 }, async () => {
+  await fresh()
+  const { ring, ...a } = await voiceRinging('Rotate the logs?', { env: VOICE }, '--risk', 'low', '--expires', '1')
+  const phone = await pickUp(ring)
+  try {
+    await during(a, opened(phone))
+    const ended = next<{ id: string; reason: string }>(so, 'call:end', (e) => e.id === ring.id)
+    const reposted = fromAgent((b) => b.text === a.text)
+    dg.fatal()
+    assert.equal((await ended).reason, 'hangup')
+    await reposted
+    assert.ok(spoke(/^I'll post the question in our chat\. Bye\.$/))
+    assert.match(lastEvent('voice'), /"result":"failed","stage":"call","error":"Deepgram listen: TEST fake failure"/)
+    await send({ text: `yes ${a.code}` })
+    result(await a.done, 0, 'yes')
+  } finally {
+    phone.close()
+  }
+})
+
+test('voice: Flux failing before the first word hangs up without one', { timeout: 30_000 }, async () => {
+  await fresh()
+  const { ring, ...a } = await voiceRinging('Prune the images?', { env: VOICE }, '--expires', '1')
+  const coded = fromAgent((b) => !!b.text?.startsWith('Voice code for this call: '))
+  const ended = next<{ id: string; reason: string }>(so, 'call:end', (e) => e.id === ring.id)
+  const reposted = fromAgent((b) => b.text === a.text)
+  const phone = await pickUp(ring)
+  try {
+    await during(a, coded) // posted as the call goes live, 0.5 s before the disclosure
+    dg.fatal()
+    assert.equal((await ended).reason, 'hangup')
+    await reposted
+    assert.equal(phone.loud(), 0, 'nothing said before the disclosure')
+    assert.ok(!spoke(/^I'll post the question/), JSON.stringify(dg.spoke))
+    assert.match(lastEvent('voice'), /"result":"failed","stage":"start","error":"Deepgram listen: TEST fake failure"/)
+    await send({ text: `yes ${a.code}` })
+    result(await a.done, 0, 'yes')
+  } finally {
+    phone.close()
+  }
+})
+
+test("voice: a key Deepgram refuses falls back to today's ring, and the key is never logged", { timeout: 30_000 }, async () => {
+  await fresh()
+  const { ring, ...a } = await voiceRinging('Purge the cache?', { env: { ...VOICE, DEEPGRAM_API_KEY: 'dg-bad-key-7f3a' } }, '--risk', 'low', '--expires', '1')
+  const ended = next<{ id: string; reason: string }>(so, 'call:end', (e) => e.id === ring.id)
+  const logged = fromAgent((b) => !!b.call)
+  const reposted = fromAgent((b) => b.text === a.text)
+  const moved = fromAgent(() => true, 'edit')
+  const phone = await pickUp(ring)
+  try {
+    assert.equal((await ended).reason, 'hangup')
+    assert.ok(((await logged).b.call?.ms ?? 0) > 0)
+    await reposted
+    assert.equal((await moved).b.text, 'Purge the cache?\nSent again below')
+    assert.equal(phone.loud(), 0)
+    assert.equal(dg.flux, undefined, 'no Flux connection')
+    assert.match(lastEvent('voice'), /"result":"failed","stage":"start","error":"Deepgram speak: Invalid credentials\."/)
+    assert.ok(!events().includes('dg-bad-key-7f3a'))
+    await send({ text: `yes ${a.code}` })
+    result(await a.done, 0, 'yes')
+  } finally {
+    phone.close()
+  }
+})
+
+test('voice verdict: a yes needs a yes-word and nothing else, a no wins, the code must match', () => {
+  const all = (want: string, digits: string | undefined, ...said: string[]) => {
+    for (const t of said) assert.equal(verdict(t, digits), want, JSON.stringify(t))
+  }
+  all('yes', undefined, 'Yes.', 'Yeah, go ahead.', 'Go ahead', 'Sure, do it please', 'Okay, yes.')
+  all('no', undefined, 'No.', "No, don't.", "Yes. No, wait, don't.", 'yeah no', "I don't know", 'I don’t know')
+  all('unclear', undefined, 'Okay.', 'Yes. Hmm.', 'Yes, but not on prod.', 'I guess', 'Maybe later', 'know', 'yes I know', '', 'Yes 4 8 2')
+  all('need code', '482913', 'Yes.')
+  all('yes', '482913', 'Yes, four eight two nine one three.', 'yes 482913', 'yes 482-913', 'Oh yes, 4 8 2 9 1 3', 'Yes, four eight two nine one three')
+  all('unclear', '482913', 'four eight two nine one three')
+  assert.equal(verdict('four eight two nine one three', '482913', true), 'yes')
+  all('wrong code', '482913', 'yes 482914', 'yes 4829130', 'Yes, four eight two')
+  all('no', '482913', 'No, 482913')
+  all('yes', '001234', 'yes zero oh one two three four')
 })
 
 test('ask: answers given while talkline was frozen or offline count once it runs again', { timeout: 30_000 }, async () => {

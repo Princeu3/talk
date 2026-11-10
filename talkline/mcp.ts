@@ -433,7 +433,7 @@ const TOOLS: Record<string, Tool> = {
       properties: {
         question: { type: 'string', minLength: 1, maxLength: 2000, description: 'A yes/no question, up to 2,000 characters' },
         detail: { type: 'string', maxLength: 6000, description: 'Shown under the question, up to 6,000 characters' },
-        risk: { type: 'string', enum: ['low', 'high'], description: "high (default): only 'yes <code>' approves. low: a swipe-reply yes or 👍 also counts" },
+        risk: { type: 'string', enum: ['low', 'high'], description: "high (default): only 'yes <code>' in the chat, or on its ring a spoken yes with that call's six digits, approves. low: a swipe-reply yes, a 👍 or a spoken yes also counts (with the six digits if there's a detail)" },
         urgent: { type: 'boolean', description: `Set only when your work is blocked on ${owner}'s answer: time-sensitive, and rings ${owner}'s phone once if unread after 3 minutes` },
         expires: { type: 'number', description: 'Minutes the question stays open: more than 0 and at most 14, default 10' },
         wait: { type: 'integer', minimum: 0, maximum: 110, description: 'Seconds to wait here, 0 to 110, default 110' },

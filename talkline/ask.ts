@@ -4,7 +4,8 @@ import { randomInt } from 'node:crypto'
 import { appendFileSync, existsSync, readFileSync } from 'node:fs'
 import { openMessage } from '../src/lib/crypto.ts'
 import type { Me, ReactionBody } from '../shared/types.ts'
-import { api, connect, dmKey, edit, file, gate, history, hhmm, log, react, read, send, type Paired } from './talk.ts'
+import { api, connect, deepgramKey, dmKey, edit, file, gate, history, hhmm, log, react, read, send, type Paired } from './talk.ts'
+import type { Outcome, Signal } from './voice.ts' // erased: werift isn't loaded here
 
 export type Verdict = 'yes' | 'no' | 'expired' | 'keyboard' | 'cancelled'
 
@@ -24,7 +25,7 @@ export interface AskOptions {
 
 interface Answer {
   verdict: Verdict
-  via?: 'typed' | 'swipe' | 'reaction'
+  via?: 'typed' | 'swipe' | 'reaction' | 'voice'
   id?: number // the answering message
   note?: string // what followed the code of a typed no
   at: number
@@ -99,6 +100,14 @@ export async function ask(p: Paired, o: AskOptions): Promise<{ verdict: Verdict;
   const askIds: number[] = [] // the ask message, then any re-post after a ring
   let rang = false
   let call: string | undefined
+  let up = 0 // when the owner picked up a voice call: voiced() ends and logs it
+  let talking: Promise<unknown> = Promise.resolve()
+  // A voice call's signals and end, caught from the ask's start and outside the queue: the offer can beat `accepted`
+  // through the queue, and a hang-up can land before converse listens.
+  // shortcut: signals kept until the ask closes (a few dozen a call); drop them per call if an ask ever rings twice.
+  const signals: { id: string; data: Signal }[] = []
+  let gone!: () => void
+  const hungUp = new Promise<void>((r) => (gone = r))
 
   const settle = (verdict: Verdict, via?: Answer['via'], id?: number, note?: string) => {
     if (answer) return // the first answer wins
@@ -168,12 +177,12 @@ export async function ask(p: Paired, o: AskOptions): Promise<{ verdict: Verdict;
   const remind = (kind: string, text: string) => {
     if (told.has(kind)) return
     told.add(kind)
-    // Queued, so the close waits for it. Its id goes in `asks`, so the Stop hook keeps a swipe at it from Claude.
-    queue(() =>
-      send(s, p, key, { text, reply: { id: askIds.at(-1)!, from: p.agent.id, preview: o.question.slice(0, 200) } }, { quiet: true })
-        .then((m) => (replies.push(m.id), record(m.id, code), o.posted?.(m.id))),
-    )
+    queue(() => under(text).then((m) => replies.push(m.id))) // queued, so the close waits for it
   }
+  // A quiet reply under the ask. Its id goes in `asks`, so the Stop hook keeps a swipe at it from Claude.
+  const under = (text: string) =>
+    send(s, p, key, { text, reply: { id: askIds.at(-1)!, from: p.agent.id, preview: o.question.slice(0, 200) } }, { quiet: true })
+      .then((m) => (record(m.id, code), o.posted?.(m.id), m))
   // A high-risk ask needs the code. Say so once when the owner swipes yes or taps 👍.
   const hint = () => remind('yes', `This one needs the code: reply yes ${code}`)
   const marked = new Set<number>()
@@ -204,20 +213,47 @@ export async function ask(p: Paired, o: AskOptions): Promise<{ verdict: Verdict;
     call = undefined
     await send(s, p, key, { call: { kind: 'audio', ms } }, { quiet: true, seen: ms > 0 }).catch(() => {})
   }
-  // The owner picked up: hang up and post the question again below the call. With no id yet, the
-  // call:start ack came too late or got lost; the id is still ours: Talk sends call:accepted only to the caller.
-  const accepted = async (id: string) => {
-    if (id !== call && (!rang || call)) return
-    call = id
-    s.emit('call:hangup', { id })
-    log('ring', { result: 'accepted' })
-    await callLog(1) // any ms > 0 reads as answered; we hang up at once
+  // The question again below the call, the old one pointing to it.
+  const below = async () => {
     if (answer) return
     post((await asking()).id)
     await edit(p, key, askIds.at(-2)!, `${o.question}\nSent again below`)
   }
+  // The owner picked up. With a Deepgram key, talkline talks (voice.ts); without one, it hangs up and posts the
+  // question again below the call. With no id yet, the call:start ack came too late or got lost; the id is still
+  // ours: Talk sends call:accepted only to the caller.
+  const accepted = async (id: string) => {
+    if (id !== call && (!rang || call)) return
+    call = id
+    log('ring', { result: 'accepted' })
+    const dg = !answer && deepgramKey()
+    // Outside `work`: a live call outlasts the close's 10 s wait. voiced() ends and logs the call itself.
+    if (dg) return void ((up = Date.now()), (talking = voiced(id, dg).catch((e: Error) => log('voice', { result: 'failed', error: e.message }))))
+    s.emit('call:hangup', { id })
+    await callLog(1) // any ms > 0 reads as answered; we hang up at once
+    await below()
+  }
+  const voiced = async (id: string, dg: string) => {
+    // The digits make the owner open the chat: on high risk, and whenever there is a detail the call never reads out.
+    const digits = o.risk === 'high' || o.detail ? String(randomInt(1_000_000)).padStart(6, '0') : undefined
+    const r: Outcome = await import('./voice.ts')
+      .then((v) =>
+        v.converse({
+          s, id, signals, ended: hungUp, key: dg, name: p.agent.name, question: o.question, detail: !!o.detail, digits, settled,
+          live: () => void (digits && remind('voice', `Voice code for this call: ${digits.slice(0, 3)} ${digits.slice(3)}. Say yes and these six digits to approve.`)),
+          answer: (v) => settle(v, 'voice'),
+        }),
+      )
+      .catch((e: Error): Outcome => ({ result: 'failed', stage: 'start', error: `voice did not load: ${e.message}`, heard: [] }))
+    s.emit('call:hangup', { id })
+    log('voice', { result: r.result, stage: r.stage, error: r.error, connectMs: r.connectMs, speakMs: r.speakMs, ms: Date.now() - up, turns: r.heard.length })
+    await callLog(Date.now() - up) // clears `call`, so the close won't log it twice
+    const heard = r.heard.slice(0, 6).map((h) => `“${h.text.slice(0, 200)}”${h.taken ? '' : ' (said over me, not taken)'}`).join(', ')
+    if (r.speakMs !== undefined) await under(`On the call I heard: ${heard || 'nothing'}.`).catch(() => {})
+    await below().catch(() => {})
+  }
   const ended = async (id: string, reason: string) => {
-    if (id !== call) return
+    if (id !== call || up) return // a voice call ends and logs itself
     log('ring', { result: reason })
     await callLog(0)
   }
@@ -228,6 +264,11 @@ export async function ask(p: Paired, o: AskOptions): Promise<{ verdict: Verdict;
   s.on('connect', check)
   s.on('call:accepted', (c: { id: string }) => queue(() => accepted(c.id)))
   s.on('call:end', (c: { id: string; reason: string }) => queue(() => ended(c.id, c.reason)))
+  s.on('call:signal', (x: { id: string; data: Signal }) => signals.push(x))
+  s.on('call:end', (x: { id: string }) => x.id === call && gone())
+  // A voice call outlives a socket drop: rejoin, or Talk ends it `lost` in 30 s. Talk sends call:end only to connected
+  // sockets, so the rejoin's error is how a call that ended meanwhile shows.
+  s.on('connect', () => up && call && s.emit('call:rejoin', { id: call }, (r?: { error?: string }) => void (r?.error && gone())))
 
   const timers: NodeJS.Timeout[] = []
   try {
@@ -241,14 +282,14 @@ export async function ask(p: Paired, o: AskOptions): Promise<{ verdict: Verdict;
     const { verdict, via, id, note, at } = await settled
     cancels.delete(cancel) // a second signal exits at once
     timers.forEach(clearTimeout) // clears the interval too
-    // The close waits for a ring step (up to 10 s), so no call outlives the ask, but no longer: with Talk stalled,
-    // queued reminders and ❓ could take minutes, and the permission hook must close its question within 600 s.
+    // The close waits for a ring step or a voice call (up to 10 s), so no call outlives the ask, but no longer: with
+    // Talk stalled, queued reminders and ❓ could take minutes, and the permission hook must close its question within 600 s.
     // A signal leaves 1 s.
-    if (verdict !== 'cancelled') await Promise.race([work, new Promise((r) => timers.push(setTimeout(r, 10_000)))])
+    if (verdict !== 'cancelled') await Promise.race([Promise.all([work, talking]), new Promise((r) => timers.push(setTimeout(r, 10_000)))])
     if (call) {
       s.emit('call:hangup', { id: call })
       log('ring', { result: 'cancelled' })
-      await callLog(0)
+      await callLog(up && Date.now() - up) // an answered voice call logs its time, not "No answer"
     }
     const status =
       verdict === 'yes' ? `Approved ${hhmm(at)}`
