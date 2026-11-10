@@ -21,7 +21,12 @@ struct TalkApp: App {
       }
       .environment(calls)
       .onAppear { if let talk { start(talk) } }
-      .onChange(of: phase, initial: true) { _, p in talk?.setActive(p == .active) }
+      .onChange(of: phase, initial: true) { _, p in
+        // A launch before the first unlock after a restart can't read the keychain, so it looks signed out.
+        // Read it again once the phone is open, instead of asking for the passphrase.
+        if p == .active, talk == nil, let account = Vault.load() { signedIn(account) }
+        talk?.setActive(p == .active)
+      }
       // Calling back from Recents or Siri. A group call's handle is the chat id.
       .onContinueUserActivity("INStartCallIntent") { activity in
         guard let talk, let intent = activity.interaction?.intent as? INStartCallIntent,
