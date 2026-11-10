@@ -11,18 +11,25 @@ const RELAY = `http://localhost:${PORT}`
 const { privateKey, publicKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' })
 const TOKEN = 'ab'.repeat(32)
 const GONE = 'cd'.repeat(32)
+const BYE = '12'.repeat(32)
 const id = () => crypto.randomUUID()
 
 const got: { headers: IncomingHttpHeaders; body: Record<string, unknown> }[] = []
+let hold = 0 // requests to leave unanswered; the last one resets the connection under them all
+let sessions = 0
 const apple = createServer((req, res) => {
+  if (hold > 0) return void (--hold || req.stream.session!.socket.resetAndDestroy())
   let body = ''
   req.on('data', (c) => (body += c))
   req.on('end', () => {
     got.push({ headers: req.headers, body: JSON.parse(body) })
     if (req.headers[':path'] === `/3/device/${GONE}`) return void res.writeHead(410).end(JSON.stringify({ reason: 'Unregistered' }))
     res.writeHead(200).end()
+    // APNs may close a connection with an error code right after it answers.
+    if (req.headers[':path'] === `/3/device/${BYE}`) req.stream.session!.goaway(2, req.stream.id)
   })
 })
+apple.on('session', () => sessions++)
 let relay: ChildProcess
 
 before(async () => {
@@ -105,4 +112,24 @@ test('relay signs and shapes pushes, refuses anything else', async () => {
 
   assert.match(await (await fetch(`${RELAY}/privacy`)).text(), /end-to-end|encrypted/)
   assert.match(await (await fetch(`${RELAY}/terms`)).text(), /zero tolerance.*24 hours/is)
+})
+
+test('a push APNs answered is not sent again when the connection then fails', async () => {
+  const before = got.length
+  assert.equal((await push({ token: BYE, env: 'sandbox', type: 'message', convId: id(), messageId: 1 })).status, 200)
+  assert.equal(got.length - before, 1)
+})
+
+test('pushes cut off by a reset connection go out again on a new one', async () => {
+  const token = 'ef'.repeat(32) // not TOKEN: the test above used up its rate limit
+  const convId = id()
+  assert.equal((await push({ token, env: 'production', type: 'message', convId, messageId: 100 })).status, 200)
+  const opened = sessions
+
+  // As seen in production: the cached connection dies with three pushes in flight on it.
+  hold = 3
+  const codes = await Promise.all([101, 102, 103].map(async (messageId) => (await push({ token, env: 'production', type: 'message', convId, messageId })).status))
+  assert.deepEqual(codes, [200, 200, 200])
+  assert.equal(sessions - opened, 1) // one new connection for the whole burst
+  assert.deepEqual(got.slice(-3).map((g) => g.body.messageId).sort(), [101, 102, 103])
 })
