@@ -2,13 +2,13 @@
 
 How to put the next Talk build on TestFlight from `master`. It is written for Abhishek, the Account Holder of team `34XFNGD2MY`, and for his Claude. Abhishek or Prince (Admin) does step 1. Abhishek does the Xcode sign-in in step 2 and the App Store Connect parts of step 5, since they need his account. Claude can do the rest. Prince's Mac can stand in for steps 2 and 4: see [From Prince's Mac](#from-princes-mac).
 
-State on 2026-11-08:
+State on 2026-11-10:
 
 - The App Store Connect record "Talk: Private Calls & Chat" (app id 6828441266, bundle ID `com.abhishekshekhar.talk`).
 - App IDs `com.abhishekshekhar.talk` (Push Notifications, Communication Notifications), `com.abhishekshekhar.talk.notifications` and `com.abhishekshekhar.talk.share` (no capabilities).
 - The team has one registered iPhone. Keep at least one: Xcode signs the archive with a development profile, which needs a device.
 - The push relay sends for team `34XFNGD2MY` and bundle `com.abhishekshekhar.talk`.
-- Builds 1 to 7 are on TestFlight (6 and 7 are version 1.1). Builds 8 to 10 are version 1.1.1 (2026-11-07), since 1.1 was approved and its train closed. Build 9 adds the speaker button in calls, build 10 Picture in Picture for video calls. Build 11 is version 1.1.2 (2026-11-08), since 1.1.1 was approved: it fixes a Picture in Picture window stuck on a frozen frame, the socket every launch lost, and declines made before the socket connected (PR #2). Builds 1 to 4 were recorded as using no non-exempt encryption. The app sets no `ITSAppUsesNonExemptEncryption` key: with YES and no code, the upload is refused with error 90592, and App Store Connect only issues an `ITSEncryptionExportComplianceCode` after it reviews an uploaded export document (the "App Encryption Documentation" dialog under App Information is the gate in front of that upload, and saves nothing on its own). With the key absent, TestFlight shows each new build as "Missing Compliance" and asks the questions per build instead. Build 5 went through that way on 2026-11-01.
+- Builds 1 to 7 are on TestFlight (6 and 7 are version 1.1). Builds 8 to 10 are version 1.1.1 (2026-11-07), since 1.1 was approved and its train closed. Build 9 adds the speaker button in calls, build 10 Picture in Picture for video calls. Build 11 is version 1.1.2 (2026-11-08), since 1.1.1 was approved: it fixes a Picture in Picture window stuck on a frozen frame, the socket every launch lost, and declines made before the socket connected (PR #2). Build 12 (1.1.2, 2026-11-10) also stops the sign-in screen that could show after a phone restart (PR #10). Builds 1 to 4 were recorded as using no non-exempt encryption. The app sets no `ITSAppUsesNonExemptEncryption` key: with YES and no code, the upload is refused with error 90592, and App Store Connect only issues an `ITSEncryptionExportComplianceCode` after it reviews an uploaded export document (the "App Encryption Documentation" dialog under App Information is the gate in front of that upload, and saves nothing on its own). With the key absent, TestFlight shows each new build as "Missing Compliance" and asks the questions per build instead. Build 5 went through that way on 2026-11-01.
 - Version 1.1.1 with build 10 was approved and released on 2026-11-08 (set to release once approved), with the Picture in Picture freeze that build 11 fixes. Picture in Picture can't run in the Simulator, so build 11 needs a test on two phones before 1.1.2 goes to review. Swapping in a newer build for a version in review means pulling the submission (Remove from Review), attaching the build, and submitting again, which puts it at the back of the queue.
 
 ## 1. Encryption questions (Abhishek or Prince, per build)
@@ -33,7 +33,7 @@ The build then reads "Ready to Submit".
 
 In `ios/project.yml`:
 
-- Set `CURRENT_PROJECT_VERSION` one above the higher of its value on `master` and the newest build under App Store Connect → TestFlight. App Store Connect refuses a number it has seen. On 2026-11-08 build 11 went up, so the next is 12.
+- Set `CURRENT_PROJECT_VERSION` one above the higher of its value on `master` and the newest build under App Store Connect → TestFlight. App Store Connect refuses a number it has seen. On 2026-11-10 build 12 went up, so the next is 13.
 
 ## 4. Archive and upload
 
