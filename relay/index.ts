@@ -55,7 +55,8 @@ function apns(origin: string, token: string, headers: Record<string, string>, bo
     req.on('response', (h) => void (status = Number(h[':status'])))
     req.on('data', (c: string) => void (data += c))
     req.on('end', () => resolve({ status, reason: data ? (JSON.parse(data) as { reason?: string }).reason : undefined }))
-    req.on('error', reject)
+    // Once APNs has answered, a connection error after it must not make the caller send the push again.
+    req.on('error', (e) => (status ? resolve({ status }) : reject(e)))
     req.end(JSON.stringify(body))
   })
 }
@@ -165,7 +166,12 @@ createServer(async (req, res) => {
   if (n > PER_MINUTE) return send(429, { error: 'slow down' })
 
   try {
-    const r = await apns(ORIGIN[p.env], p.token, ...built)
+    const push = () => apns(ORIGIN[p.env], p.token, ...built)
+    // A reset connection fails every push in flight on it; session() then opens a new one, so try once more.
+    const r = await push().catch((e: Error) => {
+      console.error('[apns] retrying:', e.message)
+      return push()
+    })
     if (r.status === 200) return send(200, { ok: true })
     // Gone or wrong for this app: the server should forget the token.
     if (r.status === 410 || r.reason === 'BadDeviceToken' || r.reason === 'DeviceTokenNotForTopic') return send(410, { error: r.reason })
